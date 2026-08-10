@@ -82,8 +82,12 @@ async def run_single_cycle(
 ):
     is_rest, time_str = get_msk_status()
     profile = os.getenv("TRADING_PROFILE", "BALANCED")
+    exchange_name = "NADO DEX INK L2"
+    if hasattr(trading_service, "exchange"):
+        exchange_name = "KRAKEN FUTURES"
+    
     print(f"\n" + "="*65)
-    print(f"🚀 ТОРГОВЫЙ ЦИКЛ №{cycle_number} (NADO DEX INK L2) [{time_str}]")
+    print(f"🚀 ТОРГОВЫЙ ЦИКЛ №{cycle_number} ({exchange_name}) [{time_str}]")
     print(f"⚙️ ПРОФИЛЬ РИСКА: {profile} | 📐 MULTI-TIMEFRAME (15m + 1H + 4H) АКТИВЕН")
     print("="*65)
 
@@ -154,13 +158,8 @@ async def run_single_cycle(
         if scanner_blocked:
             print(f"🛑 Scanner Agent пропустил {symbol}. Причина: {scanner_reason}")
             logger.info(f"[System_Core] Пропуск {symbol}. Причина: {scanner_reason}")
-            if not force_scan:
-                # В автоматическом режиме — пропускаем актив
-                scan_summaries.append({"symbol": symbol, "status": "⛔ СКАН ЗАБЛОКИРОВАН", "reason": scanner_reason})
-                continue
-            else:
-                # В ручном /scan — продолжаем анализ, несмотря на блокировку сканера
-                print(f"⚡ [ForceScan] Продолжаем полный анализ {symbol} несмотря на блокировку сканера.")
+            scan_summaries.append({"symbol": symbol, "status": "⛔ СКАН ЗАБЛОКИРОВАН", "reason": scanner_reason})
+            continue
 
         # СТАДИЯ 3: СИНДИКАТ АНАЛИТИКОВ
         print(f"[Stage 3] Запуск синдиката аналитиков для {symbol}...")
@@ -229,11 +228,8 @@ async def run_single_cycle(
         }
         scan_summaries.append(asset_summary)
 
-        if (decision in ["LONG", "SHORT"] and conviction >= 80) or force_scan:
-            if decision in ["LONG", "SHORT"] and conviction >= 80:
-                print(f"🚀 НАЙДЕН СИГНАЛ! Генерация Telegram-уведомления [{symbol}] ({decision}, Уверенность {conviction}%)...")
-            else:
-                print(f"ℹ️ [ForceScan] Ручной режим: отправка Telegram-уведомления [{symbol}] ({decision})...")
+        if decision in ["LONG", "SHORT"] and conviction >= 80:
+            print(f"🚀 НАЙДЕН СИГНАЛ! Генерация Telegram-уведомления [{symbol}] ({decision}, Уверенность {conviction}%)...")
             
             final_trade_data = {
                 "symbol": symbol,
@@ -314,14 +310,14 @@ async def main():
     tg_sender = TelegramService()
     trading_engine = os.getenv("TRADING_ENGINE", "PAPER").upper()
     if trading_engine == "KRAKEN":
-        trading_service = KrakenTradingService()
         print("🔴 ВНИМАНИЕ: АКТИВИРОВАН БОЕВОЙ РЕЖИМ (KRAKEN FUTURES)!")
+        trading_service = KrakenTradingService()
     elif trading_engine == "NADO" or os.getenv("LIVE_TRADING_ENABLED", "False").lower() == "true":
-        trading_service = LiveTradingService()
         print("🔴 ВНИМАНИЕ: АКТИВИРОВАН БОЕВОЙ РЕЖИМ (NADO DEX)!")
+        trading_service = LiveTradingService()
     else:
-        trading_service = PaperTradingService()
         print("🟢 Режим симуляции (Paper Trading) активен.")
+        trading_service = PaperTradingService()
     
     universe_agent = UniverseAgent(logger, llm_client)
     scanner_agent = ScannerAgent(logger, llm_client)
@@ -367,38 +363,43 @@ async def main():
 
     cycle_number = 1
 
-    if run_once:
-        print("⚡ Одиночный запуск торгового цикла (--once).")
-        await run_single_cycle(
-            cycle_number, logger, fetcher, tg_sender, trading_service,
-            universe_agent, scanner_agent, candle_agent, ob_agent,
-            oi_agent, news_agent, indicator_agent, ceo_agent,
-            risk_manager, telegram_agent, reflector_agent, memory_manager
-        )
-    else:
-        is_rest, time_str = get_msk_status()
-        profile = os.getenv("TRADING_PROFILE", "BALANCED")
-        print(f"⏰ Режим автономного сканирования активирован! [Текущее время: {time_str}]")
-        print(f"🔄 Интервал сканирования: каждые {scan_interval_min} минут ({interval_seconds} сек).")
-        print(f"⚙️ Профиль риска: {profile} | 📐 Multi-Timeframe (15m + 1H + 4H) ON")
-        print("🌙 График отдыха: с 19:00 до 07:00 МСК (в этот период бот спит).")
-        print("💡 Для остановки нажмите Ctrl+C в любой момент.\n")
-        
-        asyncio.create_task(bot_listener.start_listening())
+    try:
+        if run_once:
+            print("⚡ Одиночный запуск торгового цикла (--once).")
+            await run_single_cycle(
+                cycle_number, logger, fetcher, tg_sender, trading_service,
+                universe_agent, scanner_agent, candle_agent, ob_agent,
+                oi_agent, news_agent, indicator_agent, ceo_agent,
+                risk_manager, telegram_agent, reflector_agent, memory_manager
+            )
+        else:
+            is_rest, time_str = get_msk_status()
+            profile = os.getenv("TRADING_PROFILE", "BALANCED")
+            print(f"⏰ Режим автономного сканирования активирован! [Текущее время: {time_str}]")
+            print(f"🔄 Интервал сканирования: каждые {scan_interval_min} минут ({interval_seconds} сек).")
+            print(f"⚙️ Профиль риска: {profile} | 📐 Multi-Timeframe (15m + 1H + 4H) ON")
+            print("🌙 График отдыха: с 19:00 до 07:00 МСК (в этот период бот спит).")
+            print("💡 Для остановки нажмите Ctrl+C в любой момент.\n")
+            
+            asyncio.create_task(bot_listener.start_listening())
 
-        try:
-            while True:
-                await run_single_cycle(
-                    cycle_number, logger, fetcher, tg_sender, trading_service,
-                    universe_agent, scanner_agent, candle_agent, ob_agent,
-                    oi_agent, news_agent, indicator_agent, ceo_agent,
-                    risk_manager, telegram_agent, reflector_agent, memory_manager
-                )
-                cycle_number += 1
-                print(f"\n⏳ Ожидание {scan_interval_min} мин. до следующего цикла №{cycle_number}...")
-                await asyncio.sleep(interval_seconds)
-        except (KeyboardInterrupt, asyncio.CancelledError):
-            print("\n🛑 Автономный торговый бот остановлен.")
+            try:
+                while True:
+                    await run_single_cycle(
+                        cycle_number, logger, fetcher, tg_sender, trading_service,
+                        universe_agent, scanner_agent, candle_agent, ob_agent,
+                        oi_agent, news_agent, indicator_agent, ceo_agent,
+                        risk_manager, telegram_agent, reflector_agent, memory_manager
+                    )
+                    cycle_number += 1
+                    print(f"\n⏳ Ожидание {scan_interval_min} мин. до следующего цикла №{cycle_number}...")
+                    await asyncio.sleep(interval_seconds)
+            except (KeyboardInterrupt, asyncio.CancelledError):
+                print("\n🛑 Автономный торговый бот остановлен.")
+    finally:
+        if hasattr(trading_service, "_close_exchange_async"):
+            await trading_service._close_exchange_async()
+            print("🧹 [System] Ресурсы соединения с биржей успешно очищены.")
 
 if __name__ == "__main__":
     asyncio.run(main())

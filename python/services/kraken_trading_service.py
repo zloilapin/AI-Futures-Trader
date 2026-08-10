@@ -53,14 +53,23 @@ class KrakenTradingService:
             try:
                 # Fetch balance
                 balance = await self.exchange.fetch_balance()
-                # Assuming USD is the main margin asset
-                if 'USD' in balance:
-                    total_balance = float(balance['USD'].get('total', 0.0))
-                else:
-                    # Fallback to sum of all or free
-                    total_balance = float(balance.get('total', {}).get('USD', 0.0))
                 
-                print(f"💰 [KrakenTradingService] Баланс аккаунта Kraken Futures: ${total_balance:,.2f}")
+                # Aggregate USD, USDC, and USDT for total margin available
+                total_balance = 0.0
+                
+                # Method 1: standard ccxt balance objects
+                for asset in ['USD', 'USDC', 'USDT']:
+                    if asset in balance:
+                        total_balance += float(balance[asset].get('total', 0.0))
+                
+                # Method 2: fallback to 'total' dictionary if ccxt structures it differently
+                if total_balance == 0.0 and 'total' in balance:
+                    tot_dict = balance['total']
+                    total_balance += float(tot_dict.get('USD', 0.0))
+                    total_balance += float(tot_dict.get('USDC', 0.0))
+                    total_balance += float(tot_dict.get('USDT', 0.0))
+                
+                print(f"💰 [KrakenTradingService] Баланс аккаунта Kraken Futures (USD+USDC+USDT): ${total_balance:,.2f}")
             except Exception as e:
                 print(f"⚠️ [KrakenTradingService] Ошибка запроса баланса: {e}")
                 # Fallback so bot doesn't crash during debugging
