@@ -29,6 +29,7 @@ from services.market_data_service import MarketDataService
 from services.telegram_service import TelegramService
 from services.paper_trading_service import PaperTradingService
 from services.live_trading_service import LiveTradingService
+from services.kraken_trading_service import KrakenTradingService
 from services.telegram_bot_listener import TelegramBotListener
 
 
@@ -311,9 +312,13 @@ async def main():
     llm_client = LLMClient()
     fetcher = MarketDataService()
     tg_sender = TelegramService()
-    if os.getenv("LIVE_TRADING_ENABLED", "False").lower() == "true":
+    trading_engine = os.getenv("TRADING_ENGINE", "PAPER").upper()
+    if trading_engine == "KRAKEN":
+        trading_service = KrakenTradingService()
+        print("🔴 ВНИМАНИЕ: АКТИВИРОВАН БОЕВОЙ РЕЖИМ (KRAKEN FUTURES)!")
+    elif trading_engine == "NADO" or os.getenv("LIVE_TRADING_ENABLED", "False").lower() == "true":
         trading_service = LiveTradingService()
-        print("🔴 ВНИМАНИЕ: АКТИВИРОВАН БОЕВОЙ РЕЖИМ (LIVE TRADING)!")
+        print("🔴 ВНИМАНИЕ: АКТИВИРОВАН БОЕВОЙ РЕЖИМ (NADO DEX)!")
     else:
         trading_service = PaperTradingService()
         print("🟢 Режим симуляции (Paper Trading) активен.")

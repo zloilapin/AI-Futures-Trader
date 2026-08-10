@@ -25,10 +25,10 @@ class NewsAgent(BaseAgent):
             "2. Sentiment Synthesis: Combine index score with news sentiment data.\n\n"
             "Output JSON strictly matching this schema:\n"
             "{\n"
-            '  "signal": "BULLISH" | "BEARISH" | "NEUTRAL",\n'
-            '  "confidence": <int 1-100>,\n'
+            '  "reasoning": "<step-by-step institutional sentiment breakdown of Fear & Greed and social backdrop>",\n'
             '  "sentiment_classification": "<e.g., Contrarian Bullish on Extreme Fear (28/100)>",\n'
-            '  "reasoning": "<institutional sentiment breakdown of Fear & Greed and social backdrop>"\n'
+            '  "confidence": <int 1-100>,\n'
+            '  "signal": "BULLISH" | "BEARISH" | "NEUTRAL"\n'
             "}"
         )
 

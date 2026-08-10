@@ -27,10 +27,10 @@ class OIFundingAgent(BaseAgent):
             "   - Price Down + OI Down: Long liquidation / weak drop.\n\n"
             "Output JSON strictly matching this schema:\n"
             "{\n"
-            '  "signal": "BULLISH" | "BEARISH" | "NEUTRAL",\n'
-            '  "confidence": <int 1-100>,\n'
+            '  "reasoning": "<step-by-step institutional analysis of Open Interest expansion and funding rate bias>",\n'
             '  "squeeze_risk": "<e.g., High Short Squeeze potential due to negative funding (-0.012%)>",\n'
-            '  "reasoning": "<institutional analysis of Open Interest expansion and funding rate bias>"\n'
+            '  "confidence": <int 1-100>,\n'
+            '  "signal": "BULLISH" | "BEARISH" | "NEUTRAL"\n'
             "}"
         )
 

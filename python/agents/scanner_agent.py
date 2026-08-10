@@ -22,9 +22,9 @@ class ScannerAgent(BaseAgent):
             "3. Healthy Market: If 'atr_pct' >= 0.15% AND 'spread_pct' <= 0.1%, APPROVE DEEP ANALYSIS (proceed: true, status: 'READY').\n\n"
             "Output JSON strictly matching this schema:\n"
             "{\n"
-            '  "proceed": true | false,\n'
+            '  "reasoning": "<step-by-step concise breakdown of ATR volatility and spread status>",\n'
             '  "status": "READY" | "MARKET_CHOPPY" | "SPREAD_TOO_HIGH" | "LOW_LIQUIDITY",\n'
-            '  "reasoning": "<concise breakdown of ATR volatility and spread status>"\n'
+            '  "proceed": true | false\n'
             "}"
         )
 

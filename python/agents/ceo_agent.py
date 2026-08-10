@@ -32,11 +32,11 @@ class CEOAgent(BaseAgent):
             "   - If the current market setup violates an actionable rule in memory, you MUST issue 'HOLD' immediately, regardless of subordinate votes.\n\n"
             "Output JSON strictly matching this schema:\n"
             "{\n"
-            '  "decision": "LONG" | "SHORT" | "HOLD",\n'
-            '  "conviction": <int 1-100>,\n'
+            '  "reasoning": "<step-by-step executive summary synthesizing analysts\' reports and MTF alignment>",\n'
             '  "mtf_validation": "<e.g., 1H/4H Trend Alignment VERIFIED>",\n'
             '  "consensus_summary": "<e.g., 4/5 Agents Bullish + MTF Alignment>",\n'
-            '  "reasoning": "<executive summary synthesizing analysts\' reports and MTF alignment>"\n'
+            '  "conviction": <int 1-100>,\n'
+            '  "decision": "LONG" | "SHORT" | "HOLD"\n'
             "}"
         )
 

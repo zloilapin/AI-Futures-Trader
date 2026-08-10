@@ -22,10 +22,10 @@ class CandleAgent(BaseAgent):
             "4. Volume Confirmation: Verify if candle moves are backed by expanding volume or low-volume fakeouts.\n\n"
             "Output JSON strictly matching this schema:\n"
             "{\n"
-            '  "signal": "BULLISH" | "BEARISH" | "NEUTRAL",\n'
-            '  "confidence": <int 1-100>,\n'
+            '  "reasoning": "<step-by-step institutional analysis of price action and wicks>",\n'
             '  "pattern_detected": "<e.g., Bullish Engulfing / Pinbar Rejection / Range Chop>",\n'
-            '  "reasoning": "<concise institutional analysis of price action and wicks>"\n'
+            '  "confidence": <int 1-100>,\n'
+            '  "signal": "BULLISH" | "BEARISH" | "NEUTRAL"\n'
             "}"
         )
 

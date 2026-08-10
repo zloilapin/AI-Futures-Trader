@@ -21,10 +21,10 @@ class ReflectorAgent(BaseAgent):
             "Identify the root cause of the failure or success, and extract a concise, actionable trading lesson.\n\n"
             "Output JSON strictly matching this schema:\n"
             "{\n"
-            '  "trade_outcome": "WIN" | "LOSS",\n'
+            '  "reasoning": "<step-by-step brief post-mortem breakdown>",\n'
             '  "root_cause": "<e.g., Entered LONG into 4H bear trend / RSI divergence fakeout>",\n'
             '  "actionable_rule": "<e.g., WARNING: Do not enter LONG when 4H trend is BEARISH and RSI > 60>",\n'
-            '  "reasoning": "<brief post-mortem breakdown>"\n'
+            '  "trade_outcome": "WIN" | "LOSS"\n'
             "}"
         )
 

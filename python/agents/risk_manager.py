@@ -127,14 +127,14 @@ class RiskManager(BaseAgent):
             "4. Otherwise, set approved: true and exactly copy the provided calculated risk metrics into your output JSON.\n"
             "Output JSON strictly matching this schema:\n"
             "{\n"
-            '  "approved": true | false,\n'
+            '  "reasoning": "<step-by-step detailed risk reasoning, acknowledging the ATR-based math>",\n'
             '  "position_size_usd": <float>,\n'
             '  "position_size_pct": <float>,\n'
             '  "entry_price": <float>,\n'
             '  "take_profit_price": <float>,\n'
             '  "stop_loss_price": <float>,\n'
             '  "risk_reward_ratio": <float>,\n'
-            '  "reasoning": "<detailed risk reasoning, acknowledging the ATR-based math>"\n'
+            '  "approved": true | false\n'
             "}"
         )
         

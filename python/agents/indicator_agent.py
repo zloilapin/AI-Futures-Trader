@@ -23,10 +23,10 @@ class IndicatorAgent(BaseAgent):
             "4. Confluence Scoring: Require agreement between at least 2 out of 3 indicator signals for strong confidence (>75%).\n\n"
             "Output JSON strictly matching this schema:\n"
             "{\n"
-            '  "signal": "BULLISH" | "BEARISH" | "NEUTRAL",\n'
-            '  "confidence": <int 1-100>,\n'
+            '  "reasoning": "<step-by-step quantitative breakdown of RSI, EMA, and MACD indicators>",\n'
             '  "indicator_confluence": "<e.g., Bullish MACD Crossover + Price above EMA-20>",\n'
-            '  "reasoning": "<clear quantitative breakdown of RSI, EMA, and MACD indicators>"\n'
+            '  "confidence": <int 1-100>,\n'
+            '  "signal": "BULLISH" | "BEARISH" | "NEUTRAL"\n'
             "}"
         )
 

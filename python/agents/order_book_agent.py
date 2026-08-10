@@ -22,10 +22,10 @@ class OrderBookAgent(BaseAgent):
             "4. Path of Least Resistance: Determine where price will move based on orderbook imbalance.\n\n"
             "Output JSON strictly matching this schema:\n"
             "{\n"
-            '  "signal": "BULLISH" | "BEARISH" | "NEUTRAL",\n'
-            '  "confidence": <int 1-100>,\n'
+            '  "reasoning": "<step-by-step institutional breakdown of liquidity walls, bid/ask depth, and spread>",\n'
             '  "imbalance_verdict": "<e.g., Bid Imbalance + Strong Buy Wall at $63,500>",\n'
-            '  "reasoning": "<institutional breakdown of liquidity walls, bid/ask depth, and spread>"\n'
+            '  "confidence": <int 1-100>,\n'
+            '  "signal": "BULLISH" | "BEARISH" | "NEUTRAL"\n'
             "}"
         )
 
