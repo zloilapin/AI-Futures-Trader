@@ -17,14 +17,14 @@ class RiskManager(BaseAgent):
     def _get_profile_rules(self) -> tuple[float, float, float, float, int]:
         profile = os.getenv("TRADING_PROFILE", "BALANCED").upper()
         if profile == "AGGRESSIVE":
-            # Risk 5% per trade, SL 1.5x ATR (min 1.2%), TP 4.5x ATR (RR 1:3), Max pos 50% of portfolio
-            return (0.05, 1.5, 4.5, 0.50, 70)
+            # Risk 5% per trade, SL 1.5x ATR (min 1.2%), TP 4.5x ATR (RR 1:3), Max pos 10% of portfolio
+            return (0.05, 1.5, 4.5, 0.10, 70)
         elif profile == "CONSERVATIVE":
             # Risk 0.5% per trade, SL 2.0x ATR, TP 3.0x ATR, Max pos 10%
             return (0.005, 2.0, 3.0, 0.10, 85)
         else:
-            # BALANCED: Risk 1% per trade, SL 1.5x ATR, TP 2.5x ATR, Max pos 20%
-            return (0.01, 1.5, 2.5, 0.20, 80)
+            # BALANCED: Risk 1% per trade, SL 1.5x ATR, TP 2.5x ATR, Max pos 10%
+            return (0.01, 1.5, 2.5, 0.10, 80)
 
     async def analyze(self, ceo_decision: Dict[str, Any], portfolio_data: Dict[str, Any], market_data: Dict[str, Any]) -> Dict[str, Any]:
         risk_pct, sl_mult, tp_mult, max_pos_pct, min_conviction = self._get_profile_rules()

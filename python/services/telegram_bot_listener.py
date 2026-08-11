@@ -21,7 +21,7 @@ class TelegramBotListener:
         self.send_url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage" if self.bot_token else None
         self._background_tasks = set()  # Prevent GC of background tasks
 
-    async def _send_reply(self, text: str):
+    async def _send_reply(self, text: str, reply_markup: dict = None):
         if not self.send_url or not self.chat_id:
             print(f"⚠️ [TelegramListener] _send_reply: send_url или chat_id не задан! send_url={bool(self.send_url)}, chat_id={bool(self.chat_id)}")
             return
@@ -31,6 +31,8 @@ class TelegramBotListener:
             "parse_mode": "Markdown",
             "disable_web_page_preview": True
         }
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(self.send_url, json=payload) as resp:
@@ -85,6 +87,39 @@ class TelegramBotListener:
                 )
                 await self._send_reply(reply)
 
+            elif cmd in ["/positions", "/pos"]:
+                positions = getattr(self.paper_trading, "active_positions", {})
+                if not positions:
+                    await self._send_reply("💼 *Открытых позиций сейчас нет.*")
+                else:
+                    reply_lines = [f"💼 *ТЕКУЩИЕ ОТКРЫТЫЕ ПОЗИЦИИ ({len(positions)}):*\n"]
+                    inline_keyboard = []
+                    
+                    for sym, pos in positions.items():
+                        mode = "👻 Вирт" if pos.get("is_virtual") else "⚡ Боевая"
+                        direction = pos.get("direction", "UNKNOWN")
+                        icon = "🟢" if direction == "LONG" else "🔴"
+                        entry = pos.get("entry_price", 0)
+                        size = pos.get("size_usd", 0)
+                        
+                        reply_lines.append(f"{icon} *{sym}* | {direction} | {mode}")
+                        reply_lines.append(f"💵 Вход: `${entry:,.2f}` | Объем: `${size:,.0f}`\n")
+                        
+                        inline_keyboard.append([{"text": f"❌ Закрыть {sym}", "callback_data": f"forceclose_{sym}"}])
+                    
+                    reply_markup = {"inline_keyboard": inline_keyboard}
+                    await self._send_reply("\n".join(reply_lines), reply_markup=reply_markup)
+
+            elif cmd in ["/risk", "/profile"]:
+                reply_markup = {
+                    "inline_keyboard": [
+                        [{"text": "🛡️ Консервативный", "callback_data": "setrisk_CONSERVATIVE"}],
+                        [{"text": "⚖️ Сбалансированный", "callback_data": "setrisk_BALANCED"}],
+                        [{"text": "🔥 Агрессивный", "callback_data": "setrisk_AGGRESSIVE"}]
+                    ]
+                }
+                await self._send_reply("⚙️ *Выберите профиль риска:*\n(Применится ко всем новым сделкам)", reply_markup=reply_markup)
+
             elif cmd in ["/scan", "/run"]:
                 print(f"🔔 [TelegramListener] Обработка команды /scan...")
                 await self._send_reply("🚀 *Запуск немедленного сканирования рынка Nado DEX по запросу...*")
@@ -98,18 +133,94 @@ class TelegramBotListener:
                     print(f"❌ [TelegramListener] trigger_scan_callback НЕ задан!")
                     await self._send_reply("❌ Ошибка: callback сканирования не настроен.")
 
-            elif cmd in ["/help", "/start"]:
+            elif cmd in ["/help", "/start", "/menu"]:
+                reply_markup = {
+                    "inline_keyboard": [
+                        [{"text": "📊 Баланс и PnL", "callback_data": "cmd_balance"}, {"text": "💼 Позиции", "callback_data": "cmd_positions"}],
+                        [{"text": "⚙️ Профиль риска", "callback_data": "cmd_risk"}, {"text": "ℹ️ Статус", "callback_data": "cmd_status"}],
+                        [{"text": "🚀 Принудительный скан", "callback_data": "cmd_scan"}]
+                    ]
+                }
                 reply = (
-                    f"💡 *ДОСТУПНЫЕ КОМАНДЫ БОТА:*\n\n"
-                    f"🔹 `/status` — Статус работы, режим и профиль риска\n"
-                    f"🔹 `/pnl` или `/balance` — Баланс портфеля, профит и статистика\n"
-                    f"🔹 `/scan` — Запустить немедленное сканирование всех монет\n"
-                    f"🔹 `/help` — Справка по командам"
+                    f"🤖 *ГЛАВНОЕ МЕНЮ БОТА NADO DEX*\n\n"
+                    f"Выберите действие с помощью кнопок ниже или используйте текстовые команды:\n\n"
+                    f"🔹 `/status` — Узнать текущий режим и статус\n"
+                    f"🔹 `/balance` (или `/pnl`) — Статистика побед и текущий баланс\n"
+                    f"🔹 `/positions` — Список активных сделок и управление ими\n"
+                    f"🔹 `/risk` — Переключение профиля риска\n"
+                    f"🔹 `/scan` — Поиск сделок прямо сейчас (вне расписания)\n"
                 )
-                await self._send_reply(reply)
+                await self._send_reply(reply, reply_markup=reply_markup)
         except Exception as e:
             print(f"❌ [TelegramListener] Ошибка обработки команды '{cmd}': {type(e).__name__}: {e}")
             traceback.print_exc()
+
+    async def handle_callback(self, callback_id: str, callback_data: str, chat_id: str):
+        print(f"🔘 [TelegramListener] Нажата кнопка: {callback_data}")
+        from services.telegram_service import TelegramService
+        tg = TelegramService()
+        
+        if callback_data.startswith("approve_") or callback_data.startswith("reject_"):
+            action, trade_id = callback_data.split("_")
+            if hasattr(self.paper_trading, "pending_trades") and trade_id in self.paper_trading.pending_trades:
+                trade = self.paper_trading.pending_trades.pop(trade_id)
+                
+                # Timeout check (5 minutes = 300 seconds)
+                import time
+                if time.time() - trade.get("created_at", 0) > 300:
+                    await tg.answer_callback_query(callback_id, "Сделка просрочена (>5 мин) ⏳")
+                    print(f"⏳ [TelegramListener] Сделка {trade['symbol']} отклонена по таймауту (>5 мин).")
+                    await tg.send_message(f"⏳ Сделка по {trade['symbol']} устарела (>5 минут) и была автоматически отменена.")
+                    return
+
+                if action == "approve":
+                    await tg.answer_callback_query(callback_id, "Сделка ОДОБРЕНА ✅")
+                    print(f"✅ [TelegramListener] Пользователь вручную ОДОБРИЛ сделку {trade['symbol']}")
+                    
+                    tg_msg = trade.pop("tg_message", None)
+                    trade.pop("created_at", None)
+                    await self.paper_trading.open_position(**trade)
+                    
+                    if tg_msg:
+                        await tg.broadcast_to_channel(tg_msg)
+                        
+                    await tg.send_message(f"✅ Одобрено: Сделка по {trade['symbol']} открыта на бирже.")
+                else:
+                    await tg.answer_callback_query(callback_id, "Сделка отклонена ❌")
+                    print(f"❌ [TelegramListener] Пользователь отклонил сделку {trade['symbol']}")
+                    await tg.send_message(f"❌ Отмена: Сделка по {trade['symbol']} отклонена пользователем.")
+            else:
+                await tg.answer_callback_query(callback_id, "Ошибка: Сделка не найдена или устарела.")
+                
+        elif callback_data.startswith("forceclose_"):
+            symbol = callback_data.split("_")[1]
+            await tg.answer_callback_query(callback_id, f"Закрываю {symbol}... ⏳")
+            
+            success, result = await self.paper_trading.force_close_position(symbol)
+            if success:
+                mode = "👻 [ВИРТУАЛЬНО]" if result.get('is_virtual') else "⚡ [БОЕВАЯ]"
+                pnl = result.get('pnl_usd', 0)
+                exit_price = result.get('exit_price', 0)
+                emoji = "🎉" if pnl >= 0 else "🔻"
+                msg = f"{emoji} {mode} Сделка по {symbol} ЗАКРЫТА ВРУЧНУЮ!\n💰 PnL: `${pnl:+.2f}`\n🎯 Выход: `${exit_price:,.2f}`"
+                await tg.send_message(msg)
+                await tg.broadcast_to_channel(msg)
+            else:
+                await tg.send_message(f"❌ Ошибка закрытия {symbol}: {result}")
+                
+        elif callback_data.startswith("setrisk_"):
+            new_profile = callback_data.split("_")[1]
+            os.environ["TRADING_PROFILE"] = new_profile
+            await tg.answer_callback_query(callback_id, f"Профиль {new_profile} установлен ✅")
+            await tg.send_message(f"✅ Профиль риска успешно изменен на `{new_profile}`.")
+            
+        elif callback_data.startswith("cmd_"):
+            await tg.answer_callback_query(callback_id, "Загрузка... ⏳")
+            if callback_data == "cmd_balance": await self.handle_command("/balance")
+            elif callback_data == "cmd_positions": await self.handle_command("/positions")
+            elif callback_data == "cmd_risk": await self.handle_command("/risk")
+            elif callback_data == "cmd_status": await self.handle_command("/status")
+            elif callback_data == "cmd_scan": await self.handle_command("/scan")
 
     async def start_listening(self):
         if not self.api_url or not self.chat_id:
@@ -134,16 +245,29 @@ class TelegramBotListener:
                             results = data.get("result", [])
                             for result in results:
                                 self.offset = result["update_id"] + 1
-                                message = result.get("message", {})
-                                text = message.get("text", "")
-                                sender_chat_id = str(message.get("chat", {}).get("id", ""))
                                 
-                                if text.startswith("/"):
-                                    print(f"📨 [TelegramListener] Входящая команда: '{text}' от chat_id={sender_chat_id} (ожидается: {self.chat_id})")
-                                    if sender_chat_id == str(self.chat_id):
-                                        await self.handle_command(text)
+                                if "callback_query" in result:
+                                    callback_query = result["callback_query"]
+                                    cb_data = callback_query.get("data")
+                                    cb_id = callback_query.get("id")
+                                    cb_chat_id = str(callback_query.get("message", {}).get("chat", {}).get("id", ""))
+                                    
+                                    if cb_chat_id == str(self.chat_id):
+                                        await self.handle_callback(cb_id, cb_data, cb_chat_id)
                                     else:
-                                        print(f"⚠️ [TelegramListener] Команда '{text}' от ЧУЖОГО чата {sender_chat_id}, игнорируем.")
+                                        print(f"⚠️ [TelegramListener] Кнопка от чужого чата {cb_chat_id}")
+                                
+                                elif "message" in result:
+                                    message = result.get("message", {})
+                                    text = message.get("text", "")
+                                    sender_chat_id = str(message.get("chat", {}).get("id", ""))
+                                    
+                                    if text.startswith("/"):
+                                        print(f"📨 [TelegramListener] Входящая команда: '{text}' от chat_id={sender_chat_id} (ожидается: {self.chat_id})")
+                                        if sender_chat_id == str(self.chat_id):
+                                            await self.handle_command(text)
+                                        else:
+                                            print(f"⚠️ [TelegramListener] Команда '{text}' от ЧУЖОГО чата {sender_chat_id}, игнорируем.")
                         else:
                             error_body = await resp.text()
                             print(f"❌ [TelegramListener] Ошибка polling (HTTP {resp.status}): {error_body[:300]}")

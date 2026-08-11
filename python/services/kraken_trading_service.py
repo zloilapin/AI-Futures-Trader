@@ -27,6 +27,39 @@ class KrakenTradingService:
 
         # Local tracker for active positions (Keeper Logic)
         self.active_positions = {}
+        self.pending_trades = {}
+        
+        # Performance Tracking
+        self.stats_file = "data/portfolio_stats.json"
+        self._load_stats()
+        
+    def _load_stats(self):
+        import os, json
+        self.total_pnl_usd = 0.0
+        self.win_count = 0
+        self.loss_count = 0
+        if os.path.exists(self.stats_file):
+            try:
+                with open(self.stats_file, 'r') as f:
+                    st = json.load(f)
+                    self.total_pnl_usd = st.get('total_pnl_usd', 0.0)
+                    self.win_count = st.get('win_count', 0)
+                    self.loss_count = st.get('loss_count', 0)
+            except Exception as e:
+                print(f"⚠️ [KrakenTradingService] Ошибка загрузки статистики: {e}")
+
+    def _save_stats(self):
+        import os, json
+        os.makedirs(os.path.dirname(self.stats_file), exist_ok=True)
+        try:
+            with open(self.stats_file, 'w') as f:
+                json.dump({
+                    "total_pnl_usd": self.total_pnl_usd,
+                    "win_count": self.win_count,
+                    "loss_count": self.loss_count
+                }, f)
+        except Exception as e:
+            print(f"⚠️ [KrakenTradingService] Ошибка сохранения статистики: {e}")
         
     async def _close_exchange_async(self):
         """Clean up CCXT session"""
@@ -77,15 +110,18 @@ class KrakenTradingService:
         else:
             print("⚠️ [KrakenTradingService] API ключи не настроены, возвращаем 0.0 баланс.")
 
+        total_trades = self.win_count + self.loss_count
+        win_rate = (self.win_count / total_trades * 100) if total_trades > 0 else 0.0
+        
         return {
             "total_usd": total_balance,
             "current_balance": total_balance,
-            "initial_balance": total_balance,
-            "total_pnl_usd": 0.0,
-            "total_pnl_pct": 0.0,
-            "win_rate_pct": 0.0,
-            "win_count": 0,
-            "loss_count": 0,
+            "initial_balance": total_balance - self.total_pnl_usd,
+            "total_pnl_usd": self.total_pnl_usd,
+            "total_pnl_pct": (self.total_pnl_usd / (total_balance - self.total_pnl_usd) * 100) if (total_balance - self.total_pnl_usd) > 0 else 0.0,
+            "win_rate_pct": win_rate,
+            "win_count": self.win_count,
+            "loss_count": self.loss_count,
             "recent_streak": [],
             "available_margin": total_balance,
             "used_margin": 0.0,
@@ -108,21 +144,43 @@ class KrakenTradingService:
             print(f"❌ [KrakenTradingService] Ошибка сети при отправке ордера: {e}")
             return None
 
-    async def open_position(self, symbol: str, direction: str, entry_price: float, size_usd: float, tp_price: float, sl_price: float, leverage: int = 1):
+    def register_pending_trade(self, trade_params: dict) -> str:
+        trade_id = str(uuid.uuid4())[:8]
+        trade_params["created_at"] = time.time()
+        self.pending_trades[trade_id] = trade_params
+        return trade_id
+
+    async def wait_and_virtual_open(self, trade_id: str, tg_sender):
+        import asyncio
+        await asyncio.sleep(300) # Ждем 5 минут
+        if trade_id in self.pending_trades:
+            trade = self.pending_trades.pop(trade_id)
+            symbol = trade.get("symbol", "UNKNOWN")
+            print(f"👻 [Timeout] Пользователь не ответил. Открываем {symbol} виртуально.")
+            trade.pop("created_at", None)
+            trade["is_virtual"] = True
+            await self.open_position(**trade)
+            if tg_sender:
+                await tg_sender.send_message(f"👻 Время на подтверждение вышло (5 мин). Сделка по {symbol} открыта ВИРТУАЛЬНО (Бумажная торговля). Утром проверим результат!")
+
+    async def open_position(self, symbol: str, direction: str, entry_price: float, size_usd: float, tp_price: float, sl_price: float, leverage: int = 1, is_virtual: bool = False):
         """
         Calculates position size in base currency and opens a Market order via Kraken Futures API.
-        Registers the position in local Keeper for SL/TP tracking.
+        If is_virtual is True, skips the API call and simulates the trade.
         """
-        if not self.api_key:
+        if not self.api_key and not is_virtual:
             print(f"❌ [KrakenTradingService] Нет API ключей. Сделка {direction} по {symbol} отменена.")
             return
 
-        print(f"🚀 [KrakenTradingService] ПОДГОТОВКА БОЕВОЙ СДЕЛКИ: {direction} {symbol}")
+        mode_str = "ВИРТУАЛЬНОЙ" if is_virtual else "БОЕВОЙ"
+        print(f"🚀 [KrakenTradingService] ПОДГОТОВКА {mode_str} СДЕЛКИ: {direction} {symbol}")
         
         size_base = size_usd / entry_price
         
         # Execute trade
-        order_result = await self._execute_market_order(symbol, direction, size_base)
+        order_result = True
+        if not is_virtual:
+            order_result = await self._execute_market_order(symbol, direction, size_base)
         
         if order_result:
             pos_id = str(uuid.uuid4())[:8]
@@ -136,6 +194,7 @@ class KrakenTradingService:
                 "tp_price": tp_price,
                 "sl_price": sl_price,
                 "breakeven_activated": False,
+                "is_virtual": is_virtual,
                 "timestamp": time.time()
             }
 
@@ -155,17 +214,27 @@ class KrakenTradingService:
         sl_price = pos["sl_price"]
         entry_price = pos["entry_price"]
         
-        # Breakeven logic (50% to TP)
-        distance_to_tp = abs(tp_price - entry_price)
-        current_distance = abs(current_price - entry_price)
-        if current_distance >= distance_to_tp * 0.5:
-            is_profitable = (direction == "LONG" and current_price > entry_price) or \
-                            (direction == "SHORT" and current_price < entry_price)
-            if is_profitable and not pos.get("breakeven_activated"):
-                pos["breakeven_activated"] = True
-                new_sl = entry_price * 1.001 if direction == "LONG" else entry_price * 0.999
-                pos["sl_price"] = new_sl
-                print(f"🛡️ [KrakenTradingService/Keeper] {symbol} 50% TP пройдено. SL перенесен в безубыток.")
+        # Trailing Stop Logic (1.5% trail)
+        trailing_pct = 0.015
+        
+        if "highest_price" not in pos: pos["highest_price"] = entry_price
+        if "lowest_price" not in pos: pos["lowest_price"] = entry_price
+        
+        if direction == "LONG":
+            pos["highest_price"] = max(pos["highest_price"], current_price)
+            # Activate trailing stop only when profit > 1.5%
+            if pos["highest_price"] >= entry_price * 1.015:
+                trail_sl = pos["highest_price"] * (1 - trailing_pct)
+                if trail_sl > pos["sl_price"]:
+                    pos["sl_price"] = trail_sl
+                    print(f"📈 [Keeper] {symbol} Trailing Stop подтянут до {trail_sl:.4f}")
+        else:
+            pos["lowest_price"] = min(pos["lowest_price"], current_price)
+            if pos["lowest_price"] <= entry_price * 0.985:
+                trail_sl = pos["lowest_price"] * (1 + trailing_pct)
+                if trail_sl < pos["sl_price"]:
+                    pos["sl_price"] = trail_sl
+                    print(f"📉 [Keeper] {symbol} Trailing Stop подтянут до {trail_sl:.4f}")
 
         # TP / SL Execution trigger
         triggered_exit = None
@@ -190,26 +259,69 @@ class KrakenTradingService:
                     triggered_exit = "SL"
                 
         if triggered_exit:
-            print(f"⚡ [KrakenTradingService/Keeper] Сработал {triggered_exit} для {symbol}! Отправка ордера на закрытие...")
+            is_virtual = pos.get("is_virtual", False)
+            mode_prefix = "👻 [ВИРТУАЛЬНО]" if is_virtual else "⚡ [БОЕВАЯ]"
+            print(f"{mode_prefix} [Keeper] Сработал {triggered_exit} для {symbol}! Отправка ордера на закрытие...")
             
-            # Close position asynchronously
-            close_direction = "SHORT" if direction == "LONG" else "LONG"
-            asyncio.create_task(self._execute_market_order(symbol, close_direction, pos["size_base"]))
+            # Close position asynchronously if not virtual
+            if not is_virtual:
+                close_direction = "SHORT" if direction == "LONG" else "LONG"
+                asyncio.create_task(self._execute_market_order(symbol, close_direction, pos["size_base"]))
             
             pnl = abs(current_price - entry_price) * (pos["size_usd"] / entry_price)
             if triggered_exit == "SL": pnl = -pnl
             
+            if pnl > 0:
+                self.win_count += 1
+            else:
+                self.loss_count += 1
+            self.total_pnl_usd += pnl
+            self._save_stats()
+            
             report = {
                 "symbol": symbol,
                 "direction": direction,
-                "triggered_by": triggered_exit,
+                "triggered_by": f"{triggered_exit} (Виртуально)" if is_virtual else triggered_exit,
                 "entry_price": entry_price,
                 "exit_price": current_price,
                 "pnl_usd": pnl,
-                "pnl_pct": (pnl / pos["size_usd"]) * 100 if pos["size_usd"] > 0 else 0,
-                "new_balance": 0 # Local balance tracking omitted for simplicity in live bot, will fetch from exchange next cycle
+                "pnl_pct": (pnl / pos["size_usd"]) * 100 if pos["size_usd"] > 0 else 0
             }
             closed_reports.append(report)
             del self.active_positions[symbol]
             
         return closed_reports
+
+    async def force_close_position(self, symbol: str) -> tuple[bool, Any]:
+        """Manually forces a close via Telegram button."""
+        if symbol not in self.active_positions:
+            return False, "Позиция не найдена"
+            
+        pos = self.active_positions[symbol]
+        direction = pos["direction"]
+        is_virtual = pos.get("is_virtual", False)
+        close_direction = "SHORT" if direction == "LONG" else "LONG"
+        
+        try:
+            current_price = pos["entry_price"]
+            if self.exchange:
+                ticker = await self.exchange.fetch_ticker(self._format_symbol(symbol))
+                current_price = ticker['last']
+            
+            if not is_virtual:
+                await self._execute_market_order(symbol, close_direction, pos["size_base"])
+        except Exception as e:
+            return False, f"Ошибка биржи: {e}"
+            
+        entry_price = pos["entry_price"]
+        pnl = abs(current_price - entry_price) * (pos["size_usd"] / entry_price)
+        if (direction == "LONG" and current_price < entry_price) or (direction == "SHORT" and current_price > entry_price):
+            pnl = -pnl
+            
+        if pnl > 0: self.win_count += 1
+        else: self.loss_count += 1
+        self.total_pnl_usd += pnl
+        self._save_stats()
+        
+        del self.active_positions[symbol]
+        return True, {"pnl_usd": pnl, "exit_price": current_price, "is_virtual": is_virtual}

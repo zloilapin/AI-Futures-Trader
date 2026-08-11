@@ -92,9 +92,7 @@ async def run_single_cycle(
     print("="*65)
 
     if is_rest and not force_scan:
-        print(f"🌙 [Schedule] ВРЕМЯ ОТДЫХА БОТА! Сейчас {time_str} (Окно отдыха с 19:00 до 07:00 МСК).")
-        print("💤 Анализ рынка и работа агентов приостановлены до 07:00 МСК.")
-        return
+        print(f"🌙 [Schedule] НОЧНОЙ РЕЖИМ СКАНИРОВАНИЯ. Сейчас {time_str} (с 19:00 до 07:00 МСК).")
 
     if force_scan and is_rest:
         print(f"⚡ [ForceScan] Ручной запуск /scan во время отдыха ({time_str}). Пропуск тихого режима!")
@@ -113,7 +111,10 @@ async def run_single_cycle(
         # Fallback to top 6 by 24h volume directly from the exchange if LLM fails
         selected_assets = [p["symbol"] for p in active_perps[:6]]
 
-    print(f"🎯 Отобраны активы для сканирования: {', '.join(selected_assets)}")
+    # Очищаем от дубликатов (если нейросеть случайно выдала одну монету несколько раз)
+    selected_assets = list(set(selected_assets))
+
+    print(f"🎯 Отобраны уникальные активы для сканирования: {', '.join(selected_assets)}")
     portfolio_data = await trading_service.get_portfolio_summary()
 
     recent_lessons = reflector_agent.get_lessons(limit=5)
@@ -123,31 +124,44 @@ async def run_single_cycle(
     any_signal_sent = False
     scan_summaries = []  # Сводка по каждому активу для отчёта ручного /scan
 
+    # СТАДИЯ 1.5: ПРОВЕРКА УЖЕ ОТКРЫТЫХ ПОЗИЦИЙ (TP/SL)
+    active_symbols = list(trading_service.active_positions.keys())
+    if active_symbols:
+        print("\n[Stage 1.5] Keeper проверяет TP/SL для открытых позиций...")
+    for symbol in active_symbols:
+        try:
+            market_data = await fetcher.fetch_all_market_data(symbol)
+            current_price = market_data.get("price_data", {}).get("current_price", 0)
+            
+            closed_reports = trading_service.check_and_update_positions(symbol, current_price)
+            for closed in closed_reports:
+                pnl_emoji = "🎉" if closed["pnl_usd"] >= 0 else "🔻"
+                closed_msg = (
+                    f"{pnl_emoji} *СДЕЛКА ЗАКРЫТА НА NADO DEX ({closed['triggered_by']})*\n\n"
+                    f"🪙 *Монета:* `{closed['symbol']}` | *Направление:* `{closed['direction']}`\n"
+                    f"🎯 *Цена входа:* `${closed['entry_price']:,.2f}` ➔ *Выход:* `${closed['exit_price']:,.2f}`\n"
+                    f"💰 *PnL:* `${closed['pnl_usd']:,.2f}` ({closed['pnl_pct']:,.2f}%)\n"
+                )
+                print(f"\n--- ЗАКРЫТИЕ ПОЗИЦИИ В TELEGRAM [{symbol}] ---")
+                print(closed_msg)
+                print("--------------------------------------------")
+                await tg_sender.send_message(closed_msg)
+                await tg_sender.broadcast_to_channel(closed_msg)
+                asyncio.create_task(reflector_agent.reflect(closed, market_data))
+        except Exception as e:
+            print(f"❌ Ошибка проверки позиции {symbol}: {e}")
+
+    # Фильтруем активы: не сканируем то, что уже открыто
+    selected_assets = [s for s in selected_assets if s not in trading_service.active_positions]
+
     # ИТЕРАЦИЯ ПО ВСЕМ АКТИВАМ
     for symbol in selected_assets:
         print(f"\n🔍 ПОЛНЫЙ АНАЛИЗ (15m, 1H, 4H) NADO DEX: {symbol}")
         
-        # СТАДИЯ 2: СБОР ДАННЫХ И ПРОВЕРКА ОТКРЫТЫХ ПОЗИЦИЙ
+        # СТАДИЯ 2: СБОР ДАННЫХ И ПРОВЕРКА СТАТУСА
         print(f"[Stage 2] Сбор мульти-таймфреймовых данных (15m, 1H, 4H) для {symbol}...")
         market_data = await fetcher.fetch_all_market_data(symbol)
         current_price = market_data.get("price_data", {}).get("current_price", 0)
-
-        # Проверка исполнения TP/SL и активации Breakeven Guard
-        closed_reports = trading_service.check_and_update_positions(symbol, current_price)
-        for closed in closed_reports:
-            pnl_emoji = "🎉" if closed["pnl_usd"] >= 0 else "🔻"
-            closed_msg = (
-                f"{pnl_emoji} *СДЕЛКА ЗАКРЫТА НА NADO DEX ({closed['triggered_by']})*\n\n"
-                f"🪙 *Монета:* `{closed['symbol']}` | *Направление:* `{closed['direction']}`\n"
-                f"🎯 *Цена входа:* `${closed['entry_price']:,.2f}` ➔ *Выход:* `${closed['exit_price']:,.2f}`\n"
-                f"📈 *PnL:* `${closed['pnl_usd']:+.2f}` ({closed['pnl_pct']:+.2f}%)\n"
-                f"💰 *Новый баланс:* `${closed['new_balance']:,.2f}`"
-            )
-            print(f"\n--- ЗАКРЫТИЕ ПОЗИЦИИ В TELEGRAM [{symbol}] ---")
-            print(closed_msg)
-            print("--------------------------------------------")
-            await tg_sender.send_message(closed_msg)
-            asyncio.create_task(reflector_agent.reflect(closed, market_data))
 
         # 2.5 Scanner Agent (ATR Volatility & Spread Guard)
         print(f"[Stage 2.5] Scanner Agent проверяет ATR волатильность и спред для {symbol}...")
@@ -170,7 +184,7 @@ async def run_single_cycle(
             reports.append(rep)
             await asyncio.sleep(0.6)
             
-        valid_reports = [r for r in reports if r and r.get("signal") != "ERROR"]
+        valid_reports = [r for r in reports if isinstance(r, dict) and r.get("signal") != "ERROR"]
 
         # СТАДИЯ 4: СИНТЕЗ CEO И МУЛЬТИ-ТАЙМФРЕЙМ ТРЕНД
         print(f"[Stage 4] CEO Agent проверяет согласованность 1H/4H тренда и выносит решение по {symbol}...")
@@ -183,7 +197,28 @@ async def run_single_cycle(
             "past_lessons_learned": recent_lessons
         }
         ceo_verdict = await ceo_agent.analyze(ceo_payload)
-        print(f"⚖️ Решение CEO [{symbol}]: {ceo_verdict.get('decision')} (Уверенность: {ceo_verdict.get('conviction')}%)")
+        
+        decision = str(ceo_verdict.get("decision", "HOLD")).upper()
+        conviction = ceo_verdict.get("conviction", 0)
+        
+        print(f"⚖️ Решение CEO [{symbol}]: {decision} (Уверенность: {conviction}%)")
+
+        if decision not in ["LONG", "SHORT"] or conviction < 80:
+            print(f"⏸️ Пропуск {symbol}. Решение: {decision}, Уверенность: {conviction}% (Требуется LONG/SHORT и >= 80%).")
+            scanner_status = "⚠️ ЗАБЛОКИРОВАН СКАНЕРОМ" if scanner_blocked else "✅ OK"
+            asset_summary = {
+                "symbol": symbol,
+                "decision": decision,
+                "conviction": conviction,
+                "scanner_status": scanner_status,
+                "scanner_reason": scanner_reason if scanner_blocked else None,
+                "risk_approved": False,
+                "risk_reason": "Пропущен из-за фильтра CEO (HOLD или Уверенность < 80)",
+                "ceo_reasoning": ceo_verdict.get("reasoning", ""),
+                "status": "⏸️ НЕТ СИГНАЛА"
+            }
+            scan_summaries.append(asset_summary)
+            continue
 
         # СТАДИЯ 5: РИСК-МЕНЕДЖМЕНТ
         print(f"[Stage 5] Risk Manager ({profile}) проверяет параметры сделки для {symbol}...")
@@ -194,41 +229,54 @@ async def run_single_cycle(
             print(f"💰 Position Amount: ${risk_verdict.get('position_size_usd', 0):,.2f} ({risk_verdict.get('position_size_pct', 0)}% of portfolio)")
             print(f"🎯 Entry Price: ${risk_verdict.get('entry_price', 0):,.2f}")
             print(f"🟢 Take Profit (TP): ${risk_verdict.get('take_profit_price', 0):,.2f} (+{risk_verdict.get('take_profit_pct', 0)}%)")
-            print(f"🔴 Stop Loss (SL): ${risk_verdict.get('stop_loss_price', 0):,.2f} (-{risk_verdict.get('stop_loss_pct', 0)}%)")
-            print(f"⚖️ Risk / Reward Ratio: {risk_verdict.get('risk_reward_ratio', 0)}")
-
-            # Открываем виртуальную позицию
-            await trading_service.open_position(
-                symbol=symbol,
-                direction=str(ceo_verdict.get("decision")).upper(),
-                entry_price=risk_verdict.get("entry_price", current_price),
-                size_usd=risk_verdict.get("position_size_usd", 0),
-                tp_price=risk_verdict.get("take_profit_price", 0),
-                sl_price=risk_verdict.get("stop_loss_price", 0)
-            )
+            # Автоматическая торговля 24/7 (кнопки ручного одобрения отключены)
+            require_manual = False
+            
+            if require_manual and hasattr(trading_service, "register_pending_trade"):
+                trade_params = {
+                    "symbol": symbol,
+                    "direction": decision,
+                    "entry_price": risk_verdict.get("entry_price", current_price),
+                    "size_usd": risk_verdict.get("position_size_usd", 0),
+                    "tp_price": risk_verdict.get("take_profit_price", 0),
+                    "sl_price": risk_verdict.get("stop_loss_price", 0)
+                }
+                trade_id = trading_service.register_pending_trade(trade_params)
+                risk_verdict["pending_trade_id"] = trade_id
+                print(f"⏳ НОЧНОЙ РЕЖИМ: Сделка ОДОБРЕНА Risk Manager'ом. Ожидание ручного подтверждения в Telegram...")
+                
+                # Запуск таймера (5 мин) для перевода в виртуальный режим (Paper Trading)
+                asyncio.create_task(trading_service.wait_and_virtual_open(trade_id, tg_sender))
+            else:
+                # Открываем боевую/виртуальную позицию
+                await trading_service.open_position(
+                    symbol=symbol,
+                    direction=decision,
+                    entry_price=risk_verdict.get("entry_price", current_price),
+                    size_usd=risk_verdict.get("position_size_usd", 0),
+                    tp_price=risk_verdict.get("take_profit_price", 0),
+                    sl_price=risk_verdict.get("stop_loss_price", 0)
+                )
         else:
             print(f"❌ Status: VETOED BY RISK MANAGER ({risk_verdict.get('reasoning')})")
 
-        # СТАДИЯ 6: ТЕЛЕГРАМ (ФИЛЬТР: LONG/SHORT И УВЕРЕННОСТЬ >= 80%)
-        decision = str(ceo_verdict.get("decision", "HOLD")).upper()
-        conviction = ceo_verdict.get("conviction", 0)
-
+        # СТАДИЯ 6: ТЕЛЕГРАМ
         # Собираем сводку по активу для отчёта ручного /scan
-        scanner_status = "⚠️ ЗАБЛОКИРОВАН СКАНЕРОМ" if scanner_blocked else "✅ OK"
+        scanner_status = "✅ OK"
         asset_summary = {
             "symbol": symbol,
             "decision": decision,
             "conviction": conviction,
             "scanner_status": scanner_status,
-            "scanner_reason": scanner_reason if scanner_blocked else None,
+            "scanner_reason": None,
             "risk_approved": risk_verdict.get("approved", False),
             "risk_reason": risk_verdict.get("reasoning", ""),
             "ceo_reasoning": ceo_verdict.get("reasoning", ""),
-            "status": "🚀 СИГНАЛ" if (decision in ["LONG", "SHORT"] and conviction >= 80) else "⏸️ НЕТ СИГНАЛА"
+            "status": "🚀 СИГНАЛ" if risk_verdict.get("approved") else "⏸️ VETO"
         }
         scan_summaries.append(asset_summary)
 
-        if decision in ["LONG", "SHORT"] and conviction >= 80:
+        if risk_verdict.get("approved") or risk_verdict.get("pending_trade_id"):
             print(f"🚀 НАЙДЕН СИГНАЛ! Генерация Telegram-уведомления [{symbol}] ({decision}, Уверенность {conviction}%)...")
             
             final_trade_data = {
@@ -242,7 +290,25 @@ async def run_single_cycle(
             print(f"\n--- ОТПРАВЛЕНО В TELEGRAM [{symbol}] ---")
             print(tg_message)
             print("-----------------------------")
-            await tg_sender.send_message(tg_message)
+            
+            reply_markup = None
+            pending_id = risk_verdict.get("pending_trade_id")
+            if pending_id:
+                reply_markup = {
+                    "inline_keyboard": [[
+                        {"text": "✅ Одобрить", "callback_data": f"approve_{pending_id}"},
+                        {"text": "❌ Отклонить", "callback_data": f"reject_{pending_id}"}
+                    ]]
+                }
+                if hasattr(trading_service, "pending_trades") and pending_id in trading_service.pending_trades:
+                    trading_service.pending_trades[pending_id]["tg_message"] = tg_message
+            
+            await tg_sender.send_message(tg_message, reply_markup=reply_markup)
+            
+            # Если сделка не требует ручного подтверждения (дневной режим), транслируем сразу
+            if not pending_id:
+                await tg_sender.broadcast_to_channel(tg_message)
+                
             any_signal_sent = True
         else:
             print(f"ℹ️ [Telegram] Пропуск отправки для {symbol}. Решение '{decision}' с уверенностью {conviction}% (Фильтр: LONG/SHORT и Уверенность ≥ 80%).")
@@ -376,9 +442,8 @@ async def main():
             is_rest, time_str = get_msk_status()
             profile = os.getenv("TRADING_PROFILE", "BALANCED")
             print(f"⏰ Режим автономного сканирования активирован! [Текущее время: {time_str}]")
-            print(f"🔄 Интервал сканирования: каждые {scan_interval_min} минут ({interval_seconds} сек).")
+            print(f"🔄 Интервал сканирования: День (07:00-19:00) = 60 мин | Ночь (19:00-07:00) = 30 мин.")
             print(f"⚙️ Профиль риска: {profile} | 📐 Multi-Timeframe (15m + 1H + 4H) ON")
-            print("🌙 График отдыха: с 19:00 до 07:00 МСК (в этот период бот спит).")
             print("💡 Для остановки нажмите Ctrl+C в любой момент.\n")
             
             asyncio.create_task(bot_listener.start_listening())
@@ -391,8 +456,14 @@ async def main():
                         oi_agent, news_agent, indicator_agent, ceo_agent,
                         risk_manager, telegram_agent, reflector_agent, memory_manager
                     )
+                    
+                    is_rest_now, _ = get_msk_status()
+                    # Меняем местами: Ночью (США сессия) сканируем каждые 30 мин, Днем (менее активно) — каждые 60 мин.
+                    current_interval_min = 30 if is_rest_now else 60
+                    interval_seconds = current_interval_min * 60
+                    
                     cycle_number += 1
-                    print(f"\n⏳ Ожидание {scan_interval_min} мин. до следующего цикла №{cycle_number}...")
+                    print(f"\n⏳ Ожидание {current_interval_min} мин. до следующего цикла №{cycle_number}...")
                     await asyncio.sleep(interval_seconds)
             except (KeyboardInterrupt, asyncio.CancelledError):
                 print("\n🛑 Автономный торговый бот остановлен.")

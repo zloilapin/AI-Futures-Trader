@@ -31,13 +31,26 @@ class BaseAgent:
             return {"signal": "ERROR", "reasoning": "Empty response from LLM"}
 
         try:
-            # Надежная очистка markdown-ограждений с помощью регулярных выражений
             clean_text = response_text.strip()
-            if clean_text.startswith("```"):
-                clean_text = re.sub(r"^```(?:json)?\s*", "", clean_text)
-                clean_text = re.sub(r"\s*```$", "", clean_text)
+            
+            # 1. Поиск блока JSON внутри markdown ограждений
+            match = re.search(r"```(?:json)?(.*?)```", clean_text, re.DOTALL | re.IGNORECASE)
+            if match:
+                clean_text = match.group(1).strip()
+            else:
+                # 2. Если ограждений нет, ищем от первой { до последней }
+                start_idx = clean_text.find('{')
+                end_idx = clean_text.rfind('}')
+                if start_idx != -1 and end_idx != -1:
+                    clean_text = clean_text[start_idx:end_idx+1]
 
-            return json.loads(clean_text)
+            parsed = json.loads(clean_text)
+            if isinstance(parsed, list):
+                if len(parsed) > 0 and isinstance(parsed[0], dict):
+                    parsed = parsed[0]
+                else:
+                    return {"signal": "ERROR", "reasoning": "LLM returned a list instead of JSON object"}
+            return parsed
             
         except json.JSONDecodeError as e:
             self.logger.error(f"[{self.name}] Ошибка парсинга JSON: {e}. Сырой текст: {response_text}")

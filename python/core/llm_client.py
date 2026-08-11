@@ -10,11 +10,17 @@ class LLMClient:
     def __init__(self, model_name: Optional[str] = None):
         self.groq_key = os.getenv("GROQ_API_KEY")
         self.gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        self.openrouter_key = os.getenv("OPENROUTER_API_KEY")
+        
         if self.gemini_key and ("your_gemini_api_key" in self.gemini_key or self.gemini_key.startswith("AQ.")):
             # Если токен не AIzaSy или заглушка, отдаем приоритет Groq
             pass
 
-        if self.groq_key and not self.groq_key.startswith("your_"):
+        if self.openrouter_key and not self.openrouter_key.startswith("your_"):
+            self.provider = "openrouter"
+            self.model_name = model_name or "meta-llama/llama-3.3-70b-instruct"
+            print(f"[LLMClient] Инициализирован провайдер OpenRouter ({self.model_name})")
+        elif self.groq_key and not self.groq_key.startswith("your_"):
             from groq import AsyncGroq
             self.provider = "groq"
             self.model_name = model_name or "llama-3.3-70b-versatile"
@@ -29,7 +35,7 @@ class LLMClient:
             print(f"[LLMClient] Инициализирован провайдер Gemini ({self.model_name})")
         else:
             self.provider = "none"
-            print("⚠️ [LLMClient] Валидные ключи API (GROQ_API_KEY / GEMINI_API_KEY) не найдены.")
+            print("⚠️ [LLMClient] Валидные ключи API (GROQ, GEMINI, OPENROUTER) не найдены.")
 
     async def generate(self, prompt: str, max_retries: int = 5) -> str:
         """
@@ -76,6 +82,38 @@ class LLMClient:
                     else:
                         print(f"❌ [LLMClient Gemini] Ошибка при запросе: {e}")
                         return "{}"
+            return "{}"
+
+        elif self.provider == "openrouter":
+            import aiohttp
+            headers = {
+                "Authorization": f"Bearer {self.openrouter_key}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": self.model_name,
+                "messages": [{"role": "user", "content": prompt}],
+                "response_format": {"type": "json_object"}
+            }
+            for attempt in range(max_retries):
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload) as resp:
+                            if resp.status == 200:
+                                data = await resp.json()
+                                return data["choices"][0]["message"]["content"]
+                            else:
+                                err_msg = await resp.text()
+                                if "429" in err_msg or "rate limit" in err_msg.lower():
+                                    wait_time = (attempt + 1) * 5
+                                    print(f"⚠️ [LLMClient OpenRouter] Лимит частоты (429). Повтор через {wait_time}s...")
+                                    await asyncio.sleep(wait_time)
+                                else:
+                                    print(f"❌ [LLMClient OpenRouter] Ошибка: {err_msg}")
+                                    return "{}"
+                except Exception as e:
+                    print(f"❌ [LLMClient OpenRouter] Ошибка сети: {e}")
+                    await asyncio.sleep(2)
             return "{}"
 
         return "{}"
