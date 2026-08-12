@@ -17,9 +17,9 @@ class ScannerAgent(BaseAgent):
             "You are a strict Volatility & Liquidity Gatekeeper for a quantitative DEX trading system.\n"
             "Your objective: Evaluate immediate market volatility (ATR), orderbook spread, and liquidity.\n\n"
             "STRICT GATEKEEPER RULES:\n"
-            "1. ATR Volatility Guard: If 'atr_pct' is very low (< 0.15%), the market is in tight choppy consolidation. Halt trading (proceed: false, status: 'MARKET_CHOPPY').\n"
-            "2. Spread Guard: If 'spread_pct' > 0.1%, slippage is too high. Halt trading (proceed: false, status: 'SPREAD_TOO_HIGH').\n"
-            "3. Healthy Market: If 'atr_pct' >= 0.15% AND 'spread_pct' <= 0.1%, APPROVE DEEP ANALYSIS (proceed: true, status: 'READY').\n\n"
+            "1. ATR Volatility Guard: If 'atr_pct' is extremely low (< 0.05%), the market is in dead consolidation. Halt trading (proceed: false, status: 'MARKET_CHOPPY').\n"
+            "2. Spread Guard: If 'spread_pct' > 0.15%, slippage is too high. Halt trading (proceed: false, status: 'SPREAD_TOO_HIGH').\n"
+            "3. Healthy Market: If 'atr_pct' >= 0.05% AND 'spread_pct' <= 0.15%, APPROVE DEEP ANALYSIS (proceed: true, status: 'READY'). Note: If 'atr_pct' is 0.0% but 'spread_pct' is excellent, you may approve it.\n\n"
             "Output JSON strictly matching this schema:\n"
             "{\n"
             '  "reasoning": "<step-by-step concise breakdown of ATR volatility and spread status>",\n'

@@ -22,15 +22,17 @@ class TelegramAgent(BaseAgent):
         decision = str(ceo.get("decision", "HOLD")).upper()
         conviction = ceo.get("conviction", 0)
         dir_emoji = "🟢 LONG" if decision == "LONG" else ("🔴 SHORT" if decision == "SHORT" else "⚪ HOLD")
-        reasoning = ceo.get("reasoning", "Сигнал подтвержден моделью.")
+        reasoning_en = ceo.get("reasoning_en", "")
+        reasoning_ru = ceo.get("reasoning_ru", "Сигнал подтвержден моделью.")
+        reasoning = f"{reasoning_en}\n\n{reasoning_ru}".strip()
 
         if decision == "HOLD":
             return (
                 f"⏸️ *MARKET UPDATE | NADO DEX*\n\n"
-                f"🪙 *Монета:* `{symbol}`\n"
-                f"📊 *Направление:* {dir_emoji}\n"
-                f"🔥 *Уверенность:* `{conviction}%`\n\n"
-                f"📝 *Анализ CEO:* {reasoning}"
+                f"🪙 *Asset / Монета:* `{symbol}`\n"
+                f"📊 *Direction / Направление:* {dir_emoji}\n"
+                f"🔥 *AI Conviction / Уверенность:* `{conviction}%`\n\n"
+                f"📝 *Analysis / Аналитика:*\n{reasoning}"
             )
 
         entry_price = risk.get("entry_price", 0)
@@ -44,15 +46,15 @@ class TelegramAgent(BaseAgent):
 
         message = (
             f"🚀 *TRADE SIGNAL | NADO DEX*\n\n"
-            f"🪙 *Монета:* `{symbol}`\n"
-            f"📊 *Направление:* {dir_emoji}\n"
-            f"🔥 *Уверенность:* `{conviction}%` \n"
-            f"💰 *Сумма сделки:* `${pos_usd:,.2f}` ({pos_pct}% от баланса)\n"
-            f"🎯 *Цена входа (Entry):* `${entry_price:,.2f}`\n\n"
+            f"🪙 *Asset / Монета:* `{symbol}`\n"
+            f"📊 *Direction / Направление:* {dir_emoji}\n"
+            f"🔥 *AI Conviction / Уверенность:* `{conviction}%` \n"
+            f"💰 *Position / Сумма сделки:* `${pos_usd:,.2f}` ({pos_pct}%)\n"
+            f"🎯 *Entry / Цена входа:* `${entry_price:,.2f}`\n\n"
             f"🟢 *Take Profit (TP):* `${tp_price:,.2f}` (+{tp_pct}%)\n"
             f"🔴 *Stop Loss (SL):* `${sl_price:,.2f}` (-{sl_pct}%)\n"
-            f"⚖️ *Risk / Reward Ratio:* `{rr_ratio}`\n\n"
-            f"📝 *Анализ:* {reasoning}"
+            f"⚖️ *Risk/Reward:* `{rr_ratio}`\n\n"
+            f"📝 *Analysis / Аналитика:*\n{reasoning}"
         )
         return message
 

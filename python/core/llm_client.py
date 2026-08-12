@@ -18,13 +18,13 @@ class LLMClient:
 
         if self.openrouter_key and not self.openrouter_key.startswith("your_"):
             self.provider = "openrouter"
-            self.model_name = model_name or "meta-llama/llama-3.3-70b-instruct"
+            self.model_name = model_name or "google/gemini-2.0-pro-exp-02-05:free"
             print(f"[LLMClient] Инициализирован провайдер OpenRouter ({self.model_name})")
         elif self.groq_key and not self.groq_key.startswith("your_"):
             from groq import AsyncGroq
             self.provider = "groq"
-            self.model_name = model_name or "llama-3.3-70b-versatile"
-            self.client = AsyncGroq(api_key=self.groq_key, timeout=15.0)
+            self.model_name = model_name or "llama-3.1-8b-instant"
+            self.client = AsyncGroq(api_key=self.groq_key, timeout=45.0)
             print(f"[LLMClient] Инициализирован провайдер Groq ({self.model_name})")
         elif self.gemini_key and not self.gemini_key.startswith("your_"):
             from google import genai
@@ -41,6 +41,9 @@ class LLMClient:
         """
         Sends the fully formatted prompt to the LLM and retrieves JSON response.
         """
+        # Глобальный троттлинг для бесплатных лимитов (макс 20 запросов в минуту)
+        await asyncio.sleep(3)
+        
         if self.provider == "groq":
             for attempt in range(max_retries):
                 try:

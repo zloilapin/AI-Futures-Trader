@@ -26,7 +26,8 @@ class KrakenTradingService:
             print("✅ [KrakenTradingService] Учетные данные Kraken Futures инициализированы.")
 
         # Local tracker for active positions (Keeper Logic)
-        self.active_positions = {}
+        self.positions_file = "data/active_positions.json"
+        self.active_positions = self._load_positions()
         self.pending_trades = {}
         
         # Performance Tracking
@@ -60,6 +61,25 @@ class KrakenTradingService:
                 }, f)
         except Exception as e:
             print(f"⚠️ [KrakenTradingService] Ошибка сохранения статистики: {e}")
+
+    def _load_positions(self) -> dict:
+        import os, json
+        if os.path.exists(self.positions_file):
+            try:
+                with open(self.positions_file, 'r') as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"⚠️ [KrakenTradingService] Ошибка загрузки активных позиций: {e}")
+        return {}
+
+    def _save_positions(self):
+        import os, json
+        os.makedirs(os.path.dirname(self.positions_file), exist_ok=True)
+        try:
+            with open(self.positions_file, 'w') as f:
+                json.dump(self.active_positions, f, indent=4)
+        except Exception as e:
+            print(f"⚠️ [KrakenTradingService] Ошибка сохранения активных позиций: {e}")
         
     async def _close_exchange_async(self):
         """Clean up CCXT session"""
@@ -130,12 +150,19 @@ class KrakenTradingService:
             "roi_pct": 0.0
         }
 
-    async def _execute_market_order(self, symbol: str, direction: str, size_base: float):
+    async def _execute_market_order(self, symbol: str, direction: str, size_base: float, leverage: int = 1):
         """Helper to execute order via CCXT"""
         formatted_symbol = self._format_symbol(symbol)
         side = 'buy' if direction == 'LONG' else 'sell'
         
         try:
+            if leverage > 1 and hasattr(self.exchange, 'set_leverage'):
+                try:
+                    await self.exchange.set_leverage(leverage, formatted_symbol)
+                    print(f"⚙️ [KrakenTradingService] Плечо установлено на {leverage}x для {formatted_symbol}")
+                except Exception as e:
+                    print(f"⚠️ [KrakenTradingService] Не удалось динамически установить плечо {leverage}x: {e}")
+                    
             print(f"🌐 [KrakenTradingService] Отправка MARKET {side.upper()} ордера {size_base} {formatted_symbol}...")
             order = await self.exchange.create_market_order(formatted_symbol, side, size_base)
             print(f"✅ [KrakenTradingService] ОРДЕР ИСПОЛНЕН! ID: {order.get('id')}")
@@ -180,7 +207,7 @@ class KrakenTradingService:
         # Execute trade
         order_result = True
         if not is_virtual:
-            order_result = await self._execute_market_order(symbol, direction, size_base)
+            order_result = await self._execute_market_order(symbol, direction, size_base, leverage)
         
         if order_result:
             pos_id = str(uuid.uuid4())[:8]
@@ -287,8 +314,11 @@ class KrakenTradingService:
                 "pnl_usd": pnl,
                 "pnl_pct": (pnl / pos["size_usd"]) * 100 if pos["size_usd"] > 0 else 0
             }
-            closed_reports.append(report)
+            print(f"🧹 Позиция {symbol} удалена из активных (причина: {triggered_exit}).")
             del self.active_positions[symbol]
+            self._save_positions()
+            
+            closed_reports.append(report)
             
         return closed_reports
 
@@ -324,4 +354,5 @@ class KrakenTradingService:
         self._save_stats()
         
         del self.active_positions[symbol]
+        self._save_positions()
         return True, {"pnl_usd": pnl, "exit_price": current_price, "is_virtual": is_virtual}

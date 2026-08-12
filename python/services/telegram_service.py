@@ -106,8 +106,16 @@ class TelegramService:
                     elif response.status == 400:
                         payload.pop("parse_mode", None)
                         async with session.post(self.api_url, json=payload) as fallback_res:
-                            return fallback_res.status == 200
-                    return False
+                            if fallback_res.status == 200:
+                                return True
+                            else:
+                                err = await fallback_res.text()
+                                print(f"❌ [TelegramService] Ошибка отправки в канал (fallback): HTTP {fallback_res.status} - {err}")
+                                return False
+                    else:
+                        err = await response.text()
+                        print(f"❌ [TelegramService] Ошибка отправки в канал: HTTP {response.status} - {err}")
+                        return False
         except Exception as e:
             print(f"❌ [TelegramService] Ошибка отправки в публичный канал: {e}")
             return False

@@ -100,16 +100,22 @@ class RiskManager(BaseAgent):
             if spread > 0.4:
                 pos_usd *= 0.8 # Cut position by 20%
                 
-            # Max Position Size Guard
-            max_pos_usd = total_balance * max_pos_pct
+            # Leverage Integration
+            leverage = int(os.getenv("LEVERAGE", "10"))
+            max_margin_pct = float(os.getenv("MAX_MARGIN_PCT", "0.20"))
+            
+            # Max Position Size Guard (Notional = Max Margin * Leverage)
+            max_pos_usd = total_balance * max_margin_pct * leverage
             if pos_usd > max_pos_usd:
                 pos_usd = max_pos_usd
                 
-            pos_pct = (pos_usd / total_balance) * 100 if total_balance > 0 else 0
+            margin_usd = pos_usd / leverage if leverage > 0 else pos_usd
+            pos_pct = (margin_usd / total_balance) * 100 if total_balance > 0 else 0
             rr_ratio = distance_to_tp / distance_to_sl if distance_to_sl > 0 else 0
             
             # Format nicely
             pos_usd = round(pos_usd, 2)
+            margin_usd = round(margin_usd, 2)
             pos_pct = round(pos_pct, 2)
             sl_price = round(sl_price, 6)
             tp_price = round(tp_price, 6)
@@ -135,7 +141,8 @@ class RiskManager(BaseAgent):
             '  "stop_loss_price": <float>,\n'
             '  "risk_reward_ratio": <float>,\n'
             '  "approved": true | false\n'
-            "}"
+            "}\n"
+            "CRITICAL: Output ONLY valid JSON. Do not write any conversational text, explanations, or Python scripts outside the JSON object. Do not simulate missing data."
         )
         
         payload = {
@@ -145,7 +152,9 @@ class RiskManager(BaseAgent):
                 "pre_approved": approved,
                 "entry_price": current_price,
                 "position_size_usd": pos_usd,
-                "position_size_pct": pos_pct,
+                "margin_usd": margin_usd if approved else 0,
+                "leverage": int(os.getenv("LEVERAGE", "10")),
+                "position_margin_pct": pos_pct,
                 "stop_loss_price": sl_price,
                 "take_profit_price": tp_price,
                 "risk_reward_ratio": rr_ratio,

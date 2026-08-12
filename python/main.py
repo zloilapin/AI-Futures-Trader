@@ -137,9 +137,10 @@ async def run_single_cycle(
             for closed in closed_reports:
                 pnl_emoji = "🎉" if closed["pnl_usd"] >= 0 else "🔻"
                 closed_msg = (
-                    f"{pnl_emoji} *СДЕЛКА ЗАКРЫТА НА NADO DEX ({closed['triggered_by']})*\n\n"
-                    f"🪙 *Монета:* `{closed['symbol']}` | *Направление:* `{closed['direction']}`\n"
-                    f"🎯 *Цена входа:* `${closed['entry_price']:,.2f}` ➔ *Выход:* `${closed['exit_price']:,.2f}`\n"
+                    f"{pnl_emoji} *TRADE CLOSED / СДЕЛКА ЗАКРЫТА ({closed['triggered_by']})*\n\n"
+                    f"🪙 *Asset / Монета:* `{closed['symbol']}`\n"
+                    f"📊 *Direction / Направление:* `{closed['direction']}`\n"
+                    f"🎯 *Entry / Вход:* `${closed['entry_price']:,.2f}` ➔ *Exit / Выход:* `${closed['exit_price']:,.2f}`\n"
                     f"💰 *PnL:* `${closed['pnl_usd']:,.2f}` ({closed['pnl_pct']:,.2f}%)\n"
                 )
                 print(f"\n--- ЗАКРЫТИЕ ПОЗИЦИИ В TELEGRAM [{symbol}] ---")
@@ -203,8 +204,10 @@ async def run_single_cycle(
         
         print(f"⚖️ Решение CEO [{symbol}]: {decision} (Уверенность: {conviction}%)")
 
-        if decision not in ["LONG", "SHORT"] or conviction < 80:
-            print(f"⏸️ Пропуск {symbol}. Решение: {decision}, Уверенность: {conviction}% (Требуется LONG/SHORT и >= 80%).")
+        min_conv = 70 if profile == "AGGRESSIVE" else (85 if profile == "CONSERVATIVE" else 80)
+        
+        if decision not in ["LONG", "SHORT"] or conviction < min_conv:
+            print(f"⏸️ Пропуск {symbol}. Решение: {decision}, Уверенность: {conviction}% (Требуется LONG/SHORT и >= {min_conv}%).")
             scanner_status = "⚠️ ЗАБЛОКИРОВАН СКАНЕРОМ" if scanner_blocked else "✅ OK"
             asset_summary = {
                 "symbol": symbol,
@@ -213,7 +216,7 @@ async def run_single_cycle(
                 "scanner_status": scanner_status,
                 "scanner_reason": scanner_reason if scanner_blocked else None,
                 "risk_approved": False,
-                "risk_reason": "Пропущен из-за фильтра CEO (HOLD или Уверенность < 80)",
+                "risk_reason": f"Пропущен из-за фильтра CEO (HOLD или Уверенность < {min_conv})",
                 "ceo_reasoning": ceo_verdict.get("reasoning", ""),
                 "status": "⏸️ НЕТ СИГНАЛА"
             }
@@ -239,7 +242,8 @@ async def run_single_cycle(
                     "entry_price": risk_verdict.get("entry_price", current_price),
                     "size_usd": risk_verdict.get("position_size_usd", 0),
                     "tp_price": risk_verdict.get("take_profit_price", 0),
-                    "sl_price": risk_verdict.get("stop_loss_price", 0)
+                    "sl_price": risk_verdict.get("stop_loss_price", 0),
+                    "leverage": int(os.getenv("LEVERAGE", "10"))
                 }
                 trade_id = trading_service.register_pending_trade(trade_params)
                 risk_verdict["pending_trade_id"] = trade_id
@@ -255,7 +259,8 @@ async def run_single_cycle(
                     entry_price=risk_verdict.get("entry_price", current_price),
                     size_usd=risk_verdict.get("position_size_usd", 0),
                     tp_price=risk_verdict.get("take_profit_price", 0),
-                    sl_price=risk_verdict.get("stop_loss_price", 0)
+                    sl_price=risk_verdict.get("stop_loss_price", 0),
+                    leverage=int(os.getenv("LEVERAGE", "10"))
                 )
         else:
             print(f"❌ Status: VETOED BY RISK MANAGER ({risk_verdict.get('reasoning')})")
@@ -271,7 +276,7 @@ async def run_single_cycle(
             "scanner_reason": None,
             "risk_approved": risk_verdict.get("approved", False),
             "risk_reason": risk_verdict.get("reasoning", ""),
-            "ceo_reasoning": ceo_verdict.get("reasoning", ""),
+            "ceo_reasoning": f"{ceo_verdict.get('reasoning_en', '')}\n\n{ceo_verdict.get('reasoning_ru', '')}".strip(),
             "status": "🚀 СИГНАЛ" if risk_verdict.get("approved") else "⏸️ VETO"
         }
         scan_summaries.append(asset_summary)
@@ -311,7 +316,7 @@ async def run_single_cycle(
                 
             any_signal_sent = True
         else:
-            print(f"ℹ️ [Telegram] Пропуск отправки для {symbol}. Решение '{decision}' с уверенностью {conviction}% (Фильтр: LONG/SHORT и Уверенность ≥ 80%).")
+            print(f"ℹ️ [Telegram] Пропуск отправки для {symbol}. Решение '{decision}' с уверенностью {conviction}% (Фильтр: LONG/SHORT и Уверенность ≥ {min_conv}%).")
 
         # СТАДИЯ 7: СОХРАНЕНИЕ В ПАМЯТЬ
         cycle_record = {
@@ -330,7 +335,7 @@ async def run_single_cycle(
     # Если сканирование было запрошено вручную через /scan — всегда присылаем подробный отчёт (сводку)
     if force_scan:
         assets_list = ", ".join(selected_assets)
-        parts = [f"📋 РЕЗУЛЬТАТЫ РУЧНОГО СКАНИРОВАНИЯ\n\n🔍 Проанализированы: {assets_list}\n"]
+        parts = [f"📋 SCAN RESULTS / РЕЗУЛЬТАТЫ СКАНИРОВАНИЯ\n\n🔍 Analyzed / Проанализированы: {assets_list}\n"]
 
         for item in scan_summaries:
             sym = item.get("symbol", "?")
@@ -344,13 +349,13 @@ async def run_single_cycle(
             ceo_rsn = item.get("ceo_reasoning", "")
 
             block = f"{'='*28}\n🪙 {sym} — {status}\n"
-            block += f"📊 Решение CEO: {dec} | Уверенность: {conv}%\n"
-            block += f"🔎 Сканер: {scanner_st}\n"
+            block += f"📊 CEO: {dec} | Conviction/Уверенность: {conv}%\n"
+            block += f"🔎 Scanner/Сканер: {scanner_st}\n"
             if scanner_rsn:
                 safe_rsn = _escape_md(str(scanner_rsn)[:200])
                 block += f"   > {safe_rsn}\n"
-            risk_label = "✅ ОДОБРЕН" if risk_ok else "❌ ОТКЛОНЁН"
-            block += f"🛡 Риск-менеджер: {risk_label}\n"
+            risk_label = "✅ APPROVED / ОДОБРЕН" if risk_ok else "❌ REJECTED / ОТКЛОНЁН"
+            block += f"🛡 Risk Manager / Риск-менеджер: {risk_label}\n"
             if not risk_ok and risk_rsn:
                 safe_risk = _escape_md(str(risk_rsn)[:200])
                 block += f"   > {safe_risk}\n"
@@ -359,7 +364,7 @@ async def run_single_cycle(
                 block += f"📝 {safe_ceo}\n"
             parts.append(block)
 
-        parts.append("\n💡 Сигналы >=80% не обнаружены. Бот продолжает мониторинг.")
+        parts.append("\n💡 Сигналы >=80% не обнаружены. Бот продолжает мониторинг. / No >=80% signals found. Monitoring continues.")
         scan_reply = "\n".join(parts)
         # Отправляем без Markdown чтобы избежать ошибок парсинга спецсимволов
         await tg_sender.send_message(scan_reply, parse_mode="")
@@ -442,7 +447,7 @@ async def main():
             is_rest, time_str = get_msk_status()
             profile = os.getenv("TRADING_PROFILE", "BALANCED")
             print(f"⏰ Режим автономного сканирования активирован! [Текущее время: {time_str}]")
-            print(f"🔄 Интервал сканирования: День (07:00-19:00) = 60 мин | Ночь (19:00-07:00) = 30 мин.")
+            print(f"🔄 Интервал сканирования: Круглосуточно каждые {scan_interval_min} мин.")
             print(f"⚙️ Профиль риска: {profile} | 📐 Multi-Timeframe (15m + 1H + 4H) ON")
             print("💡 Для остановки нажмите Ctrl+C в любой момент.\n")
             
@@ -450,16 +455,22 @@ async def main():
 
             try:
                 while True:
-                    await run_single_cycle(
-                        cycle_number, logger, fetcher, tg_sender, trading_service,
-                        universe_agent, scanner_agent, candle_agent, ob_agent,
-                        oi_agent, news_agent, indicator_agent, ceo_agent,
-                        risk_manager, telegram_agent, reflector_agent, memory_manager
-                    )
+                    try:
+                        await run_single_cycle(
+                            cycle_number, logger, fetcher, tg_sender, trading_service,
+                            universe_agent, scanner_agent, candle_agent, ob_agent,
+                            oi_agent, news_agent, indicator_agent, ceo_agent,
+                            risk_manager, telegram_agent, reflector_agent, memory_manager
+                        )
+                    except Exception as e:
+                        import traceback
+                        error_msg = f"КРИТИЧЕСКАЯ ОШИБКА В ЦИКЛЕ №{cycle_number}: {e}"
+                        print(f"\n❌ {error_msg}")
+                        traceback.print_exc()
+                        logger.error(error_msg)
                     
                     is_rest_now, _ = get_msk_status()
-                    # Меняем местами: Ночью (США сессия) сканируем каждые 30 мин, Днем (менее активно) — каждые 60 мин.
-                    current_interval_min = 30 if is_rest_now else 60
+                    current_interval_min = int(os.getenv("SCAN_INTERVAL_MINUTES", "30"))
                     interval_seconds = current_interval_min * 60
                     
                     cycle_number += 1

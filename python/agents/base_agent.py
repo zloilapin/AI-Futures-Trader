@@ -34,9 +34,9 @@ class BaseAgent:
             clean_text = response_text.strip()
             
             # 1. Поиск блока JSON внутри markdown ограждений
-            match = re.search(r"```(?:json)?(.*?)```", clean_text, re.DOTALL | re.IGNORECASE)
-            if match:
-                clean_text = match.group(1).strip()
+            matches = re.findall(r"```(?:json)?(.*?)```", clean_text, re.DOTALL | re.IGNORECASE)
+            if matches:
+                clean_text = matches[-1].strip()
             else:
                 # 2. Если ограждений нет, ищем от первой { до последней }
                 start_idx = clean_text.find('{')
@@ -50,6 +50,8 @@ class BaseAgent:
                     parsed = parsed[0]
                 else:
                     return {"signal": "ERROR", "reasoning": "LLM returned a list instead of JSON object"}
+            elif not isinstance(parsed, dict):
+                return {"signal": "ERROR", "reasoning": f"LLM returned non-dict: {type(parsed).__name__}"}
             return parsed
             
         except json.JSONDecodeError as e:

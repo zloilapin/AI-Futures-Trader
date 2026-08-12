@@ -51,7 +51,14 @@ class TradeLogger:
         print(f"[ERROR] {message}")
         self.log_decision("System_Error", message)
 
+    def warning(self, message: str):
+        """
+        Standard warning logging method.
+        """
+        print(f"[WARNING] {message}")
+        self.log_decision("System_Warning", message)
+
 if __name__ == "__main__":
     logger = TradeLogger()
     logger.info("System initialized for Nado DEX monitoring.")
-    
+
