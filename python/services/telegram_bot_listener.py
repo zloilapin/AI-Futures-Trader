@@ -20,6 +20,7 @@ class TelegramBotListener:
         self.api_url = f"https://api.telegram.org/bot{self.bot_token}/getUpdates" if self.bot_token else None
         self.send_url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage" if self.bot_token else None
         self._background_tasks = set()  # Prevent GC of background tasks
+        self.is_scanning = False
 
     async def _send_reply(self, text: str, reply_markup: dict = None):
         if not self.send_url or not self.chat_id:
@@ -122,10 +123,19 @@ class TelegramBotListener:
 
             elif cmd in ["/scan", "/run"]:
                 print(f"🔔 [TelegramListener] Обработка команды /scan...")
-                await self._send_reply("🚀 *Запуск немедленного сканирования рынка Nado DEX по запросу...*")
-                if self.trigger_scan_callback:
-                    print(f"🔔 [TelegramListener] trigger_scan_callback найден, запускаем задачу...")
-                    task = asyncio.create_task(self.trigger_scan_callback())
+                if self.is_scanning:
+                    await self._send_reply("⏳ Сканирование уже выполняется. Пожалуйста, дождитесь окончания текущего цикла.")
+                elif self.trigger_scan_callback:
+                    self.is_scanning = True
+                    await self._send_reply("🚀 *Запуск немедленного сканирования рынка Nado DEX по запросу...*")
+                    
+                    async def wrapped_scan():
+                        try:
+                            await self.trigger_scan_callback()
+                        finally:
+                            self.is_scanning = False
+                            
+                    task = asyncio.create_task(wrapped_scan())
                     self._background_tasks.add(task)
                     task.add_done_callback(self._background_tasks.discard)
                     print(f"🔔 [TelegramListener] Задача сканирования создана: {task.get_name()}")

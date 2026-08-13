@@ -21,6 +21,7 @@ class ReflectorAgent(BaseAgent):
             "Identify the root cause of the failure or success, and extract a concise, actionable trading lesson.\n\n"
             "Output JSON strictly matching this schema:\n"
             "{\n"
+            '  "symbol": "<e.g., BTC>",\n'
             '  "reasoning": "<step-by-step brief post-mortem breakdown>",\n'
             '  "root_cause": "<e.g., Entered LONG into 4H bear trend / RSI divergence fakeout>",\n'
             '  "actionable_rule": "<e.g., WARNING: Do not enter LONG when 4H trend is BEARISH and RSI > 60>",\n'
@@ -28,16 +29,31 @@ class ReflectorAgent(BaseAgent):
             "}"
         )
 
-    def get_lessons(self, limit: int = 5) -> List[str]:
-        """Returns the most recent actionable rules/lessons learned."""
+    def get_lessons(self, limit: int = 5, symbol: str = None) -> List[str]:
+        """Returns the most recent actionable rules/lessons learned, prioritizing LOSSes and specific symbols."""
         if not os.path.exists(self.lessons_file):
             return []
         try:
             with open(self.lessons_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                lessons = [item.get("actionable_rule") for item in data if item.get("actionable_rule")]
-                return lessons[-limit:]
-        except Exception:
+                
+                # Filter only for losses (we want to learn from mistakes, not successes)
+                loss_data = [item for item in data if item.get("trade_outcome") == "LOSS" and item.get("actionable_rule")]
+                
+                lessons = []
+                # First, get lessons specific to this symbol
+                if symbol:
+                    symbol_lessons = [item.get("actionable_rule") for item in loss_data if item.get("symbol") == symbol]
+                    lessons.extend(symbol_lessons[-limit:])
+                
+                # If we still have room, pad with generic recent losses
+                if len(lessons) < limit:
+                    generic_lessons = [item.get("actionable_rule") for item in loss_data if item.get("symbol") != symbol]
+                    lessons.extend(generic_lessons[-(limit - len(lessons)):])
+                
+                return lessons
+        except Exception as e:
+            self.logger.error(f"[{self.name}] Error reading lessons: {e}")
             return []
 
     def _save_lesson(self, reflection: Dict[str, Any]):

@@ -23,8 +23,7 @@ class TelegramAgent(BaseAgent):
         conviction = ceo.get("conviction", 0)
         dir_emoji = "🟢 LONG" if decision == "LONG" else ("🔴 SHORT" if decision == "SHORT" else "⚪ HOLD")
         reasoning_en = ceo.get("reasoning_en", "")
-        reasoning_ru = ceo.get("reasoning_ru", "Сигнал подтвержден моделью.")
-        reasoning = f"{reasoning_en}\n\n{reasoning_ru}".strip()
+        reasoning = f"{reasoning_en}".strip()
 
         if decision == "HOLD":
             return (

@@ -9,6 +9,7 @@ load_dotenv()
 # --- CORE IMPORTS ---
 from core.logger import TradeLogger
 from core.llm_client import LLMClient
+from core.config import config
 
 # --- AGENT IMPORTS ---
 from agents.universe_agent import UniverseAgent
@@ -38,12 +39,12 @@ def get_msk_status() -> tuple[bool, str]:
     Checks if current time in MSK (UTC+3) is within quiet rest window (19:10 - 07:00 MSK).
     Returns (is_rest_period, current_msk_formatted_time).
     """
-    offset = int(os.getenv("TIMEZONE_OFFSET", "3"))
+    offset = config.TIMEZONE_OFFSET
     msk_tz = timezone(timedelta(hours=offset))
     now_msk = datetime.now(msk_tz)
     
-    start_parts = os.getenv("REST_START_TIME", "19:00").split(":")
-    end_parts = os.getenv("REST_END_TIME", "07:00").split(":")
+    start_parts = config.REST_START_TIME.split(":")
+    end_parts = config.REST_END_TIME.split(":")
     
     start_mins = int(start_parts[0]) * 60 + int(start_parts[1])
     end_mins = int(end_parts[0]) * 60 + int(end_parts[1])
@@ -81,10 +82,8 @@ async def run_single_cycle(
     force_scan: bool = False
 ):
     is_rest, time_str = get_msk_status()
-    profile = os.getenv("TRADING_PROFILE", "BALANCED")
-    exchange_name = "NADO DEX INK L2"
-    if hasattr(trading_service, "exchange"):
-        exchange_name = "KRAKEN FUTURES"
+    profile = config.TRADING_PROFILE
+    exchange_name = "Kraken Futures"
     
     print(f"\n" + "="*65)
     print(f"🚀 ТОРГОВЫЙ ЦИКЛ №{cycle_number} ({exchange_name}) [{time_str}]")
@@ -243,7 +242,7 @@ async def run_single_cycle(
                     "size_usd": risk_verdict.get("position_size_usd", 0),
                     "tp_price": risk_verdict.get("take_profit_price", 0),
                     "sl_price": risk_verdict.get("stop_loss_price", 0),
-                    "leverage": int(os.getenv("LEVERAGE", "10"))
+                    "leverage": config.LEVERAGE
                 }
                 trade_id = trading_service.register_pending_trade(trade_params)
                 risk_verdict["pending_trade_id"] = trade_id
@@ -260,7 +259,7 @@ async def run_single_cycle(
                     size_usd=risk_verdict.get("position_size_usd", 0),
                     tp_price=risk_verdict.get("take_profit_price", 0),
                     sl_price=risk_verdict.get("stop_loss_price", 0),
-                    leverage=int(os.getenv("LEVERAGE", "10"))
+                    leverage=config.LEVERAGE
                 )
         else:
             print(f"❌ Status: VETOED BY RISK MANAGER ({risk_verdict.get('reasoning')})")
@@ -313,8 +312,6 @@ async def run_single_cycle(
             # Если сделка не требует ручного подтверждения (дневной режим), транслируем сразу
             if not pending_id:
                 await tg_sender.broadcast_to_channel(tg_message)
-                
-            any_signal_sent = True
         else:
             print(f"ℹ️ [Telegram] Пропуск отправки для {symbol}. Решение '{decision}' с уверенностью {conviction}% (Фильтр: LONG/SHORT и Уверенность ≥ {min_conv}%).")
 
@@ -378,17 +375,18 @@ async def main():
     logger = TradeLogger()
     llm_client = LLMClient()
     fetcher = MarketDataService()
-    tg_sender = TelegramService()
-    trading_engine = os.getenv("TRADING_ENGINE", "PAPER").upper()
-    if trading_engine == "KRAKEN":
-        print("🔴 ВНИМАНИЕ: АКТИВИРОВАН БОЕВОЙ РЕЖИМ (KRAKEN FUTURES)!")
-        trading_service = KrakenTradingService()
-    elif trading_engine == "NADO" or os.getenv("LIVE_TRADING_ENABLED", "False").lower() == "true":
-        print("🔴 ВНИМАНИЕ: АКТИВИРОВАН БОЕВОЙ РЕЖИМ (NADO DEX)!")
-        trading_service = LiveTradingService()
-    else:
-        print("🟢 Режим симуляции (Paper Trading) активен.")
+    print("Инициализация сервисов...")
+    
+    trading_engine = config.TRADING_ENGINE
+    
+    if trading_engine == "PAPER" and not config.LIVE_TRADING_ENABLED:
+        from services.paper_trading_service import PaperTradingService
         trading_service = PaperTradingService()
+        exchange_name = "Paper Trading"
+    else:
+        from services.kraken_trading_service import KrakenTradingService
+        trading_service = KrakenTradingService()
+        exchange_name = "Kraken Futures"
     
     universe_agent = UniverseAgent(logger, llm_client)
     scanner_agent = ScannerAgent(logger, llm_client)
@@ -429,7 +427,7 @@ async def main():
     bot_listener = TelegramBotListener(trading_service, trigger_scan_callback=trigger_scan)
 
     run_once = "--once" in sys.argv
-    scan_interval_min = int(os.getenv("SCAN_INTERVAL_MINUTES", "5"))
+    scan_interval_min = config.SCAN_INTERVAL_MINUTES
     interval_seconds = scan_interval_min * 60
 
     cycle_number = 1
@@ -445,7 +443,7 @@ async def main():
             )
         else:
             is_rest, time_str = get_msk_status()
-            profile = os.getenv("TRADING_PROFILE", "BALANCED")
+            profile = config.TRADING_PROFILE
             print(f"⏰ Режим автономного сканирования активирован! [Текущее время: {time_str}]")
             print(f"🔄 Интервал сканирования: Круглосуточно каждые {scan_interval_min} мин.")
             print(f"⚙️ Профиль риска: {profile} | 📐 Multi-Timeframe (15m + 1H + 4H) ON")
@@ -470,7 +468,7 @@ async def main():
                         logger.error(error_msg)
                     
                     is_rest_now, _ = get_msk_status()
-                    current_interval_min = int(os.getenv("SCAN_INTERVAL_MINUTES", "30"))
+                    current_interval_min = config.SCAN_INTERVAL_MINUTES
                     interval_seconds = current_interval_min * 60
                     
                     cycle_number += 1

@@ -1,0 +1,2 @@
+class LLMCircuitBreakerException(Exception):
+    pass

@@ -23,11 +23,10 @@ class CEOAgent(BaseAgent):
             "3. Weighting the Analysts:\n"
             "   - Price Action (Sweeps/BOS) & Derivatives (Squeezes/Funding) are your PRIMARY profit drivers. Weight them heavily.\n"
             "   - Technical Indicators and Order Book are CONFIRMATION tools.\n"
-            "4. Strict Memory Adherence: If the current market setup resembles a past failure in 'historical_trade_memory', abort the trade (HOLD) immediately.\n\n"
+            "4. Strict Memory Adherence: If the current market setup resembles a past failure in 'past_lessons_learned' (which are extracted anti-patterns from your past losses), abort the trade (HOLD) immediately.\n\n"
             "Output JSON strictly matching this schema:\n"
             "{\n"
             '  "reasoning_en": "<step-by-step CIO executive summary of the confluence (or lack thereof) across all institutional reports>",\n'
-            '  "reasoning_ru": "<step-by-step CIO executive summary in STRICT Russian language (ru-RU). DO NOT use Ukrainian words>",\n'
             '  "mtf_validation": "<e.g., 1H/4H Trend Alignment VERIFIED / OVERRIDDEN DUE TO CAPITULATION>",\n'
             '  "consensus_summary": "<e.g., Perfect Storm: Liquidity Sweep + Short Squeeze + Divergence>",\n'
             '  "conviction": <int 1-100 (Only >75% for A+ setups)>,\n'
@@ -48,7 +47,8 @@ class CEOAgent(BaseAgent):
             "target_symbol": symbol,
             "multi_timeframe_context": mtf_data,
             "subordinate_analyst_reports": analyst_reports,
-            "historical_trade_memory": historical_context
+            "historical_trade_memory": historical_context,
+            "past_lessons_learned": data.get("past_lessons_learned", [])
         }
         
         data_string = json.dumps(payload, indent=2)

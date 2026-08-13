@@ -60,10 +60,11 @@ class MarketDataService:
         s = symbol.upper().replace("-", "").replace("/", "").replace("USDC", "USD").replace("USDT", "USD")
         if s.startswith("BTC"):
             return "XBTUSD"
-        elif s.startswith("ETH"):
-            return "ETHUSD"
-        elif s.startswith("SOL"):
-            return "SOLUSD"
+        
+        # Ensure it ends with USD for Kraken Spot API
+        if not s.endswith("USD"):
+            s = f"{s}USD"
+            
         return s
 
     async def _fetch_ohlc_interval(self, symbol: str, interval_min: int) -> Dict[str, Any]:
@@ -92,9 +93,8 @@ class MarketDataService:
                                 "volume": round(vol * current_price, 2)
                             }
         except Exception as e:
-            print(f"⚠️ [MarketDataService] Ошибка загрузки OHLC {interval_min}m: {e}")
-        
-        return {"interval_min": interval_min, "current_price": 63750.0, "trend": "NEUTRAL", "change_pct": 0.0, "volume": 1500000.0}
+            print(f"⚠️ [MarketDataService] Ошибка загрузки OHLC {interval_min}m для {symbol}: {e}")
+            raise Exception(f"Не удалось получить OHLC {interval_min}m для {symbol}") from e
 
     async def fetch_multi_timeframe(self, symbol: str) -> Dict[str, Any]:
         """
@@ -106,11 +106,11 @@ class MarketDataService:
             self._fetch_ohlc_interval(symbol, 240)
         )
 
-        t15 = tf_15m.get("trend", "NEUTRAL")
-        t1h = tf_1h.get("trend", "NEUTRAL")
-        t4h = tf_4h.get("trend", "NEUTRAL")
+        t15 = tf_15m.get("trend", "NEUTRAL") if tf_15m else "NEUTRAL"
+        t1h = tf_1h.get("trend", "NEUTRAL") if tf_1h else "NEUTRAL"
+        t4h = tf_4h.get("trend", "NEUTRAL") if tf_4h else "NEUTRAL"
 
-        if t15 == t1h == t4h:
+        if t15 == t1h == t4h and t15 != "NEUTRAL":
             alignment = "FULL_ALIGNMENT"
         elif t1h == t4h and t15 != t1h:
             alignment = "COUNTER_TREND_WARNING"
@@ -129,7 +129,10 @@ class MarketDataService:
 
     async def fetch_ohlcv(self, symbol: str, timeframe: str = "15m") -> Dict[str, Any]:
         """Fetches real candlestick data and computes price trend from Kraken."""
-        res = await self._fetch_ohlc_interval(symbol, 15)
+        tf_map = {"15m": 15, "1h": 60, "4h": 240, "1d": 1440}
+        interval_min = tf_map.get(timeframe.lower(), 15)
+        res = await self._fetch_ohlc_interval(symbol, interval_min)
+            
         return {
             "symbol": symbol,
             "timeframe": timeframe,
@@ -155,20 +158,21 @@ class MarketDataService:
                             if bids and asks:
                                 best_bid = float(bids[0][0])
                                 best_ask = float(asks[0][0])
-                                spread = round(best_ask - best_bid, 2)
+                                spread = round(best_ask - best_bid, 4)
+                                spread_pct = round((spread / best_bid) * 100, 4)
                                 bid_vol = sum(float(b[1]) for b in bids)
                                 ask_vol = sum(float(a[1]) for a in asks)
                                 return {
                                     "symbol": symbol,
                                     "spread": spread,
+                                    "spread_pct": spread_pct,
                                     "bid_volume": round(bid_vol, 4),
                                     "ask_volume": round(ask_vol, 4),
                                     "imbalance_ratio": round(bid_vol / (ask_vol + 1e-6), 2)
                                 }
         except Exception as e:
             print(f"⚠️ [MarketDataService] Ошибка загрузки стакана: {e}")
-
-        return {"symbol": symbol, "spread": 0.50, "bid_volume": 12.5, "ask_volume": 10.2, "imbalance_ratio": 1.22}
+            raise Exception(f"Не удалось получить стакан для {symbol}") from e
 
     async def fetch_indicators(self, symbol: str) -> Dict[str, Any]:
         """Fetches candle data and computes RSI-14, EMA-20, and MACD."""
@@ -194,12 +198,20 @@ class MarketDataService:
                                 rs = avg_gain / (avg_loss + 1e-6)
                                 rsi = round(100 - (100 / (1 + rs)), 2)
 
-                                ema_20 = round(sum(closes[-20:]) / 20, 2)
-                                current_price = closes[-1]
-                                ema_trend = "up" if current_price > ema_20 else "down"
+                                def calc_ema(data, period):
+                                    if len(data) < period: return sum(data)/len(data) if data else 0
+                                    ema = sum(data[:period]) / period
+                                    k = 2 / (period + 1)
+                                    for price in data[period:]: ema = (price - ema) * k + ema
+                                    return ema
 
-                                ema_12 = sum(closes[-12:]) / 12
-                                macd_val = ema_12 - ema_20
+                                ema_20_raw = calc_ema(closes, 20)
+                                current_price = closes[-1]
+                                ema_trend = "up" if current_price > ema_20_raw else "down"
+
+                                ema_12_raw = calc_ema(closes, 12)
+                                macd_val = ema_12_raw - ema_20_raw
+                                ema_20 = round(ema_20_raw, 2)
                                 macd_signal = "bullish" if macd_val > 0 else "bearish"
 
                                 # ATR-14 (Average True Range)
@@ -219,8 +231,7 @@ class MarketDataService:
                                 }
         except Exception as e:
             print(f"⚠️ [MarketDataService] Ошибка расчёта индикаторов: {e}")
-
-        return {"symbol": symbol, "rsi_14": 52.5, "macd_signal": "bullish", "ema_trend": "up"}
+            raise Exception(f"Не удалось получить индикаторы для {symbol}") from e
 
     async def fetch_news_sentiment(self, symbol: str) -> Dict[str, Any]:
         """Fetches real Crypto Fear & Greed Index from Alternative.me."""
@@ -240,16 +251,35 @@ class MarketDataService:
                         }
         except Exception as e:
             print(f"⚠️ [MarketDataService] Ошибка загрузки сентимента: {e}")
-
-        return {"symbol": symbol, "sentiment_score": 50.0, "latest_event": "Market sentiment neutral"}
+            raise Exception(f"Не удалось получить сентимент для {symbol}") from e
 
     async def fetch_oi_funding(self, symbol: str) -> Dict[str, Any]:
-        """Fetches Open Interest trend and funding rates."""
-        return {
-            "symbol": symbol,
-            "open_interest_trend": "increasing",
-            "funding_rate": 0.0001
-        }
+        """Fetches real Open Interest and funding rates from Kraken Futures."""
+        url = "https://futures.kraken.com/derivatives/api/v3/tickers"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        tickers = data.get("tickers", [])
+                        
+                        target_base = "XBT" if symbol.upper() == "BTC" else symbol.upper()
+                        
+                        for t in tickers:
+                            if t.get("tag") == "perpetual" and t.get("pair"):
+                                base_asset = t.get("pair").split(":")[0]
+                                if base_asset == target_base:
+                                    funding_rate = float(t.get("fundingRate", 0.0001) or 0.0001)
+                                    open_interest = float(t.get("openInterest", 0) or 0)
+                                    return {
+                                        "symbol": symbol,
+                                        "open_interest": open_interest,
+                                        "open_interest_trend": "neutral",
+                                        "funding_rate": round(funding_rate, 6)
+                                    }
+        except Exception as e:
+            print(f"⚠️ [MarketDataService] Ошибка загрузки OI/Funding: {e}")
+            raise Exception(f"Не удалось получить OI/Funding для {symbol}") from e
 
     async def fetch_all_market_data(self, symbol: str) -> Dict[str, Any]:
         """
