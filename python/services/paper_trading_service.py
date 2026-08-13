@@ -67,12 +67,18 @@ class PaperTradingService:
             "recent_streak": recent_streak
         }
 
+    @property
+    def active_positions(self) -> Dict[str, Any]:
+        """Returns active positions as a dictionary mapping symbol to position data, for compatibility with KrakenTradingService."""
+        return {pos["symbol"]: pos for pos in self.state["active_positions"]}
+
     async def open_position(self, symbol: str, direction: str, entry_price: float, size_usd: float, tp_price: float, sl_price: float, leverage: int = 1) -> Optional[Dict[str, Any]]:
         """Opens a virtual position if balance is sufficient."""
-        if size_usd <= 0 or self.state["current_balance"] < size_usd:
+        margin_usd = size_usd / leverage if leverage > 0 else size_usd
+        if margin_usd <= 0 or self.state["current_balance"] < margin_usd:
             return None
 
-        self.state["current_balance"] -= size_usd
+        self.state["current_balance"] -= margin_usd
         
         position = {
             "id": f"{symbol}_{int(datetime.now().timestamp())}",
@@ -89,7 +95,7 @@ class PaperTradingService:
 
         self.state["active_positions"].append(position)
         self._save_state()
-        print(f"💼 [PaperTrading] Открыта виртуальная позиция {direction} {symbol} на ${size_usd:,.2f} по цене ${entry_price:,.2f}")
+        print(f"💼 [PaperTrading] Открыта виртуальная позиция {direction} {symbol} на ${size_usd:,.2f} (Маржа: ${margin_usd:,.2f}) по цене ${entry_price:,.2f}")
         return position
 
     def check_and_update_positions(self, symbol: str, current_price: float) -> List[Dict[str, Any]]:
@@ -112,6 +118,7 @@ class PaperTradingService:
             sl = pos["sl_price"]
             size = pos["size_usd"]
             be_active = pos.get("breakeven_activated", False)
+            leverage = pos.get("leverage", 1)
 
             # BREAKEVEN GUARD CHECK (При 50% пути к TP переносим Stop Loss в безубыток)
             if not be_active and tp > 0 and entry > 0:
@@ -162,12 +169,13 @@ class PaperTradingService:
 
             if triggered_exit:
                 if direction == "LONG":
-                    pnl_pct = ((exit_price - entry) / entry) * 100 * pos.get("leverage", 1)
+                    pnl_pct = ((exit_price - entry) / entry) * 100 * leverage
                 else:
-                    pnl_pct = ((entry - exit_price) / entry) * 100 * pos.get("leverage", 1)
+                    pnl_pct = ((entry - exit_price) / entry) * 100 * leverage
 
-                pnl_usd = size * (pnl_pct / 100)
-                returned_capital = size + pnl_usd
+                margin_usd = size / leverage if leverage > 0 else size
+                pnl_usd = margin_usd * (pnl_pct / 100)
+                returned_capital = margin_usd + pnl_usd
 
                 self.state["current_balance"] += returned_capital
                 self.state["total_pnl_usd"] += pnl_usd

@@ -14,7 +14,7 @@ class CandleAgent(BaseAgent):
 
         self.system_instruction = (
             "You are a Senior Price Action & Liquidity Analyst at a crypto prop-trading firm. You trade pure price action, focusing on market psychology and liquidity.\n"
-            "Your objective: Analyze 15-minute candlestick structure to identify where retail traders are trapped and where institutional money is flowing.\n\n"
+            "Your objective: Analyze 15-minute candlestick structure on Kraken Futures to identify where retail traders are trapped and where institutional money is flowing.\n\n"
             "Professional Evaluation Rules:\n"
             "1. Liquidity Sweeps (Stop Runs): Look for long wicks that sweep previous local highs/lows and immediately reject. This means retail stop-losses were hunted to fill institutional orders. Strong reversal signal.\n"
             "2. Market Structure & Displacement: Identify genuine breaks of structure (BOS). A real structural shift is accompanied by large displacement candles (strong body, little wick), not weak choppy candles.\n"
@@ -35,7 +35,7 @@ class CandleAgent(BaseAgent):
         self.logger.info(f"[{self.name}] Глубокий анализ прайс-экшена и свечных паттернов...")
         
         price_data = market_data.get("price_data", {})
-        ohlcv = market_data.get("ohlcv_15m", [])
+        ohlcv = price_data.get("candles_20", [])
         
         payload = {
             "symbol": market_data.get("symbol"),

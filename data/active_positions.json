@@ -1,0 +1,30 @@
+{
+    "AVAX": {
+        "id": "55b8c410",
+        "symbol": "AVAX",
+        "direction": "LONG",
+        "entry_price": 6.5,
+        "size_usd": 278.97,
+        "size_base": 42.91846153846154,
+        "tp_price": 6.734,
+        "sl_price": 6.422,
+        "breakeven_activated": false,
+        "is_virtual": false,
+        "timestamp": 1786628106.578337,
+        "highest_price": 6.5,
+        "lowest_price": 6.5
+    },
+    "SOL": {
+        "id": "95d3e43e",
+        "symbol": "SOL",
+        "direction": "LONG",
+        "entry_price": 76.16,
+        "size_usd": 278.33,
+        "size_base": 3.6545430672268906,
+        "tp_price": 78.90176,
+        "sl_price": 75.24608,
+        "breakeven_activated": false,
+        "is_virtual": false,
+        "timestamp": 1786630126.3533185
+    }
+}

@@ -18,29 +18,42 @@ async def test_risk_manager_minimum_notional(risk_manager):
     portfolio_data = {"total_usd": 1000.0, "recent_streak": []}
     market_data = {
         "price_data": {"current_price": 50000.0},
-        "indicators": {"atr_14": 1000.0, "rsi_14": 50},
+        "indicators": {"atr_14": 50000.0, "rsi_14": 50}, # Massive ATR to force tiny pos_usd
         "order_book_data": {"spread_pct": 0.01}
     }
     
+    # Balance 1000. Risk 1% = $10. SL dist = 50000 * 1.5 = 75000. 
+    # units = 10 / 75000 = 0.0001333. pos_usd = 6.66
+    # This is < 15. But total_balance * leverage (1000) > 15, so it should bump to 15.
     res = await risk_manager.analyze(ceo_decision, portfolio_data, market_data)
     assert res["approved"] is True
-    # Balance is 1000. Risk 1% = $10 risk. 
-    # SL is current - (atr*1.5) = 50000 - 1500 = 48500
-    # units = 10 / 1500 = 0.00666 BTC -> pos_usd = 333.33 USD (which is > 15 MIN_NOTIONAL)
-    # The returned dict uses the mocked LLM output
-    assert res["position_size_usd"] == 100.0
+    assert res["position_size_usd"] == 15.0
+
+@pytest.mark.asyncio
+async def test_risk_manager_minimum_notional_veto(risk_manager):
+    ceo_decision = {"decision": "LONG", "conviction": 90, "symbol": "BTC"}
+    portfolio_data = {"total_usd": 1.0, "recent_streak": []} # Tiny balance!
+    market_data = {
+        "price_data": {"current_price": 50000.0},
+        "indicators": {"atr_14": 50000.0, "rsi_14": 50}, 
+        "order_book_data": {"spread_pct": 0.01}
+    }
+    
+    # balance=10. risk 1% = $0.1. pos_usd will be tiny. 
+    # MIN_NOTIONAL = 15. total_balance (10) * leverage (1) = 10 < 15.
+    # It should VETO!
+    res = await risk_manager.analyze(ceo_decision, portfolio_data, market_data)
+    assert res["approved"] is False
 
 @pytest.mark.asyncio
 async def test_risk_manager_min_base_amount(risk_manager):
     ceo_decision = {"decision": "LONG", "conviction": 90, "symbol": "BTC"}
-    portfolio_data = {"total_usd": 100.0, "recent_streak": []} # Small balance
+    portfolio_data = {"total_usd": 100.0, "recent_streak": []}
     market_data = {
         "price_data": {"current_price": 60000.0},
         "indicators": {"atr_14": 3000.0, "rsi_14": 50},
         "order_book_data": {"spread_pct": 0.01}
     }
     
-    # Internal logic will see: Risk = $1. SL dist = $4500. Units = 1/4500 = 0.00022 BTC
-    # But min BTC base amount is 0.0001, so it shouldn't hit min_base bump unless pos_usd/price < 0.0001
     res = await risk_manager.analyze(ceo_decision, portfolio_data, market_data)
     assert res["approved"] is True

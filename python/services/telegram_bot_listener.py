@@ -10,10 +10,10 @@ class TelegramBotListener:
     """
     Background listener for interactive Telegram commands (/status, /pnl, /balance, /scan, /help).
     """
-    def __init__(self, paper_trading: PaperTradingService, trigger_scan_callback: Optional[Callable[[], Awaitable[None]]] = None):
+    def __init__(self, trading_service, trigger_scan_callback: Optional[Callable[[], Awaitable[None]]] = None):
         self.bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
         self.chat_id = os.getenv("TELEGRAM_CHAT_ID")
-        self.paper_trading = paper_trading
+        self.trading_service = trading_service
         self.trigger_scan_callback = trigger_scan_callback
         self.offset = 0
         self.running = False
@@ -64,9 +64,9 @@ class TelegramBotListener:
                 rest_start = os.getenv("REST_START_TIME", "19:00")
                 rest_end = os.getenv("REST_END_TIME", "07:00")
                 
-                summary = await self.paper_trading.get_portfolio_summary()
+                summary = await self.trading_service.get_portfolio_summary()
                 reply = (
-                    f"🤖 *AI TRADER STATUS | NADO DEX*\n\n"
+                    f"🤖 *AI TRADER STATUS | KRAKEN FUTURES*\n\n"
                     f"🟢 *Статус системы:* Активна 24/7\n"
                     f"⏱️ *Интервал сканирования:* каждые {interval} мин\n"
                     f"⚙️ *Профиль риска:* `{profile}`\n"
@@ -77,7 +77,7 @@ class TelegramBotListener:
                 await self._send_reply(reply)
 
             elif cmd in ["/pnl", "/balance", "/portfolio"]:
-                s = await self.paper_trading.get_portfolio_summary()
+                s = await self.trading_service.get_portfolio_summary()
                 reply = (
                     f"📊 *PORTFOLIO & PnL SUMMARY*\n\n"
                     f"💵 *Текущий баланс:* `${s['current_balance']:,.2f}`\n"
@@ -89,7 +89,7 @@ class TelegramBotListener:
                 await self._send_reply(reply)
 
             elif cmd in ["/positions", "/pos"]:
-                positions = getattr(self.paper_trading, "active_positions", {})
+                positions = getattr(self.trading_service, "active_positions", {})
                 if not positions:
                     await self._send_reply("💼 *Открытых позиций сейчас нет.*")
                 else:

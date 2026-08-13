@@ -14,9 +14,9 @@ class UniverseAgent(BaseAgent):
         super().__init__("Universe_Agent", logger, llm_client)
         
         self.system_instruction = (
-            "You are a Senior Prop-Trader at a tier-1 crypto hedge fund. Your daily routine starts with screening the market "
-            "to find where the institutional money and retail crowds are clashing today on Nado DEX.\n"
-            "You are provided with a 'trending_perps' list containing assets, their 24h quote volume (vol24h), and 24h price change (change24h).\n"
+            "You are a Senior Quantitative Analyst. Your job is to filter the top trending perps from the broad market data "
+            "to find where the institutional money and retail crowds are clashing today on Kraken Futures.\n"
+            "Select up to 4 assets that have the highest volume and most significant 24h change (both positive or negative).\n"
             "Professional Selection Rules:\n"
             "1. Liquidity is King: Never trade illiquid tokens. Prioritize assets with massive 24h volume to ensure tight spreads and zero slippage.\n"
             "2. Volatility & Momentum: Look for assets with significant price changes (huge gainers or massive losers). This means the asset is 'in play' and has a news catalyst or narrative.\n"

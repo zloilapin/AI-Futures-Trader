@@ -113,7 +113,10 @@ async def run_single_cycle(
     # Очищаем от дубликатов (если нейросеть случайно выдала одну монету несколько раз)
     selected_assets = list(set(selected_assets))
 
-    print(f"🎯 Отобраны уникальные активы для сканирования: {', '.join(selected_assets)}")
+    valid_symbols = {p["symbol"] for p in active_perps}
+    selected_assets = [s for s in selected_assets if s in valid_symbols]
+
+    print(f"🎯 Отобраны уникальные валидные активы для сканирования: {', '.join(selected_assets)}")
     portfolio_data = await trading_service.get_portfolio_summary()
 
     recent_lessons = reflector_agent.get_lessons(limit=5)
@@ -124,9 +127,13 @@ async def run_single_cycle(
     scan_summaries = []  # Сводка по каждому активу для отчёта ручного /scan
 
     # СТАДИЯ 1.5: ПРОВЕРКА УЖЕ ОТКРЫТЫХ ПОЗИЦИЙ (TP/SL)
+    if hasattr(trading_service, "sync_with_exchange"):
+        print("\n[Stage 1.5] Синхронизация состояний позиций с биржей...")
+        await trading_service.sync_with_exchange()
+
     active_symbols = list(trading_service.active_positions.keys())
     if active_symbols:
-        print("\n[Stage 1.5] Keeper проверяет TP/SL для открытых позиций...")
+        print("[Stage 1.5] Keeper проверяет TP/SL для открытых позиций...")
     for symbol in active_symbols:
         try:
             market_data = await fetcher.fetch_all_market_data(symbol)
@@ -156,11 +163,17 @@ async def run_single_cycle(
 
     # ИТЕРАЦИЯ ПО ВСЕМ АКТИВАМ
     for symbol in selected_assets:
-        print(f"\n🔍 ПОЛНЫЙ АНАЛИЗ (15m, 1H, 4H) NADO DEX: {symbol}")
+        print(f"\n🔍 ПОЛНЫЙ АНАЛИЗ (15m, 1H, 4H) KRAKEN FUTURES: {symbol}")
         
         # СТАДИЯ 2: СБОР ДАННЫХ И ПРОВЕРКА СТАТУСА
         print(f"[Stage 2] Сбор мульти-таймфреймовых данных (15m, 1H, 4H) для {symbol}...")
-        market_data = await fetcher.fetch_all_market_data(symbol)
+        try:
+            market_data = await fetcher.fetch_all_market_data(symbol)
+        except Exception as e:
+            print(f"❌ Ошибка загрузки данных для {symbol}: {e}. Пропуск актива.")
+            scan_summaries.append({"symbol": symbol, "status": "⛔ ОШИБКА ДАННЫХ", "reason": str(e)})
+            continue
+            
         current_price = market_data.get("price_data", {}).get("current_price", 0)
 
         # 2.5 Scanner Agent (ATR Volatility & Spread Guard)

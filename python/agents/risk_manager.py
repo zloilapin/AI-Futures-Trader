@@ -9,7 +9,7 @@ from core.config import config
 
 class RiskManager(BaseAgent):
     """
-    Gatekeeper agent responsible for capital preservation, risk profiles, and position sizing on Nado DEX.
+    Gatekeeper agent responsible for capital preservation, risk profiles, and position sizing on Kraken Futures.
     Calculates exact Take Profit (TP), Stop Loss (SL), position amount (USD / %), and risk/reward ratio.
     """
     def __init__(self, logger: TradeLogger, llm_client: LLMClient):
@@ -42,17 +42,18 @@ class RiskManager(BaseAgent):
         indicators = market_data.get("indicators", {})
         atr_14 = float(indicators.get("atr_14", current_price * 0.02) or current_price * 0.02)
         
-        total_balance = float(portfolio_data.get("total_usd", 1000.0) or 1000.0)
+        total_balance = float(portfolio_data.get("total_usd", portfolio_data.get("current_balance", 0.0)) or 0.0)
         
-        approved = False
+        approved = None
         pos_usd = 0.0
         pos_pct = 0.0
         sl_price = 0.0
         tp_price = 0.0
         rr_ratio = 0.0
         
-        if decision in ["LONG", "SHORT"] and conviction >= min_conviction:
-            # Calculate ATR based SL and TP with a minimum floor to avoid noise
+        if total_balance <= 0:
+            self.logger.warning(f"[{self.name}] ❌ INSUFFICIENT BALANCE: Total balance is {total_balance}. Blocking trade.")
+        elif decision in ["LONG", "SHORT"] and conviction >= min_conviction:
             # Calculate ATR based SL and TP with a minimum floor to avoid noise
             if decision == "LONG":
                 sl_dist = max(atr_14 * sl_mult, current_price * 0.012) # Min 1.2% SL
@@ -69,11 +70,9 @@ class RiskManager(BaseAgent):
             distance_to_tp = abs(tp_price - current_price)
             
             # Slippage Penalty
-            # Slippage Penalty
             spread_pct = float(market_data.get("order_book_data", {}).get("spread_pct", 0))
             if spread_pct > 0.4:
                 self.logger.warning(f"[{self.name}] High spread detected ({spread_pct}%). Applying slippage penalty.")
-                # We will penalize the position size after initial calculation
                 
             # Drawdown Protection & Kelly Criterion
             recent_streak = portfolio_data.get("recent_streak", [])
@@ -111,7 +110,6 @@ class RiskManager(BaseAgent):
             leverage = config.LEVERAGE
             
             # Liquidation Price Check
-            # Approx for Kraken: +/- (Entry / Leverage)
             liq_price = 0.0
             if decision == "LONG":
                 liq_price = current_price * (1 - (1 / leverage) + 0.005)
@@ -128,7 +126,6 @@ class RiskManager(BaseAgent):
             distance_to_sl = abs(current_price - sl_price)
             
             # Fee and Funding Impact on RR
-            # Kraken Taker fee is ~0.05% per side. Funding approx 0.01%
             fee_pct = 0.0005 * 2 # Open + Close
             funding_pct = 0.0001
             
@@ -148,8 +145,12 @@ class RiskManager(BaseAgent):
                 
             MIN_NOTIONAL = 15.0
             if pos_usd > 0 and pos_usd < MIN_NOTIONAL:
-                self.logger.info(f"[{self.name}] Bumping position from ${pos_usd:.2f} to min notional ${MIN_NOTIONAL}.")
-                pos_usd = MIN_NOTIONAL
+                if total_balance * leverage < MIN_NOTIONAL:
+                    self.logger.warning(f"[{self.name}] ❌ MIN ORDER VETO: Required notional ${pos_usd:.2f} is below min ${MIN_NOTIONAL} and balance cannot cover it.")
+                    approved = False
+                else:
+                    self.logger.info(f"[{self.name}] Bumping position from ${pos_usd:.2f} to min notional ${MIN_NOTIONAL}.")
+                    pos_usd = MIN_NOTIONAL
                 
             if pos_usd > max_pos_usd:
                 self.logger.warning(f"[{self.name}] ❌ MIN ORDER VETO: Required notional ${pos_usd:.2f} exceeds max allowed ${max_pos_usd:.2f}.")
@@ -177,7 +178,7 @@ class RiskManager(BaseAgent):
             
         # Call LLM to validate the pre-calculated math and fundamental risks
         system_instruction = (
-            f"You are an expert Risk Manager for Nado DEX operating under the '{profile_name}' Risk Profile.\n"
+            f"You are an expert Risk Manager for Kraken Futures operating under the '{profile_name}' Risk Profile.\n"
             "Evaluation Rules:\n"
             "1. You are provided with EXACT pre-calculated risk parameters (SL, TP, Position Size) based on ATR volatility and strict account risk %.\n"
             "2. Review the CEO's reasoning and the current market spread/RSI.\n"
@@ -228,6 +229,9 @@ class RiskManager(BaseAgent):
         
         # Post-Validation Clamp: Guard against LLM hallucinations
         # We completely overwrite LLM numbers with the exact Python math.
+        if not approved:
+            parsed_res["approved"] = False
+            
         if parsed_res.get("approved"):
             parsed_res["position_size_usd"] = pos_usd
             parsed_res["position_size_pct"] = pos_pct

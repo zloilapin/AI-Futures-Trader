@@ -27,7 +27,7 @@ class TelegramAgent(BaseAgent):
 
         if decision == "HOLD":
             return (
-                f"⏸️ *MARKET UPDATE | NADO DEX*\n\n"
+                f"⏸️ *MARKET UPDATE | KRAKEN FUTURES*\n\n"
                 f"🪙 *Asset / Монета:* `{symbol}`\n"
                 f"📊 *Direction / Направление:* {dir_emoji}\n"
                 f"🔥 *AI Conviction / Уверенность:* `{conviction}%`\n\n"
@@ -44,7 +44,7 @@ class TelegramAgent(BaseAgent):
         rr_ratio = risk.get("risk_reward_ratio", 0)
 
         message = (
-            f"🚀 *TRADE SIGNAL | NADO DEX*\n\n"
+            f"🚀 *TRADE SIGNAL | KRAKEN FUTURES*\n\n"
             f"🪙 *Asset / Монета:* `{symbol}`\n"
             f"📊 *Direction / Направление:* {dir_emoji}\n"
             f"🔥 *AI Conviction / Уверенность:* `{conviction}%` \n"

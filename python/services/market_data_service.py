@@ -90,7 +90,8 @@ class MarketDataService:
                                 "current_price": round(current_price, 2),
                                 "trend": trend,
                                 "change_pct": round(pct_diff, 2),
-                                "volume": round(vol * current_price, 2)
+                                "volume": round(vol * current_price, 2),
+                                "candles_20": candles[-20:]
                             }
         except Exception as e:
             print(f"⚠️ [MarketDataService] Ошибка загрузки OHLC {interval_min}m для {symbol}: {e}")
@@ -138,7 +139,8 @@ class MarketDataService:
             "timeframe": timeframe,
             "current_price": res["current_price"],
             "trend": res["trend"].lower(),
-            "volume_24h": res["volume"]
+            "volume_24h": res["volume"],
+            "candles_20": res.get("candles_20", [])
         }
 
     async def fetch_order_book(self, symbol: str) -> Dict[str, Any]:
