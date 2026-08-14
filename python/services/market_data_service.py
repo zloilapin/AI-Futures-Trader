@@ -195,29 +195,47 @@ class MarketDataService:
                             closes = [float(c["close"]) for c in candles[-50:]]
                             highs = [float(c["high"]) for c in candles[-50:]]
                             lows = [float(c["low"]) for c in candles[-50:]]
-                            if len(closes) >= 15:
+                            if len(closes) >= 35:
                                 gains = [max(0, closes[i] - closes[i-1]) for i in range(1, len(closes))]
                                 losses = [max(0, closes[i-1] - closes[i]) for i in range(1, len(closes))]
-                                avg_gain = sum(gains[-14:]) / 14
-                                avg_loss = sum(losses[-14:]) / 14
+                                
+                                # RSI Wilder's Smoothing (RMA)
+                                avg_gain = sum(gains[:14]) / 14
+                                avg_loss = sum(losses[:14]) / 14
+                                for i in range(14, len(gains)):
+                                    avg_gain = (avg_gain * 13 + gains[i]) / 14
+                                    avg_loss = (avg_loss * 13 + losses[i]) / 14
                                 rs = avg_gain / (avg_loss + 1e-6)
                                 rsi = round(100 - (100 / (1 + rs)), 2)
 
-                                def calc_ema(data, period):
-                                    if len(data) < period: return sum(data)/len(data) if data else 0
+                                def calc_ema_series(data, period):
+                                    if not data or len(data) < period: return [0] * len(data)
+                                    emas = [0] * (period - 1)
                                     ema = sum(data[:period]) / period
+                                    emas.append(ema)
                                     k = 2 / (period + 1)
-                                    for price in data[period:]: ema = (price - ema) * k + ema
-                                    return ema
+                                    for price in data[period:]:
+                                        ema = (price - ema) * k + ema
+                                        emas.append(ema)
+                                    return emas
 
-                                ema_20_raw = calc_ema(closes, 20)
+                                ema_20_series = calc_ema_series(closes, 20)
+                                ema_20 = round(ema_20_series[-1], 2)
                                 current_price = closes[-1]
-                                ema_trend = "up" if current_price > ema_20_raw else "down"
+                                ema_trend = "up" if current_price > ema_20 else "down"
 
-                                ema_12_raw = calc_ema(closes, 12)
-                                macd_val = ema_12_raw - ema_20_raw
-                                ema_20 = round(ema_20_raw, 2)
-                                macd_signal = "bullish" if macd_val > 0 else "bearish"
+                                # MACD (12, 26, 9)
+                                ema_12_series = calc_ema_series(closes, 12)
+                                ema_26_series = calc_ema_series(closes, 26)
+                                macd_line = [ema_12_series[i] - ema_26_series[i] for i in range(len(closes))]
+                                
+                                # Signal line is EMA(9) of the valid MACD portion
+                                macd_valid = macd_line[25:]
+                                signal_line_series = calc_ema_series(macd_valid, 9)
+                                signal_val = signal_line_series[-1] if signal_line_series else 0
+                                
+                                macd_val = macd_line[-1]
+                                macd_signal = "bullish" if macd_val > signal_val else "bearish"
 
                                 # ATR-14 (Average True Range)
                                 tr_list = [max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1])) for i in range(1, len(closes))]
