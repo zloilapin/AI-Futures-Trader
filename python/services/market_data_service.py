@@ -140,7 +140,7 @@ class MarketDataService:
             "timeframe": timeframe,
             "current_price": res["current_price"],
             "trend": res["trend"].lower(),
-            "volume_24h": res["volume"],
+            "recent_volume": res["volume"],
             "candles_20": res.get("candles_20", [])
         }
 

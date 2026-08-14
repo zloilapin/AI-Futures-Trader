@@ -40,8 +40,8 @@ class CandleAgent(BaseAgent):
         payload = {
             "symbol": market_data.get("symbol"),
             "current_price": price_data.get("current_price"),
-            "price_change_24h_pct": price_data.get("change_24h_pct"),
-            "volume_24h": price_data.get("volume_24h"),
+            "trend": price_data.get("trend"),
+            "recent_volume": price_data.get("recent_volume"),
             "recent_15m_candles": ohlcv[-20:] if ohlcv else []
         }
         
