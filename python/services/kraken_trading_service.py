@@ -245,24 +245,6 @@ class KrakenTradingService:
             print(f"❌ [KrakenTradingService] Ошибка сети при отправке ордера: {e}")
             return None
 
-    def register_pending_trade(self, trade_params: dict) -> str:
-        trade_id = str(uuid.uuid4())[:8]
-        trade_params["created_at"] = time.time()
-        self.pending_trades[trade_id] = trade_params
-        return trade_id
-
-    async def wait_and_virtual_open(self, trade_id: str, tg_sender):
-        import asyncio
-        await asyncio.sleep(300) # Ждем 5 минут
-        if trade_id in self.pending_trades:
-            trade = self.pending_trades.pop(trade_id)
-            symbol = trade.get("symbol", "UNKNOWN")
-            print(f"👻 [Timeout] Пользователь не ответил. Открываем {symbol} виртуально.")
-            trade.pop("created_at", None)
-            trade["is_virtual"] = True
-            await self.open_position(**trade)
-            if tg_sender:
-                await tg_sender.send_message(f"👻 Время на подтверждение вышло (5 мин). Сделка по {symbol} открыта ВИРТУАЛЬНО (Бумажная торговля). Утром проверим результат!")
 
     async def open_position(self, symbol: str, direction: str, entry_price: float, size_usd: float, tp_price: float, sl_price: float, leverage: int = 1, is_virtual: bool = False):
         """

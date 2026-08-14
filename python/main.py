@@ -243,36 +243,16 @@ async def run_single_cycle(
             print(f"💰 Position Amount: ${risk_verdict.get('position_size_usd', 0):,.2f} ({risk_verdict.get('position_size_pct', 0)}% of portfolio)")
             print(f"🎯 Entry Price: ${risk_verdict.get('entry_price', 0):,.2f}")
             print(f"🟢 Take Profit (TP): ${risk_verdict.get('take_profit_price', 0):,.2f} (+{risk_verdict.get('take_profit_pct', 0)}%)")
-            # Автоматическая торговля 24/7 (кнопки ручного одобрения отключены)
-            require_manual = False
-            
-            if require_manual and hasattr(trading_service, "register_pending_trade"):
-                trade_params = {
-                    "symbol": symbol,
-                    "direction": decision,
-                    "entry_price": risk_verdict.get("entry_price", current_price),
-                    "size_usd": risk_verdict.get("position_size_usd", 0),
-                    "tp_price": risk_verdict.get("take_profit_price", 0),
-                    "sl_price": risk_verdict.get("stop_loss_price", 0),
-                    "leverage": config.LEVERAGE
-                }
-                trade_id = trading_service.register_pending_trade(trade_params)
-                risk_verdict["pending_trade_id"] = trade_id
-                print(f"⏳ НОЧНОЙ РЕЖИМ: Сделка ОДОБРЕНА Risk Manager'ом. Ожидание ручного подтверждения в Telegram...")
-                
-                # Запуск таймера (5 мин) для перевода в виртуальный режим (Paper Trading)
-                asyncio.create_task(trading_service.wait_and_virtual_open(trade_id, tg_sender))
-            else:
-                # Открываем боевую/виртуальную позицию
-                await trading_service.open_position(
-                    symbol=symbol,
-                    direction=decision,
-                    entry_price=risk_verdict.get("entry_price", current_price),
-                    size_usd=risk_verdict.get("position_size_usd", 0),
-                    tp_price=risk_verdict.get("take_profit_price", 0),
-                    sl_price=risk_verdict.get("stop_loss_price", 0),
-                    leverage=config.LEVERAGE
-                )
+            # Автоматическая торговля 24/7 (полностью автономный режим)
+            await trading_service.open_position(
+                symbol=symbol,
+                direction=decision,
+                entry_price=risk_verdict.get("entry_price", current_price),
+                size_usd=risk_verdict.get("position_size_usd", 0),
+                tp_price=risk_verdict.get("take_profit_price", 0),
+                sl_price=risk_verdict.get("stop_loss_price", 0),
+                leverage=config.LEVERAGE
+            )
         else:
             print(f"❌ Status: VETOED BY RISK MANAGER ({risk_verdict.get('reasoning')})")
 
