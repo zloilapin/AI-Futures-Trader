@@ -237,9 +237,11 @@ class MarketDataService:
                                 macd_val = macd_line[-1]
                                 macd_signal = "bullish" if macd_val > signal_val else "bearish"
 
-                                # ATR-14 (Average True Range)
+                                # ATR-14 (Wilder's Smoothing)
                                 tr_list = [max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1])) for i in range(1, len(closes))]
-                                atr_14 = sum(tr_list[-14:]) / 14
+                                atr_14 = sum(tr_list[:14]) / 14
+                                for i in range(14, len(tr_list)):
+                                    atr_14 = (atr_14 * 13 + tr_list[i]) / 14
                                 atr_pct = round((atr_14 / current_price) * 100, 2)
 
                                 return {
