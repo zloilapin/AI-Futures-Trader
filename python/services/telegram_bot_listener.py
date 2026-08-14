@@ -82,7 +82,7 @@ class TelegramBotListener:
                     f"📊 *PORTFOLIO & PnL SUMMARY*\n\n"
                     f"💵 *Эквити (С учетом PnL):* `${s['current_balance']:,.2f}`\n"
                     f"🛡️ *Свободная маржа:* `${s['available_margin']:,.2f}`\n"
-                    f"💰 *Нереализованный PnL:* `${s['unrealized_pnl']:+.2f}`\n"
+                    f"💰 *Нереализованный PnL:* `${s['unrealized_pnl']:+.2f}` (ROI: {s.get('roi_pct', 0):+.2f}%)\n"
                     f"📈 *Общий PnL (закрытые):* `${s['total_pnl_usd']:+.2f}` ({s['total_pnl_pct']:+.2f}%)\n"
                     f"💼 *Открытых позиций:* `{s['active_positions_count']}`\n"
                     f"🏆 *Винрейт:* `{s['win_rate_pct']}%` (Побед: {s['win_count']} / Потерь: {s['loss_count']})\n"
@@ -104,9 +104,11 @@ class TelegramBotListener:
                         icon = "🟢" if direction == "LONG" else "🔴"
                         entry = pos.get("entry_price", 0)
                         size = pos.get("size_usd", 0)
+                        leverage = pos.get("leverage", 1)
+                        margin = pos.get("margin_usd", size / leverage if leverage > 0 else size)
                         
                         reply_lines.append(f"{icon} *{sym}* | {direction} | {mode}")
-                        reply_lines.append(f"💵 Вход: `${entry:,.2f}` | Объем: `${size:,.0f}`\n")
+                        reply_lines.append(f"💵 Вход: `${entry:,.2f}` | Объем: `${size:,.0f}` (Маржа: ${margin:,.0f}, {leverage}x)\n")
                         
                         inline_keyboard.append([{"text": f"❌ Закрыть {sym}", "callback_data": f"forceclose_{sym}"}])
                     
@@ -212,9 +214,10 @@ class TelegramBotListener:
             if success:
                 mode = "👻 [ВИРТУАЛЬНО]" if result.get('is_virtual') else "⚡ [БОЕВАЯ]"
                 pnl = result.get('pnl_usd', 0)
+                roi = result.get('roi_pct', 0)
                 exit_price = result.get('exit_price', 0)
                 emoji = "🎉" if pnl >= 0 else "🔻"
-                msg = f"{emoji} {mode} Сделка по {symbol} ЗАКРЫТА ВРУЧНУЮ!\n💰 PnL: `${pnl:+.2f}`\n🎯 Выход: `${exit_price:,.2f}`"
+                msg = f"{emoji} {mode} Сделка по {symbol} ЗАКРЫТА ВРУЧНУЮ!\n💰 PnL: `${pnl:+.2f}` (ROI: {roi:+.2f}%)\n🎯 Выход: `${exit_price:,.2f}`"
                 await tg.send_message(msg)
                 await tg.broadcast_to_channel(msg)
             else:

@@ -146,7 +146,7 @@ async def run_single_cycle(
                     f"🪙 *Asset / Монета:* `{closed['symbol']}`\n"
                     f"📊 *Direction / Направление:* `{closed['direction']}`\n"
                     f"🎯 *Entry / Вход:* `${closed['entry_price']:,.2f}` ➔ *Exit / Выход:* `${closed['exit_price']:,.2f}`\n"
-                    f"💰 *PnL:* `${closed['pnl_usd']:,.2f}` ({closed['pnl_pct']:,.2f}%)\n"
+                    f"💰 *PnL:* `${closed['pnl_usd']:,.2f}` (ROI: {closed.get('roi_pct', 0):+.2f}%)\n"
                 )
                 print(f"\n--- ЗАКРЫТИЕ ПОЗИЦИИ В TELEGRAM [{symbol}] ---")
                 print(closed_msg)

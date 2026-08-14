@@ -140,6 +140,19 @@ class KrakenTradingService:
                         total_balance += float(tot_dict.get('USDT', 0.0))
                     
                     avail_margin = total_balance
+                    
+                # Вычисляем нереализованный PnL и задействованную маржу по нашим локальным данным (если биржа не отдает)
+                # или если биржа отдает, берем из нее. Здесь мы используем локальный счетчик для простоты:
+                for pos in self.active_positions.values():
+                    # Приблизительный расчет нереализованного PnL для get_status
+                    if pos.get("is_virtual"): continue
+                    # Используем последнюю известную цену входа
+                    ep = pos.get("entry_price", 0)
+                    if ep > 0:
+                        # Мы не знаем current price в get_status, поэтому unrealized будет оцениваться Keeper'ом,
+                        # Но margin мы знаем точно:
+                        m = pos.get("margin_usd", 0)
+                        used_margin += m
                 
                 print(f"💰 [KrakenTradingService] Баланс аккаунта Kraken Futures (USD+USDC+USDT): ${total_balance:,.2f}")
             except Exception as e:
@@ -166,7 +179,7 @@ class KrakenTradingService:
             "used_margin": used_margin,
             "active_positions_count": len(self.active_positions),
             "unrealized_pnl": unrealized,
-            "roi_pct": 0.0
+            "roi_pct": (unrealized / used_margin * 100) if used_margin > 0 else 0.0
         }
 
     async def _execute_market_order(self, symbol: str, direction: str, size_base: float, leverage: int = 1, sl_price: float = None):
@@ -297,7 +310,9 @@ class KrakenTradingService:
                 "symbol": symbol,
                 "direction": direction,
                 "entry_price": entry_price,
-                "size_usd": size_usd,
+                "size_usd": size_usd,        # NOTIONAL
+                "leverage": leverage,        # LEVERAGE
+                "margin_usd": size_usd / leverage if leverage > 0 else size_usd, # MARGIN
                 "size_base": size_base,
                 "tp_price": tp_price,
                 "sl_price": sl_price,
@@ -466,13 +481,18 @@ class KrakenTradingService:
             elif is_virtual:
                 trigger_reason = f"{triggered_exit} (Виртуально)"
                 
+            margin_usd = pos.get("margin_usd", pos["size_usd"] / pos.get("leverage", 1) if pos.get("leverage", 1) > 0 else pos["size_usd"])
+                
             report = {
                 "symbol": symbol,
                 "direction": direction,
                 "entry_price": entry_price,
                 "exit_price": actual_exit_price,
                 "pnl_usd": pnl,
-                "pnl_pct": (pnl / pos["size_usd"]) * 100 if pos["size_usd"] > 0 else 0,
+                "pnl_pct": (pnl / pos["size_usd"]) * 100 if pos["size_usd"] > 0 else 0.0,
+                "roi_pct": (pnl / margin_usd) * 100 if margin_usd > 0 else 0.0,
+                "margin_usd": margin_usd,
+                "leverage": pos.get("leverage", 1),
                 "triggered_by": trigger_reason
             }
             print(f"🧹 Позиция {symbol} удалена из активных (причина: {triggered_exit}).")

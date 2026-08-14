@@ -61,10 +61,11 @@ class PaperTradingService:
             "total_pnl_usd": round(self.state["total_pnl_usd"], 2),
             "total_pnl_pct": round(self.state["total_pnl_pct"], 2),
             "active_positions_count": len(self.state["active_positions"]),
+            "win_rate_pct": round(win_rate, 2),
             "win_count": self.state["win_count"],
             "loss_count": self.state["loss_count"],
-            "win_rate_pct": win_rate,
-            "recent_streak": recent_streak
+            "recent_streak": recent_streak,
+            "roi_pct": 0.0 # Paper service doesn't track unrealized yet, but keeping field for UI compat
         }
 
     @property
@@ -85,11 +86,12 @@ class PaperTradingService:
             "symbol": symbol,
             "direction": direction.upper(),
             "entry_price": entry_price,
-            "size_usd": size_usd,
+            "size_usd": size_usd,        # NOTIONAL
+            "leverage": leverage,        # LEVERAGE
+            "margin_usd": margin_usd,    # MARGIN
             "tp_price": tp_price,
             "sl_price": sl_price,
             "breakeven_activated": False,
-            "leverage": leverage,
             "opened_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
 
@@ -169,12 +171,13 @@ class PaperTradingService:
 
             if triggered_exit:
                 if direction == "LONG":
-                    pnl_pct = ((exit_price - entry) / entry) * 100 * leverage
+                    notional_pnl_pct = ((exit_price - entry) / entry) * 100
                 else:
-                    pnl_pct = ((entry - exit_price) / entry) * 100 * leverage
+                    notional_pnl_pct = ((entry - exit_price) / entry) * 100
 
-                margin_usd = size / leverage if leverage > 0 else size
-                pnl_usd = margin_usd * (pnl_pct / 100)
+                margin_usd = pos.get("margin_usd", size / leverage if leverage > 0 else size)
+                pnl_usd = size * (notional_pnl_pct / 100)
+                roi_pct = notional_pnl_pct * leverage
                 returned_capital = margin_usd + pnl_usd
 
                 self.state["current_balance"] += returned_capital
@@ -194,14 +197,17 @@ class PaperTradingService:
                     "exit_price": exit_price,
                     "triggered_by": triggered_exit,
                     "pnl_usd": round(pnl_usd, 2),
-                    "pnl_pct": round(pnl_pct, 2),
+                    "pnl_pct": round(notional_pnl_pct, 2),
+                    "roi_pct": round(roi_pct, 2),
+                    "margin_usd": round(margin_usd, 2),
+                    "leverage": leverage,
                     "size_usd": size,
                     "new_balance": round(self.state["current_balance"], 2),
                     "closed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
                 self.state["closed_trades"].append(closed_record)
                 closed_reports.append(closed_record)
-                print(f"🎉 [PaperTrading] ЗАКРЫТА ПОЗИЦИЯ {symbol} ({triggered_exit})! PnL: ${pnl_usd:+.2f} ({pnl_pct:+.2f}%). Новый баланс: ${self.state['current_balance']:,.2f}")
+                print(f"🎉 [PaperTrading] ЗАКРЫТА ПОЗИЦИЯ {symbol} ({triggered_exit})! PnL: ${pnl_usd:+.2f} (ROI: {roi_pct:+.2f}%). Новый баланс: ${self.state['current_balance']:,.2f}")
             else:
                 remaining_positions.append(pos)
 
