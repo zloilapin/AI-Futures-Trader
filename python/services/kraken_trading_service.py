@@ -97,12 +97,10 @@ class KrakenTradingService:
 
     def _format_symbol(self, symbol: str) -> str:
         """
-        Converts generic symbol (e.g. BTC) to Kraken Futures Perpetual symbol format.
+        Converts generic symbol (e.g. BTC or BTC/USD) to Kraken Futures Perpetual symbol format.
         Usually ccxt handles standard formats, e.g., 'BTC/USD:USD' or similar for linear perps.
         """
-        base = symbol.upper()
-        if base == "BTC":
-            base = "BTC"
+        base = symbol.upper().replace("/USD", "").replace(":USD", "")
         return f"{base}/USD:USD"
 
     async def get_portfolio_summary(self) -> Dict[str, Any]:
@@ -341,6 +339,22 @@ class KrakenTradingService:
             self._save_positions()
             return True
         return False
+
+    async def _update_exchange_sl(self, symbol: str, direction: str, new_sl: float, size_base: float):
+        try:
+            formatted_symbol = self._format_symbol(symbol) if hasattr(self, '_format_symbol') else symbol
+            # Cancel all existing stop orders for this symbol first
+            open_orders = await self.exchange.fetch_open_orders(formatted_symbol)
+            for order in open_orders:
+                if order.get('type') == 'stop' or order.get('type') == 'stop-loss' or order.get('type') == 'stopMarket':
+                    await self.exchange.cancel_order(order['id'], formatted_symbol)
+                    
+            # Create a new stop loss order
+            stop_side = 'sell' if direction == 'LONG' else 'buy'
+            await self.exchange.create_order(formatted_symbol, 'stop', stop_side, size_base, None, {'stopPrice': new_sl, 'reduceOnly': True})
+            print(f"✅ [KrakenTradingService] Успешно обновлен Hard Stop-Loss на бирже: {new_sl} для {symbol}")
+        except Exception as e:
+            print(f"⚠️ [KrakenTradingService] Ошибка при обновлении Hard Stop-Loss на бирже: {e}")
 
     async def sync_with_exchange(self):
         """
