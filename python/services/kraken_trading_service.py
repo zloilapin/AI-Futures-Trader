@@ -222,7 +222,15 @@ class KrakenTradingService:
                     await self.exchange.create_order(formatted_symbol, 'stop', stop_side, size_base, None, {'stopPrice': sl_price, 'reduceOnly': True})
                     print(f"🛡️ [KrakenTradingService] Установлен ЖЕСТКИЙ Stop-Loss на бирже по цене {sl_price}!")
                 except Exception as e:
-                    print(f"⚠️ [KrakenTradingService] Биржа не приняла хард-стоп ({e}). Бот продолжит следить программно.")
+                    print(f"⚠️ [KrakenTradingService] Биржа не приняла хард-стоп ({e}). НЕМЕДЛЕННО ЗАКРЫВАЕМ ПОЗИЦИЮ во избежание риска.")
+                    try:
+                        # Если хард-стоп не поставился, немедленно ликвидируем маркет-ордером в обратную сторону
+                        abort_side = 'sell' if direction == 'LONG' else 'buy'
+                        await self.exchange.create_market_order(formatted_symbol, abort_side, size_base)
+                        print(f"✅ [KrakenTradingService] Аварийное закрытие (отмена) позиции {formatted_symbol} выполнено успешно.")
+                    except Exception as abort_err:
+                        print(f"🚨 [KrakenTradingService] КРИТИЧЕСКАЯ ОШИБКА АВАРИЙНОГО ЗАКРЫТИЯ: {abort_err}")
+                    return None  # Возвращаем None, чтобы позиция не считалась открытой
             
             return order
         except Exception as e:
