@@ -113,17 +113,33 @@ class KrakenTradingService:
                 # Aggregate USD, USDC, and USDT for total margin available
                 total_balance = 0.0
                 
-                # Method 1: standard ccxt balance objects
-                for asset in ['USD', 'USDC', 'USDT']:
-                    if asset in balance:
-                        total_balance += float(balance[asset].get('total', 0.0))
+                # Try to get flex account details from Kraken Futures
+                unrealized = 0.0
+                used_margin = 0.0
+                avail_margin = 0.0
                 
-                # Method 2: fallback to 'total' dictionary if ccxt structures it differently
-                if total_balance == 0.0 and 'total' in balance:
-                    tot_dict = balance['total']
-                    total_balance += float(tot_dict.get('USD', 0.0))
-                    total_balance += float(tot_dict.get('USDC', 0.0))
-                    total_balance += float(tot_dict.get('USDT', 0.0))
+                if 'info' in balance and 'accounts' in balance['info']:
+                    accounts = balance['info']['accounts']
+                    if isinstance(accounts, dict) and 'flex' in accounts:
+                        flex = accounts['flex']
+                        total_balance = float(flex.get('portfolioValue', 0.0))
+                        unrealized = float(flex.get('totalUnrealized', 0.0))
+                        used_margin = float(flex.get('initialMarginWithOrders', 0.0))
+                        avail_margin = float(flex.get('availableMargin', 0.0))
+                
+                # Fallback to ccxt balance if flex account data isn't found or is 0
+                if total_balance == 0.0:
+                    for asset in ['USD', 'USDC', 'USDT']:
+                        if asset in balance:
+                            total_balance += float(balance[asset].get('total', 0.0))
+                            
+                    if total_balance == 0.0 and 'total' in balance:
+                        tot_dict = balance['total']
+                        total_balance += float(tot_dict.get('USD', 0.0))
+                        total_balance += float(tot_dict.get('USDC', 0.0))
+                        total_balance += float(tot_dict.get('USDT', 0.0))
+                    
+                    avail_margin = total_balance
                 
                 print(f"💰 [KrakenTradingService] Баланс аккаунта Kraken Futures (USD+USDC+USDT): ${total_balance:,.2f}")
             except Exception as e:
@@ -146,10 +162,10 @@ class KrakenTradingService:
             "win_count": self.win_count,
             "loss_count": self.loss_count,
             "recent_streak": self.recent_streak,
-            "available_margin": total_balance,
-            "used_margin": 0.0,
+            "available_margin": avail_margin,
+            "used_margin": used_margin,
             "active_positions_count": len(self.active_positions),
-            "unrealized_pnl": 0.0,
+            "unrealized_pnl": unrealized,
             "roi_pct": 0.0
         }
 

@@ -28,7 +28,7 @@ class LLMClient:
             print(f"[LLMClient] Инициализирован провайдер Kie.ai ({self.model_name})")
         elif self.openrouter_key and not self.openrouter_key.startswith("your_"):
             self.provider = "openrouter"
-            self.model_name = model_name or "google/gemma-2-9b-it:free"
+            self.model_name = model_name or "meta-llama/llama-3.1-8b-instruct:free"
             print(f"[LLMClient] Инициализирован провайдер OpenRouter ({self.model_name})")
         elif self.groq_key and not self.groq_key.startswith("your_"):
             from groq import AsyncGroq

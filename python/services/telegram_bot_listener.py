@@ -80,8 +80,10 @@ class TelegramBotListener:
                 s = await self.trading_service.get_portfolio_summary()
                 reply = (
                     f"📊 *PORTFOLIO & PnL SUMMARY*\n\n"
-                    f"💵 *Текущий баланс:* `${s['current_balance']:,.2f}`\n"
-                    f"📈 *Общий PnL:* `${s['total_pnl_usd']:+.2f}` ({s['total_pnl_pct']:+.2f}%)\n"
+                    f"💵 *Эквити (С учетом PnL):* `${s['current_balance']:,.2f}`\n"
+                    f"🛡️ *Свободная маржа:* `${s['available_margin']:,.2f}`\n"
+                    f"💰 *Нереализованный PnL:* `${s['unrealized_pnl']:+.2f}`\n"
+                    f"📈 *Общий PnL (закрытые):* `${s['total_pnl_usd']:+.2f}` ({s['total_pnl_pct']:+.2f}%)\n"
                     f"💼 *Открытых позиций:* `{s['active_positions_count']}`\n"
                     f"🏆 *Винрейт:* `{s['win_rate_pct']}%` (Побед: {s['win_count']} / Потерь: {s['loss_count']})\n"
                     f"🏦 *Начальный депозит:* `${s['initial_balance']:,.2f}`"

@@ -5,7 +5,7 @@ from typing import Dict, Any, List, Optional
 
 class PaperTradingService:
     """
-    Paper Trading & PnL Tracking Service for Nado DEX.
+    Paper Trading & PnL Tracking Service for Kraken Futures.
     Features:
     - Breakeven Guard: automatically moves Stop Loss to Breakeven (+0.1%) when 50% of Take Profit is reached.
     - Trailing Stop: dynamic profit protection.
@@ -98,7 +98,7 @@ class PaperTradingService:
         print(f"💼 [PaperTrading] Открыта виртуальная позиция {direction} {symbol} на ${size_usd:,.2f} (Маржа: ${margin_usd:,.2f}) по цене ${entry_price:,.2f}")
         return position
 
-    def check_and_update_positions(self, symbol: str, current_price: float) -> List[Dict[str, Any]]:
+    async def check_and_update_positions(self, symbol: str, current_price: float) -> List[Dict[str, Any]]:
         """
         Evaluates active positions against live current_price.
         Applies Breakeven Guard (moves SL to Entry + 0.1% at 50% TP distance).

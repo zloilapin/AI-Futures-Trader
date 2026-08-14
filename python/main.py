@@ -29,7 +29,6 @@ from agents.reflector_agent import ReflectorAgent
 from services.market_data_service import MarketDataService
 from services.telegram_service import TelegramService
 from services.paper_trading_service import PaperTradingService
-from services.live_trading_service import LiveTradingService
 from services.kraken_trading_service import KrakenTradingService
 from services.telegram_bot_listener import TelegramBotListener
 
@@ -139,7 +138,7 @@ async def run_single_cycle(
             market_data = await fetcher.fetch_all_market_data(symbol)
             current_price = market_data.get("price_data", {}).get("current_price", 0)
             
-            closed_reports = trading_service.check_and_update_positions(symbol, current_price)
+            closed_reports = await trading_service.check_and_update_positions(symbol, current_price)
             for closed in closed_reports:
                 pnl_emoji = "🎉" if closed["pnl_usd"] >= 0 else "🔻"
                 closed_msg = (
@@ -388,6 +387,7 @@ async def main():
     logger = TradeLogger()
     llm_client = LLMClient()
     fetcher = MarketDataService()
+    tg_sender = TelegramService()
     print("Инициализация сервисов...")
     
     trading_engine = config.TRADING_ENGINE

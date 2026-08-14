@@ -56,35 +56,36 @@ class MarketDataService:
         return [{"symbol": s, "vol24h": 0, "change24h": 0} for s in ["BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "LINK", "AVAX"]]
 
     def _normalize_pair(self, symbol: str) -> str:
-        """Helper to convert symbols like BTC-USDC to Kraken's XBTUSD format."""
-        s = symbol.upper().replace("-", "").replace("/", "").replace("USDC", "USD").replace("USDT", "USD")
+        """Helper to convert generic symbols (BTC, SOL) to Kraken Futures Vanilla Perpetual format (PF_XBTUSD)."""
+        s = symbol.upper().replace("-", "").replace("/", "").replace("USDC", "").replace("USDT", "")
         if s.startswith("BTC"):
-            return "XBTUSD"
-        
-        # Ensure it ends with USD for Kraken Spot API
-        if not s.endswith("USD"):
-            s = f"{s}USD"
+            s = "XBT"
+        elif s.startswith("DOGE"):
+            s = "XDG"
             
-        return s
+        return f"PF_{s}USD"
 
     async def _fetch_ohlc_interval(self, symbol: str, interval_min: int) -> Dict[str, Any]:
         pair = self._normalize_pair(symbol)
-        url = f"https://api.kraken.com/0/public/OHLC?pair={pair}&interval={interval_min}"
+        
+        # Map integer minutes to Kraken Futures timeframe strings
+        tf_map = {15: "15m", 60: "1h", 240: "4h", 1440: "1d"}
+        interval_str = tf_map.get(interval_min, "15m")
+        
+        url = f"https://futures.kraken.com/api/charts/v1/trade/{pair}/{interval_str}"
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        result = data.get("result", {})
-                        key = list(result.keys())[0] if result else None
-                        if key and key != "last":
-                            candles = result[key]
-                            closes = [float(c[4]) for c in candles[-20:]]
+                        candles = data.get("candles", [])
+                        if candles:
+                            closes = [float(c["close"]) for c in candles[-20:]]
                             current_price = closes[-1]
                             price_5_ago = closes[-5] if len(closes) >= 5 else closes[0]
                             pct_diff = ((current_price - price_5_ago) / price_5_ago) * 100
                             trend = "BULLISH" if pct_diff > 0.2 else ("BEARISH" if pct_diff < -0.2 else "NEUTRAL")
-                            vol = sum(float(c[6]) for c in candles[-20:])
+                            vol = sum(float(c["volume"]) for c in candles[-20:])
                             return {
                                 "interval_min": interval_min,
                                 "current_price": round(current_price, 2),
@@ -144,54 +145,56 @@ class MarketDataService:
         }
 
     async def fetch_order_book(self, symbol: str) -> Dict[str, Any]:
-        """Fetches real order book depth, spread, and wall strengths from Kraken."""
+        """Fetches real order book depth, spread, and wall strengths from Kraken Futures."""
         pair = self._normalize_pair(symbol)
-        url = f"https://api.kraken.com/0/public/Depth?pair={pair}&count=20"
+        url = f"https://futures.kraken.com/derivatives/api/v3/orderbook?symbol={pair}"
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        result = data.get("result", {})
-                        key = list(result.keys())[0] if result else None
-                        if key:
-                            bids = result[key].get("bids", [])
-                            asks = result[key].get("asks", [])
-                            if bids and asks:
-                                best_bid = float(bids[0][0])
-                                best_ask = float(asks[0][0])
-                                spread = round(best_ask - best_bid, 4)
-                                spread_pct = round((spread / best_bid) * 100, 4)
-                                bid_vol = sum(float(b[1]) for b in bids)
-                                ask_vol = sum(float(a[1]) for a in asks)
-                                return {
-                                    "symbol": symbol,
-                                    "spread": spread,
-                                    "spread_pct": spread_pct,
-                                    "bid_volume": round(bid_vol, 4),
-                                    "ask_volume": round(ask_vol, 4),
-                                    "imbalance_ratio": round(bid_vol / (ask_vol + 1e-6), 2)
-                                }
+                        order_book = data.get("orderBook", {})
+                        bids = order_book.get("bids", [])
+                        asks = order_book.get("asks", [])
+                        if bids and asks:
+                            best_bid = float(bids[0][0])
+                            best_ask = float(asks[0][0])
+                            spread = round(best_ask - best_bid, 4)
+                            spread_pct = round((spread / best_bid) * 100, 4)
+                            bid_vol = sum(float(b[1]) for b in bids)
+                            ask_vol = sum(float(a[1]) for a in asks)
+                            return {
+                                "symbol": symbol,
+                                "spread": spread,
+                                "spread_pct": spread_pct,
+                                "bid_volume": round(bid_vol, 4),
+                                "ask_volume": round(ask_vol, 4),
+                                "imbalance_ratio": round(bid_vol / (ask_vol + 1e-6), 2)
+                            }
         except Exception as e:
             print(f"⚠️ [MarketDataService] Ошибка загрузки стакана: {e}")
             raise Exception(f"Не удалось получить стакан для {symbol}") from e
 
     async def fetch_indicators(self, symbol: str) -> Dict[str, Any]:
         """Fetches candle data and computes RSI-14, EMA-20, and MACD."""
-        pair = self._normalize_pair(symbol)
-        url = f"https://api.kraken.com/0/public/OHLC?pair={pair}&interval=15"
         try:
+            # We can use the existing _fetch_ohlc_interval to get 15m futures candles
+            res = await self._fetch_ohlc_interval(symbol, 15)
+            candles = res.get("candles_20", [])
+            # But wait, we need more than 20 candles for RSI-14, EMA-20, and MACD!
+            # Let's fetch it directly here to get 50 candles.
+            pair = self._normalize_pair(symbol)
+            url = f"https://futures.kraken.com/api/charts/v1/trade/{pair}/15m"
+            
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        result = data.get("result", {})
-                        key = list(result.keys())[0] if result else None
-                        if key and key != "last":
-                            candles = result[key]
-                            closes = [float(c[4]) for c in candles[-50:]]
-                            highs = [float(c[2]) for c in candles[-50:]]
-                            lows = [float(c[3]) for c in candles[-50:]]
+                        candles = data.get("candles", [])
+                        if candles:
+                            closes = [float(c["close"]) for c in candles[-50:]]
+                            highs = [float(c["high"]) for c in candles[-50:]]
+                            lows = [float(c["low"]) for c in candles[-50:]]
                             if len(closes) >= 15:
                                 gains = [max(0, closes[i] - closes[i-1]) for i in range(1, len(closes))]
                                 losses = [max(0, closes[i-1] - closes[i]) for i in range(1, len(closes))]
