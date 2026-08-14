@@ -24,6 +24,7 @@ class PaperTradingService:
                 print(f"⚠️ [PaperTradingService] Ошибка чтения файла портфеля: {e}")
         
         starting_balance = float(os.getenv("STARTING_BALANCE", "60.0"))
+        default_state = {
             "initial_balance": starting_balance,
             "initial_deposit": starting_balance,
             "net_transfers": 0.0,
