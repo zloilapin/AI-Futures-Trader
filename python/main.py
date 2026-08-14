@@ -109,8 +109,8 @@ async def run_single_cycle(
         # Fallback to top 6 by 24h volume directly from the exchange if LLM fails
         selected_assets = [p["symbol"] for p in active_perps[:6]]
 
-    # Очищаем от дубликатов (если нейросеть случайно выдала одну монету несколько раз)
-    selected_assets = list(set(selected_assets))
+    # Очищаем от дубликатов с сохранением приоритета от LLM
+    selected_assets = list(dict.fromkeys(selected_assets))
 
     valid_symbols = {p["symbol"] for p in active_perps}
     selected_assets = [s for s in selected_assets if s in valid_symbols]
