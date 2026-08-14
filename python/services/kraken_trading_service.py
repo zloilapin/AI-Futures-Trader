@@ -426,12 +426,18 @@ class KrakenTradingService:
             print(f"{mode_prefix} [Keeper] Сработал {triggered_exit} для {symbol}! Отправка ордера на закрытие...")
             
             # Close position asynchronously if not virtual and not manually closed
+            actual_exit_price = current_price
             if not is_virtual and triggered_exit != "MANUAL_CLOSE":
                 close_direction = "SHORT" if direction == "LONG" else "LONG"
                 close_result = await self._execute_market_order(symbol, close_direction, pos["size_base"])
                 if close_result is None:
                     print(f"❌ [Keeper] Ошибка закрытия сделки {symbol}. Отмена удаления из памяти.")
                     return closed_reports
+                
+                if isinstance(close_result, dict):
+                    avg_price = close_result.get('average') or close_result.get('price')
+                    if avg_price:
+                        actual_exit_price = float(avg_price)
             
             # Correct PnL calculation independent of exit reason
             if triggered_exit == "MANUAL_CLOSE":
@@ -439,9 +445,9 @@ class KrakenTradingService:
                 print(f"ℹ️ [Keeper] Оценка PnL пропущена для {symbol}, так как позиция была закрыта вне бота (Hard SL/TP или вручную).")
             else:
                 if direction == "LONG":
-                    pnl = (current_price - entry_price) * (pos["size_usd"] / entry_price)
+                    pnl = (actual_exit_price - entry_price) * pos["size_base"]
                 else:
-                    pnl = (entry_price - current_price) * (pos["size_usd"] / entry_price)
+                    pnl = (entry_price - actual_exit_price) * pos["size_base"]
                 
                 if pnl > 0:
                     self.win_count += 1
@@ -464,7 +470,7 @@ class KrakenTradingService:
                 "symbol": symbol,
                 "direction": direction,
                 "entry_price": entry_price,
-                "exit_price": current_price,
+                "exit_price": actual_exit_price,
                 "pnl_usd": pnl,
                 "pnl_pct": (pnl / pos["size_usd"]) * 100 if pos["size_usd"] > 0 else 0,
                 "triggered_by": trigger_reason
