@@ -283,39 +283,61 @@ class KrakenTradingService:
         if not is_virtual:
             order_result = await self._execute_market_order(symbol, direction, size_base, leverage, sl_price)
             if isinstance(order_result, dict):
-                # Try to get the actual average execution price from CCXT order object
+                # Проверка фактического исполнения и комиссии
+                filled = order_result.get('filled')
+                remaining = order_result.get('remaining', 0.0)
+                status = order_result.get('status')
+                fee_info = order_result.get('fee')
+                formatted_symbol = self._format_symbol(symbol)
+                
+                if status == 'open' and remaining > 0:
+                    print(f"⚠️ [KrakenTradingService] Ордер частично исполнен (filled: {filled}, remaining: {remaining}). Отменяем остаток.")
+                    try:
+                        order_id = order_result.get('id')
+                        if order_id:
+                            await self.exchange.cancel_order(order_id, formatted_symbol)
+                    except Exception as e:
+                        print(f"⚠️ [KrakenTradingService] Ошибка отмены остатка: {e}")
+                
+                if filled == 0 and status != 'unknown':
+                    print(f"❌ [KrakenTradingService] Ордер не исполнен (filled = 0). Сделка отменена.")
+                    return False
+                    
+                if fee_info and isinstance(fee_info, dict):
+                    fee_cost = float(fee_info.get('cost', 0.0))
+                    if fee_cost > 0:
+                        self.adjust_ledger(-fee_cost)
+                        print(f"💸 [KrakenTradingService] Комиссия за сделку: {fee_cost:.4f} {fee_info.get('currency', '')} вычтена из Ledger.")
+
+                actual_size = filled if (filled and filled > 0) else (order_result.get('amount') or size_base)
+                
+                # Проверка проскальзывания и обновление entry_price
                 fill_price = order_result.get('average') or order_result.get('price') or entry_price
                 if fill_price > 0 and abs(fill_price - entry_price) / entry_price > 0.0001:
                     print(f"⚠️ [KrakenTradingService] Slippage detected! Planned: {entry_price}, Actual: {fill_price}")
-                    
-                    # Корректируем SL и TP на величину проскальзывания, чтобы сохранить изначальный Risk/Reward
                     slippage_diff = fill_price - entry_price
-                    if tp_price:
-                        tp_price = tp_price + slippage_diff
-                    if sl_price:
-                        sl_price = sl_price + slippage_diff
-                        
+                    if tp_price: tp_price = tp_price + slippage_diff
+                    if sl_price: sl_price = sl_price + slippage_diff
                     print(f"🔄 [KrakenTradingService] Уровни скорректированы. Новый SL: {sl_price}, Новый TP: {tp_price}")
                     entry_price = float(fill_price)
                     
-                # Теперь устанавливаем Hard Stop-Loss с учетом скорректированной цены
+                # Устанавливаем Hard Stop-Loss с учетом скорректированной цены и актуального объема
                 if sl_price:
                     try:
                         stop_side = 'sell' if direction == 'LONG' else 'buy'
-                        formatted_symbol = self._format_symbol(symbol)
-                        # Unified CCXT trigger order (stop loss)
-                        await self.exchange.create_order(formatted_symbol, 'stop', stop_side, size_base, None, {'stopPrice': sl_price, 'reduceOnly': True})
-                        print(f"🛡️ [KrakenTradingService] Установлен ЖЕСТКИЙ Stop-Loss на бирже по скорректированной цене {sl_price}!")
+                        await self.exchange.create_order(formatted_symbol, 'stop', stop_side, actual_size, None, {'stopPrice': sl_price, 'reduceOnly': True})
+                        print(f"🛡️ [KrakenTradingService] Установлен ЖЕСТКИЙ Stop-Loss на бирже по цене {sl_price}!")
                     except Exception as e:
                         print(f"⚠️ [KrakenTradingService] Биржа не приняла хард-стоп ({e}). НЕМЕДЛЕННО ЗАКРЫВАЕМ ПОЗИЦИЮ во избежание риска.")
                         try:
-                            # Если хард-стоп не поставился, немедленно ликвидируем маркет-ордером в обратную сторону
                             abort_side = 'sell' if direction == 'LONG' else 'buy'
-                            await self.exchange.create_market_order(formatted_symbol, abort_side, size_base)
+                            await self.exchange.create_market_order(formatted_symbol, abort_side, actual_size)
                             print(f"✅ [KrakenTradingService] Аварийное закрытие (отмена) позиции {formatted_symbol} выполнено успешно.")
                         except Exception as abort_err:
                             print(f"🚨 [KrakenTradingService] КРИТИЧЕСКАЯ ОШИБКА АВАРИЙНОГО ЗАКРЫТИЯ: {abort_err}")
-                        order_result = None  # Сбрасываем order_result, чтобы позиция не добавилась
+                        order_result = None  # Сбрасываем, чтобы позиция не добавилась
+            else:
+                actual_size = size_base
         
         if order_result:
             pos_id = str(uuid.uuid4())[:8]
@@ -327,7 +349,7 @@ class KrakenTradingService:
                 "size_usd": size_usd,        # NOTIONAL
                 "leverage": leverage,        # LEVERAGE
                 "margin_usd": size_usd / leverage if leverage > 0 else size_usd, # MARGIN
-                "size_base": size_base,
+                "size_base": actual_size,
                 "tp_price": tp_price,
                 "sl_price": sl_price,
                 "breakeven_activated": False,
@@ -416,6 +438,9 @@ class KrakenTradingService:
                 if trail_sl > pos["sl_price"]:
                     pos["sl_price"] = trail_sl
                     print(f"📈 [Keeper] {symbol} Trailing Stop подтянут до {trail_sl:.4f}")
+                    if not pos.get("is_virtual", False):
+                        import asyncio
+                        asyncio.create_task(self._update_exchange_sl(symbol, direction, trail_sl, pos["size_base"]))
         else:
             pos["lowest_price"] = min(pos["lowest_price"], current_price)
             if pos["lowest_price"] <= entry_price * 0.985:
@@ -423,6 +448,9 @@ class KrakenTradingService:
                 if trail_sl < pos["sl_price"]:
                     pos["sl_price"] = trail_sl
                     print(f"📉 [Keeper] {symbol} Trailing Stop подтянут до {trail_sl:.4f}")
+                    if not pos.get("is_virtual", False):
+                        import asyncio
+                        asyncio.create_task(self._update_exchange_sl(symbol, direction, trail_sl, pos["size_base"]))
 
         # TP / SL Execution trigger
         triggered_exit = None
