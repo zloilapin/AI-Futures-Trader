@@ -75,6 +75,33 @@ class TelegramBotListener:
                     f"💼 *Активных позиций:* `{summary['active_positions_count']}`"
                 )
                 await self._send_reply(reply)
+                
+            elif cmd == "/deposit":
+                parts = text.strip().split()
+                if len(parts) > 1:
+                    amount = float(parts[1])
+                    if hasattr(self.trading_service, "adjust_ledger"):
+                        self.trading_service.adjust_ledger(amount)
+                        await self._send_reply(f"✅ Внесено (Deposit): `${amount:,.2f}`.\nКапитал для расчета ROI обновлен.")
+                else:
+                    await self._send_reply("Использование: `/deposit <сумма>`")
+                    
+            elif cmd == "/withdraw":
+                parts = text.strip().split()
+                if len(parts) > 1:
+                    amount = float(parts[1])
+                    if hasattr(self.trading_service, "adjust_ledger"):
+                        self.trading_service.adjust_ledger(-amount)
+                        await self._send_reply(f"✅ Выведено (Withdraw): `${amount:,.2f}`.\nКапитал для расчета ROI обновлен.")
+                else:
+                    await self._send_reply("Использование: `/withdraw <сумма>`")
+                    
+            elif cmd == "/reset_ledger":
+                if hasattr(self.trading_service, "reset_ledger"):
+                    self.trading_service.reset_ledger()
+                    await self._send_reply("🔄 Ledger сброшен! Текущий баланс стал новой стартовой точкой для подсчета ROI.")
+                else:
+                    await self._send_reply("Сброс Ledger не поддерживается текущим режимом торговли.")
 
             elif cmd in ["/pnl", "/balance", "/portfolio"]:
                 s = await self.trading_service.get_portfolio_summary()
@@ -162,7 +189,11 @@ class TelegramBotListener:
                     f"🔹 `/balance` (или `/pnl`) — Статистика побед и текущий баланс\n"
                     f"🔹 `/positions` — Список активных сделок и управление ими\n"
                     f"🔹 `/risk` — Переключение профиля риска\n"
-                    f"🔹 `/scan` — Поиск сделок прямо сейчас (вне расписания)\n"
+                    f"🔹 `/scan` — Принудительно начать цикл сканирования\n"
+                    f"🔹 `/deposit <сумма>` — Учесть ручное пополнение для точного ROI\n"
+                    f"🔹 `/withdraw <сумма>` — Учесть ручной вывод для точного ROI\n"
+                    f"🔹 `/reset_ledger` — Сбросить статистику PnL и начальный капитал\n"
+                    f"🔹 `/help` — Это меню"
                 )
                 await self._send_reply(reply, reply_markup=reply_markup)
         except Exception as e:

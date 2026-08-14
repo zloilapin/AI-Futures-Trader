@@ -24,8 +24,9 @@ class PaperTradingService:
                 print(f"⚠️ [PaperTradingService] Ошибка чтения файла портфеля: {e}")
         
         starting_balance = float(os.getenv("STARTING_BALANCE", "60.0"))
-        default_state = {
             "initial_balance": starting_balance,
+            "initial_deposit": starting_balance,
+            "net_transfers": 0.0,
             "current_balance": starting_balance,
             "active_positions": [],
             "closed_trades": [],
@@ -55,11 +56,14 @@ class PaperTradingService:
             pnl = trade.get("pnl_usd", 0)
             recent_streak.append("WIN" if pnl > 0 else "LOSS")
             
+        base_capital = self.state.get("initial_deposit", self.state.get("initial_balance", 0.0)) + self.state.get("net_transfers", 0.0)
+        account_roi_pct = ((self.state["current_balance"] - base_capital) / base_capital * 100) if base_capital > 0 else 0.0
+            
         return {
-            "initial_balance": self.state["initial_balance"],
+            "initial_balance": base_capital,
             "current_balance": round(self.state["current_balance"], 2),
             "total_pnl_usd": round(self.state["total_pnl_usd"], 2),
-            "total_pnl_pct": round(self.state["total_pnl_pct"], 2),
+            "total_pnl_pct": round(account_roi_pct, 2),
             "active_positions_count": len(self.state["active_positions"]),
             "win_rate_pct": round(win_rate, 2),
             "win_count": self.state["win_count"],
@@ -182,7 +186,9 @@ class PaperTradingService:
 
                 self.state["current_balance"] += returned_capital
                 self.state["total_pnl_usd"] += pnl_usd
-                self.state["total_pnl_pct"] = ((self.state["current_balance"] - self.state["initial_balance"]) / self.state["initial_balance"]) * 100
+                
+                base_cap = self.state.get("initial_deposit", self.state.get("initial_balance", 0.0)) + self.state.get("net_transfers", 0.0)
+                self.state["total_pnl_pct"] = ((self.state["current_balance"] - base_cap) / base_cap) * 100 if base_cap > 0 else 0.0
 
                 if pnl_usd >= 0:
                     self.state["win_count"] += 1

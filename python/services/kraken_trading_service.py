@@ -40,6 +40,8 @@ class KrakenTradingService:
         self.win_count = 0
         self.loss_count = 0
         self.recent_streak = []
+        self.initial_deposit = 0.0
+        self.net_transfers = 0.0
         if os.path.exists(self.stats_file):
             try:
                 with open(self.stats_file, 'r') as f:
@@ -48,6 +50,8 @@ class KrakenTradingService:
                     self.win_count = st.get('win_count', 0)
                     self.loss_count = st.get('loss_count', 0)
                     self.recent_streak = st.get('recent_streak', [])
+                    self.initial_deposit = st.get('initial_deposit', 0.0)
+                    self.net_transfers = st.get('net_transfers', 0.0)
             except Exception as e:
                 print(f"⚠️ [KrakenTradingService] Ошибка загрузки статистики: {e}")
 
@@ -60,7 +64,9 @@ class KrakenTradingService:
                     "total_pnl_usd": self.total_pnl_usd,
                     "win_count": self.win_count,
                     "loss_count": self.loss_count,
-                    "recent_streak": self.recent_streak
+                    "recent_streak": self.recent_streak,
+                    "initial_deposit": self.initial_deposit,
+                    "net_transfers": self.net_transfers
                 }, f)
         except Exception as e:
             print(f"⚠️ [KrakenTradingService] Ошибка сохранения статистики: {e}")
@@ -165,12 +171,20 @@ class KrakenTradingService:
         total_trades = self.win_count + self.loss_count
         win_rate = (self.win_count / total_trades * 100) if total_trades > 0 else 0.0
         
+        # Обновляем initial_deposit при первом запуске
+        if self.initial_deposit == 0.0 and total_balance > 0.0:
+            self.initial_deposit = total_balance
+            self._save_stats()
+            
+        base_capital = self.initial_deposit + self.net_transfers
+        account_roi_pct = ((total_balance - base_capital) / base_capital * 100) if base_capital > 0 else 0.0
+        
         return {
             "total_usd": total_balance,
             "current_balance": total_balance,
-            "initial_balance": total_balance - self.total_pnl_usd,
+            "initial_balance": base_capital,
             "total_pnl_usd": self.total_pnl_usd,
-            "total_pnl_pct": (self.total_pnl_usd / (total_balance - self.total_pnl_usd) * 100) if (total_balance - self.total_pnl_usd) > 0 else 0.0,
+            "total_pnl_pct": account_roi_pct,
             "win_rate_pct": win_rate,
             "win_count": self.win_count,
             "loss_count": self.loss_count,
@@ -539,3 +553,15 @@ class KrakenTradingService:
         del self.active_positions[symbol]
         self._save_positions()
         return True, {"pnl_usd": pnl, "exit_price": current_price, "is_virtual": is_virtual}
+
+    def adjust_ledger(self, amount_usd: float):
+        """Ручная корректировка депозита (положительная = пополнение, отрицательная = вывод)"""
+        self.net_transfers += amount_usd
+        self._save_stats()
+        
+    def reset_ledger(self, new_balance: float = 0.0):
+        """Сбрасывает Ledger и устанавливает текущий баланс как начальный."""
+        self.initial_deposit = new_balance
+        self.net_transfers = 0.0
+        self.total_pnl_usd = 0.0
+        self._save_stats()
