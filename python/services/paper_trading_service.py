@@ -81,11 +81,10 @@ class PaperTradingService:
     async def open_position(self, symbol: str, direction: str, entry_price: float, size_usd: float, tp_price: float, sl_price: float, leverage: int = 1) -> Optional[Dict[str, Any]]:
         """Opens a virtual position if balance is sufficient."""
         margin_usd = size_usd / leverage if leverage > 0 else size_usd
+        # We only check if we have enough equity/free margin. We don't deduct it from current_balance (which tracks Wallet Balance/Equity)
         if margin_usd <= 0 or self.state["current_balance"] < margin_usd:
             return None
-
-        self.state["current_balance"] -= margin_usd
-        
+            
         position = {
             "id": f"{symbol}_{int(datetime.now().timestamp())}",
             "symbol": symbol,
@@ -183,9 +182,9 @@ class PaperTradingService:
                 margin_usd = pos.get("margin_usd", size / leverage if leverage > 0 else size)
                 pnl_usd = size * (notional_pnl_pct / 100)
                 roi_pct = notional_pnl_pct * leverage
-                returned_capital = margin_usd + pnl_usd
 
-                self.state["current_balance"] += returned_capital
+                # Realized PnL is added to the wallet balance
+                self.state["current_balance"] += pnl_usd
                 self.state["total_pnl_usd"] += pnl_usd
                 
                 base_cap = self.state.get("initial_deposit", self.state.get("initial_balance", 0.0)) + self.state.get("net_transfers", 0.0)
