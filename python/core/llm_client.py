@@ -13,7 +13,7 @@ class LLMClient:
         self.groq_key = os.getenv("GROQ_API_KEY")
         self.gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
         self.openrouter_key = os.getenv("OPENROUTER_API_KEY")
-        
+        self.cerebras_key = os.getenv("CEREBRAS_API_KEY")
         self.kie_key = os.getenv("KIE_API_KEY")
         self.circuit_breaker_until = 0
         self._aiohttp_session = None
@@ -22,7 +22,11 @@ class LLMClient:
             # Если токен не AIzaSy или заглушка, отдаем приоритет Groq
             pass
 
-        if self.kie_key and not self.kie_key.startswith("your_"):
+        if self.cerebras_key and not self.cerebras_key.startswith("your_"):
+            self.provider = "cerebras"
+            self.model_name = model_name or "llama3.1-70b"
+            print(f"[LLMClient] Инициализирован провайдер Cerebras ({self.model_name})")
+        elif self.kie_key and not self.kie_key.startswith("your_"):
             self.provider = "kie"
             self.model_name = model_name or os.getenv("KIE_MODEL", "DeepSeek-V3") # Kie default
             print(f"[LLMClient] Инициализирован провайдер Kie.ai ({self.model_name})")
@@ -77,6 +81,12 @@ class LLMClient:
                 except Exception as e:
                     err_msg = str(e)
                     if "429" in err_msg or "rate_limit" in err_msg or "time out" in err_msg.lower():
+                        if self.cerebras_key and not self.cerebras_key.startswith("your_"):
+                            print("🔄 [LLMClient Groq] Лимит 429! Автоматическое резервное переключение на Cerebras...")
+                            self.provider = "cerebras"
+                            self.model_name = "llama3.1-70b"
+                            return await self.generate(prompt, max_retries)
+                        
                         wait_time = (attempt + 1) * 8
                         print(f"⚠️ [LLMClient Groq] Лимит частоты (429). Повтор через {wait_time}s... (Попытка {attempt + 1}/{max_retries})")
                         await asyncio.sleep(wait_time)
@@ -113,9 +123,15 @@ class LLMClient:
             self.circuit_breaker_until = time.time() + 300
             raise LLMCircuitBreakerException("Gemini API failed after max retries")
 
-        elif self.provider in ["openrouter", "kie"]:
+        elif self.provider in ["openrouter", "kie", "cerebras"]:
             is_kie = self.provider == "kie"
-            auth_key = self.kie_key if is_kie else self.openrouter_key
+            is_cerebras = self.provider == "cerebras"
+            if is_kie:
+                auth_key = self.kie_key
+            elif is_cerebras:
+                auth_key = self.cerebras_key
+            else:
+                auth_key = self.openrouter_key
             
             headers = {
                 "Authorization": f"Bearer {auth_key}",
@@ -126,9 +142,15 @@ class LLMClient:
                 self.or_models = [self.model_name]
 
             for model_to_try in self.or_models:
-                api_url = f"https://api.kie.ai/{model_to_try}/v1/chat/completions" if is_kie else "https://openrouter.ai/api/v1/chat/completions"
+                if is_kie:
+                    api_url = f"https://api.kie.ai/{model_to_try}/v1/chat/completions"
+                elif is_cerebras:
+                    api_url = "https://api.cerebras.ai/v1/chat/completions"
+                else:
+                    api_url = "https://openrouter.ai/api/v1/chat/completions"
+                    
                 payload = {
-                    "model": model_to_try,
+                    "model": model_to_try if not is_cerebras else self.model_name,
                     "messages": [{"role": "user", "content": prompt}],
                     "response_format": {"type": "json_object"},
                     "max_tokens": 2500
