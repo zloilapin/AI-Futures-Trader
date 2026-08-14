@@ -213,25 +213,6 @@ class KrakenTradingService:
             elif status == 'canceled':
                 print(f"❌ [KrakenTradingService] БИРЖА ОТМЕНИЛА ОРДЕР! Полный ответ: {order}")
                 return None
-            
-            # Hard Stop-Loss implementation for "Always Monitoring" request
-            if sl_price:
-                try:
-                    stop_side = 'sell' if direction == 'LONG' else 'buy'
-                    # Unified CCXT trigger order (stop loss)
-                    await self.exchange.create_order(formatted_symbol, 'stop', stop_side, size_base, None, {'stopPrice': sl_price, 'reduceOnly': True})
-                    print(f"🛡️ [KrakenTradingService] Установлен ЖЕСТКИЙ Stop-Loss на бирже по цене {sl_price}!")
-                except Exception as e:
-                    print(f"⚠️ [KrakenTradingService] Биржа не приняла хард-стоп ({e}). НЕМЕДЛЕННО ЗАКРЫВАЕМ ПОЗИЦИЮ во избежание риска.")
-                    try:
-                        # Если хард-стоп не поставился, немедленно ликвидируем маркет-ордером в обратную сторону
-                        abort_side = 'sell' if direction == 'LONG' else 'buy'
-                        await self.exchange.create_market_order(formatted_symbol, abort_side, size_base)
-                        print(f"✅ [KrakenTradingService] Аварийное закрытие (отмена) позиции {formatted_symbol} выполнено успешно.")
-                    except Exception as abort_err:
-                        print(f"🚨 [KrakenTradingService] КРИТИЧЕСКАЯ ОШИБКА АВАРИЙНОГО ЗАКРЫТИЯ: {abort_err}")
-                    return None  # Возвращаем None, чтобы позиция не считалась открытой
-            
             return order
         except Exception as e:
             print(f"❌ [KrakenTradingService] Ошибка сети при отправке ордера: {e}")
@@ -279,7 +260,35 @@ class KrakenTradingService:
                 fill_price = order_result.get('average') or order_result.get('price') or entry_price
                 if fill_price > 0 and abs(fill_price - entry_price) / entry_price > 0.0001:
                     print(f"⚠️ [KrakenTradingService] Slippage detected! Planned: {entry_price}, Actual: {fill_price}")
+                    
+                    # Корректируем SL и TP на величину проскальзывания, чтобы сохранить изначальный Risk/Reward
+                    slippage_diff = fill_price - entry_price
+                    if tp_price:
+                        tp_price = tp_price + slippage_diff
+                    if sl_price:
+                        sl_price = sl_price + slippage_diff
+                        
+                    print(f"🔄 [KrakenTradingService] Уровни скорректированы. Новый SL: {sl_price}, Новый TP: {tp_price}")
                     entry_price = float(fill_price)
+                    
+                # Теперь устанавливаем Hard Stop-Loss с учетом скорректированной цены
+                if sl_price:
+                    try:
+                        stop_side = 'sell' if direction == 'LONG' else 'buy'
+                        formatted_symbol = self._format_symbol(symbol)
+                        # Unified CCXT trigger order (stop loss)
+                        await self.exchange.create_order(formatted_symbol, 'stop', stop_side, size_base, None, {'stopPrice': sl_price, 'reduceOnly': True})
+                        print(f"🛡️ [KrakenTradingService] Установлен ЖЕСТКИЙ Stop-Loss на бирже по скорректированной цене {sl_price}!")
+                    except Exception as e:
+                        print(f"⚠️ [KrakenTradingService] Биржа не приняла хард-стоп ({e}). НЕМЕДЛЕННО ЗАКРЫВАЕМ ПОЗИЦИЮ во избежание риска.")
+                        try:
+                            # Если хард-стоп не поставился, немедленно ликвидируем маркет-ордером в обратную сторону
+                            abort_side = 'sell' if direction == 'LONG' else 'buy'
+                            await self.exchange.create_market_order(formatted_symbol, abort_side, size_base)
+                            print(f"✅ [KrakenTradingService] Аварийное закрытие (отмена) позиции {formatted_symbol} выполнено успешно.")
+                        except Exception as abort_err:
+                            print(f"🚨 [KrakenTradingService] КРИТИЧЕСКАЯ ОШИБКА АВАРИЙНОГО ЗАКРЫТИЯ: {abort_err}")
+                        order_result = None  # Сбрасываем order_result, чтобы позиция не добавилась
         
         if order_result:
             pos_id = str(uuid.uuid4())[:8]
@@ -425,22 +434,25 @@ class KrakenTradingService:
                     return closed_reports
             
             # Correct PnL calculation independent of exit reason
-            if direction == "LONG":
-                pnl = (current_price - entry_price) * (pos["size_usd"] / entry_price)
+            if triggered_exit == "MANUAL_CLOSE":
+                pnl = 0.0
+                print(f"ℹ️ [Keeper] Оценка PnL пропущена для {symbol}, так как позиция была закрыта вне бота (Hard SL/TP или вручную).")
             else:
-                pnl = (entry_price - current_price) * (pos["size_usd"] / entry_price)
-            
-            if pnl > 0:
-                self.win_count += 1
-                self.recent_streak.append("WIN")
-            else:
-                self.loss_count += 1
-                self.recent_streak.append("LOSS")
+                if direction == "LONG":
+                    pnl = (current_price - entry_price) * (pos["size_usd"] / entry_price)
+                else:
+                    pnl = (entry_price - current_price) * (pos["size_usd"] / entry_price)
                 
-            self.recent_streak = self.recent_streak[-10:] # Keep only last 10
-                
-            self.total_pnl_usd += pnl
-            self._save_stats()
+                if pnl > 0:
+                    self.win_count += 1
+                    self.recent_streak.append("WIN")
+                else:
+                    self.loss_count += 1
+                    self.recent_streak.append("LOSS")
+                    
+                self.recent_streak = self.recent_streak[-10:] # Keep only last 10
+                self.total_pnl_usd += pnl
+                self._save_stats()
             
             trigger_reason = triggered_exit
             if triggered_exit == "MANUAL_CLOSE":
