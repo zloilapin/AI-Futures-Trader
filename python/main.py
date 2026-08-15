@@ -4,7 +4,7 @@ import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(override=True)
 
 # --- CORE IMPORTS ---
 from core.logger import TradeLogger
@@ -162,6 +162,13 @@ async def run_single_cycle(
 
     # ИТЕРАЦИЯ ПО ВСЕМ АКТИВАМ
     for symbol in selected_assets:
+        # QW #5: Check if we've reached the maximum number of concurrent positions
+        if len(trading_service.active_positions) >= getattr(config, "MAX_CONCURRENT_POSITIONS", 2):
+            msg = f"⏸️ Достигнут лимит одновременных позиций ({config.MAX_CONCURRENT_POSITIONS}). Пропуск новых активов."
+            print(msg)
+            logger.info(f"[System_Core] {msg}")
+            break
+
         print(f"\n🔍 ПОЛНЫЙ АНАЛИЗ (15m, 1H, 4H) KRAKEN FUTURES: {symbol}")
         
         # СТАДИЯ 2: СБОР ДАННЫХ И ПРОВЕРКА СТАТУСА
@@ -204,6 +211,7 @@ async def run_single_cycle(
         ceo_payload = {
             "symbol": symbol,
             "multi_timeframe": market_data.get("multi_timeframe", {}),
+            "raw_market_data": {k: v for k, v in market_data.items() if k not in ["multi_timeframe", "price_data"]},
             "analyst_reports": valid_reports,
             "historical_context": historical_context,
             "past_lessons_learned": recent_lessons
@@ -329,6 +337,16 @@ async def run_single_cycle(
         for item in scan_summaries:
             sym = item.get("symbol", "?")
             status = item.get("status", "?")
+            
+            # Если скан заблокирован на самом первом этапе (ScannerAgent)
+            if status == "⛔ СКАН ЗАБЛОКИРОВАН":
+                reason = item.get("reason", "")
+                safe_reason = _escape_md(str(reason)[:200])
+                block = f"{'='*28}\n🪙 {sym} — {status}\n"
+                block += f"🔎 Scanner/Сканер: ОТКЛОНЁН\n   > {safe_reason}\n"
+                parts.append(block)
+                continue
+
             dec = item.get("decision", "N/A")
             conv = item.get("conviction", 0)
             scanner_st = item.get("scanner_status", "")
@@ -353,7 +371,13 @@ async def run_single_cycle(
                 block += f"📝 {safe_ceo}\n"
             parts.append(block)
 
-        parts.append("\n💡 Сигналы >=80% не обнаружены. Бот продолжает мониторинг. / No >=80% signals found. Monitoring continues.")
+        # Проверяем, была ли одобрена хоть одна монета
+        any_approved = any(item.get("risk_approved", False) for item in scan_summaries)
+        if not any_approved:
+            parts.append("\n💡 Сильных сигналов для входа не обнаружено. Бот продолжает мониторинг.")
+        else:
+            parts.append("\n🚀 Найден отличный сетап! Ордера отправлены на биржу.")
+            
         scan_reply = "\n".join(parts)
         # Отправляем без Markdown чтобы избежать ошибок парсинга спецсимволов
         await tg_sender.send_message(scan_reply, parse_mode="")
@@ -470,6 +494,9 @@ async def main():
             except (KeyboardInterrupt, asyncio.CancelledError):
                 print("\n🛑 Автономный торговый бот остановлен.")
     finally:
+        if 'llm_client' in locals() and hasattr(llm_client, "close"):
+            await llm_client.close()
+            
         if hasattr(trading_service, "_close_exchange_async"):
             await trading_service._close_exchange_async()
             print("🧹 [System] Ресурсы соединения с биржей успешно очищены.")

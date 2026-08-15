@@ -9,6 +9,8 @@ class LLMClient:
     Unified LLM Client supporting Groq, Gemini, and OpenRouter APIs.
     Acts as the 'brain' interface for all trading agents.
     """
+    _last_groq_call_time = 0.0
+
     def __init__(self, model_name: Optional[str] = None):
         self.groq_key = os.getenv("GROQ_API_KEY")
         self.gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
@@ -24,7 +26,7 @@ class LLMClient:
 
         if self.cerebras_key and not self.cerebras_key.startswith("your_"):
             self.provider = "cerebras"
-            self.model_name = model_name or "llama3.1-70b"
+            self.model_name = model_name or "gpt-oss-120b"
             print(f"[LLMClient] Инициализирован провайдер Cerebras ({self.model_name})")
         elif self.kie_key and not self.kie_key.startswith("your_"):
             self.provider = "kie"
@@ -32,7 +34,8 @@ class LLMClient:
             print(f"[LLMClient] Инициализирован провайдер Kie.ai ({self.model_name})")
         elif self.openrouter_key and not self.openrouter_key.startswith("your_"):
             self.provider = "openrouter"
-            self.model_name = model_name or "meta-llama/llama-3.1-8b-instruct:free"
+            # Using Gemini 2.0 Flash as it is fast, cheap, and has huge context for our 7000+ token prompts
+            self.model_name = model_name or os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct")
             print(f"[LLMClient] Инициализирован провайдер OpenRouter ({self.model_name})")
         elif self.groq_key and not self.groq_key.startswith("your_"):
             from groq import AsyncGroq
@@ -66,10 +69,13 @@ class LLMClient:
             print(f"🛑 [LLMClient] Circuit Breaker активен. Пропуск генерации (еще {remaining} мин).")
             raise LLMCircuitBreakerException("LLM is currently unavailable due to repeated failures.")
 
-        # Глобальный троттлинг для бесплатных лимитов (макс 20 запросов в минуту)
-        await asyncio.sleep(3)
-        
         if self.provider == "groq":
+            # Global rate limit for Groq (max ~13 RPM) to prevent 429 errors
+            elapsed = time.time() - LLMClient._last_groq_call_time
+            if elapsed < 4.5:
+                await asyncio.sleep(4.5 - elapsed)
+            LLMClient._last_groq_call_time = time.time()
+            
             for attempt in range(max_retries):
                 try:
                     response = await self.client.chat.completions.create(
@@ -80,18 +86,23 @@ class LLMClient:
                     return response.choices[0].message.content
                 except Exception as e:
                     err_msg = str(e)
+                    print(f"⚠️ [LLMClient Groq] Исходная ошибка от API: {err_msg}")
                     if "429" in err_msg or "rate_limit" in err_msg or "time out" in err_msg.lower():
                         if self.cerebras_key and not self.cerebras_key.startswith("your_"):
                             print("🔄 [LLMClient Groq] Лимит 429! Автоматическое резервное переключение на Cerebras...")
                             self.provider = "cerebras"
-                            self.model_name = "llama3.1-70b"
+                            self.model_name = "gpt-oss-120b"
                             return await self.generate(prompt, max_retries)
                         
                         wait_time = (attempt + 1) * 8
                         print(f"⚠️ [LLMClient Groq] Лимит частоты (429). Повтор через {wait_time}s... (Попытка {attempt + 1}/{max_retries})")
                         await asyncio.sleep(wait_time)
+                    elif "400" in err_msg or "json_validate_failed" in err_msg.lower():
+                        wait_time = 2
+                        print(f"⚠️ [LLMClient Groq] Ошибка валидации JSON (400). Повтор через {wait_time}s... (Попытка {attempt + 1}/{max_retries})")
+                        await asyncio.sleep(wait_time)
                     else:
-                        print(f"❌ [LLMClient Groq] Ошибка при запросе: {e}")
+                        print(f"❌ [LLMClient Groq] Ошибка при запросе: {err_msg}")
                         break
                         
             # Если дошли сюда, значит все попытки исчерпаны
@@ -187,6 +198,16 @@ class LLMClient:
 
         return "{}"
 
+    async def close(self):
+        """Закрытие всех асинхронных сессий клиента"""
+        if self._aiohttp_session and not self._aiohttp_session.closed:
+            await self._aiohttp_session.close()
+            
+        if self.provider == "groq" and hasattr(self.client, "close"):
+            await self.client.close()
+            
+        print("🧹 [LLMClient] Ресурсы LLM клиента успешно очищены.")
+
 # Пример для локального тестирования
 if __name__ == "__main__":
     async def test_client():
@@ -195,6 +216,7 @@ if __name__ == "__main__":
         print("Отправка тестового запроса...")
         res = await client.generate(test_prompt)
         print(f"Ответ: {res}")
+        await client.close()
 
     asyncio.run(test_client())
     

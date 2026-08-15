@@ -54,6 +54,24 @@ class RiskManager(BaseAgent):
         if total_balance <= 0:
             self.logger.warning(f"[{self.name}] ❌ INSUFFICIENT BALANCE: Total balance is {total_balance}. Blocking trade.")
         elif decision in ["LONG", "SHORT"] and conviction >= min_conviction:
+            # QW #6: Win Rate Gate Check
+            win_count = portfolio_data.get("win_count", 0)
+            loss_count = portfolio_data.get("loss_count", 0)
+            total_trades = win_count + loss_count
+            
+            if total_trades >= 10:
+                win_rate = win_count / total_trades
+                if win_rate < 0.40:
+                    self.logger.warning(f"[{self.name}] ⚠️ WIN RATE GATE TRIGGERED: Win rate is {win_rate*100:.1f}%. Increasing threshold and halving risk.")
+                    min_conviction = max(90, min_conviction)
+                    risk_pct *= 0.5
+                    
+            if conviction < min_conviction:
+                return {
+                    "approved": False,
+                    "reasoning": f"Conviction {conviction} is below Win Rate Gate threshold {min_conviction}"
+                }
+
             # Calculate ATR based SL and TP with a minimum floor to avoid noise
             if decision == "LONG":
                 sl_dist = max(atr_14 * sl_mult, current_price * 0.012) # Min 1.2% SL

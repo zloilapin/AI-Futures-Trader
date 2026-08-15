@@ -502,6 +502,13 @@ class KrakenTradingService:
                 else:
                     pnl = (entry_price - actual_exit_price) * pos["size_base"]
                 
+                # Deduct exit fee (Taker 0.05%) from PnL for accurate tracking
+                # Entry fee is already deducted via adjust_ledger when the order is placed.
+                exit_fee = pos.get("size_usd", 0) * 0.0005
+                if exit_fee > 0:
+                    pnl -= exit_fee
+                    print(f"💸 [Keeper] Комиссия за закрытие (Taker 0.05%): ${exit_fee:.4f} вычтена из PnL.")
+
                 if pnl > 0:
                     self.win_count += 1
                     self.recent_streak.append("WIN")
@@ -519,7 +526,8 @@ class KrakenTradingService:
             elif is_virtual:
                 trigger_reason = f"{triggered_exit} (Виртуально)"
                 
-            margin_usd = pos.get("margin_usd", pos["size_usd"] / pos.get("leverage", 1) if pos.get("leverage", 1) > 0 else pos["size_usd"])
+            size_usd = pos.get("size_usd", 0.0)
+            margin_usd = pos.get("margin_usd", size_usd / pos.get("leverage", 1) if pos.get("leverage", 1) > 0 else size_usd)
                 
             report = {
                 "symbol": symbol,
@@ -527,7 +535,7 @@ class KrakenTradingService:
                 "entry_price": entry_price,
                 "exit_price": actual_exit_price,
                 "pnl_usd": pnl,
-                "pnl_pct": (pnl / pos["size_usd"]) * 100 if pos["size_usd"] > 0 else 0.0,
+                "pnl_pct": (pnl / size_usd) * 100 if size_usd > 0 else 0.0,
                 "roi_pct": (pnl / margin_usd) * 100 if margin_usd > 0 else 0.0,
                 "margin_usd": margin_usd,
                 "leverage": pos.get("leverage", 1),

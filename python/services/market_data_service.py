@@ -88,7 +88,7 @@ class MarketDataService:
                             vol = sum(float(c["volume"]) for c in candles[-20:])
                             return {
                                 "interval_min": interval_min,
-                                "current_price": round(current_price, 2),
+                                "current_price": round(current_price, 6),
                                 "trend": trend,
                                 "change_pct": round(pct_diff, 2),
                                 "volume": round(vol * current_price, 2),
@@ -181,8 +181,8 @@ class MarketDataService:
             # We can use the existing _fetch_ohlc_interval to get 15m futures candles
             res = await self._fetch_ohlc_interval(symbol, 15)
             candles = res.get("candles_20", [])
-            # But wait, we need more than 20 candles for RSI-14, EMA-20, and MACD!
-            # Let's fetch it directly here to get 50 candles.
+            # We need a longer history to warm up EMA and MACD properly.
+            # 200 candles is a good industry standard for stable EMA/MACD values.
             pair = self._normalize_pair(symbol)
             url = f"https://futures.kraken.com/api/charts/v1/trade/{pair}/15m"
             
@@ -192,9 +192,9 @@ class MarketDataService:
                         data = await resp.json()
                         candles = data.get("candles", [])
                         if candles:
-                            closes = [float(c["close"]) for c in candles[-50:]]
-                            highs = [float(c["high"]) for c in candles[-50:]]
-                            lows = [float(c["low"]) for c in candles[-50:]]
+                            closes = [float(c["close"]) for c in candles[-200:]]
+                            highs = [float(c["high"]) for c in candles[-200:]]
+                            lows = [float(c["low"]) for c in candles[-200:]]
                             if len(closes) >= 35:
                                 gains = [max(0, closes[i] - closes[i-1]) for i in range(1, len(closes))]
                                 losses = [max(0, closes[i-1] - closes[i]) for i in range(1, len(closes))]
@@ -220,7 +220,7 @@ class MarketDataService:
                                     return emas
 
                                 ema_20_series = calc_ema_series(closes, 20)
-                                ema_20 = round(ema_20_series[-1], 2)
+                                ema_20 = round(ema_20_series[-1], 6)
                                 current_price = closes[-1]
                                 ema_trend = "up" if current_price > ema_20 else "down"
 
@@ -244,15 +244,116 @@ class MarketDataService:
                                     atr_14 = (atr_14 * 13 + tr_list[i]) / 14
                                 atr_pct = round((atr_14 / current_price) * 100, 2)
 
+                                # === ALGORITHMIC SIGNALS (QW #2) ===
+                                # These are deterministic, computed in Python — no LLM guessing.
+
+                                # 1. RSI Divergence Detection (last 20 bars)
+                                rsi_divergence = "none"
+                                # Compute RSI series for divergence check
+                                rsi_series = []
+                                _ag = sum(gains[:14]) / 14
+                                _al = sum(losses[:14]) / 14
+                                for i in range(14, len(gains)):
+                                    _ag = (_ag * 13 + gains[i]) / 14
+                                    _al = (_al * 13 + losses[i]) / 14
+                                    _rs = _ag / (_al + 1e-6)
+                                    rsi_series.append(round(100 - (100 / (1 + _rs)), 2))
+                                
+                                if len(rsi_series) >= 20 and len(closes) >= 20:
+                                    # Bullish divergence: price makes Lower Low, RSI makes Higher Low
+                                    price_tail = closes[-20:]
+                                    rsi_tail = rsi_series[-20:]
+                                    price_min1_idx = price_tail[:10].index(min(price_tail[:10]))
+                                    price_min2_idx = 10 + price_tail[10:].index(min(price_tail[10:]))
+                                    if price_tail[price_min2_idx] < price_tail[price_min1_idx] and rsi_tail[price_min2_idx] > rsi_tail[price_min1_idx]:
+                                        rsi_divergence = "bullish"
+                                    # Bearish divergence: price makes Higher High, RSI makes Lower High
+                                    price_max1_idx = price_tail[:10].index(max(price_tail[:10]))
+                                    price_max2_idx = 10 + price_tail[10:].index(max(price_tail[10:]))
+                                    if price_tail[price_max2_idx] > price_tail[price_max1_idx] and rsi_tail[price_max2_idx] < rsi_tail[price_max1_idx]:
+                                        rsi_divergence = "bearish"
+
+                                # 2. MACD Crossover Detection
+                                macd_crossover = "none"
+                                if len(macd_valid) >= 2 and len(signal_line_series) >= 2:
+                                    prev_macd = macd_valid[-2]
+                                    prev_signal = signal_line_series[-2]
+                                    curr_macd = macd_valid[-1]
+                                    curr_signal = signal_line_series[-1]
+                                    if prev_macd <= prev_signal and curr_macd > curr_signal:
+                                        macd_crossover = "bullish_cross"
+                                    elif prev_macd >= prev_signal and curr_macd < curr_signal:
+                                        macd_crossover = "bearish_cross"
+
+                                # 3. MACD Histogram momentum
+                                macd_histogram = round(macd_val - signal_val, 6)
+                                prev_histogram = round(macd_valid[-2] - signal_line_series[-2], 6) if len(macd_valid) >= 2 and len(signal_line_series) >= 2 else 0
+                                histogram_momentum = "accelerating" if abs(macd_histogram) > abs(prev_histogram) else "decelerating"
+
+                                # 4. Liquidity Sweep Detection (wick > 60% of candle range on last 5 candles)
+                                sweeps_detected = []
+                                for ci in range(-5, 0):
+                                    if abs(ci) <= len(candles):
+                                        c = candles[ci]
+                                        o, h, l, cl = float(c["open"]), float(c["high"]), float(c["low"]), float(c["close"])
+                                        rng = h - l
+                                        if rng > 0:
+                                            upper_wick = h - max(o, cl)
+                                            lower_wick = min(o, cl) - l
+                                            if upper_wick / rng > 0.6:
+                                                sweeps_detected.append({"type": "upper_sweep", "bar": ci, "rejection_from": round(h, 6)})
+                                            elif lower_wick / rng > 0.6:
+                                                sweeps_detected.append({"type": "lower_sweep", "bar": ci, "rejection_from": round(l, 6)})
+
+                                # 5. Candle Pattern Detection (last 3 candles)
+                                candle_patterns = []
+                                if len(candles) >= 3:
+                                    for ci in range(-3, 0):
+                                        c = candles[ci]
+                                        o, h, l, cl = float(c["open"]), float(c["high"]), float(c["low"]), float(c["close"])
+                                        body = abs(cl - o)
+                                        rng = h - l
+                                        if rng > 0:
+                                            body_ratio = body / rng
+                                            if body_ratio < 0.1:
+                                                candle_patterns.append({"bar": ci, "pattern": "doji"})
+                                            elif body_ratio > 0.7 and cl > o:
+                                                candle_patterns.append({"bar": ci, "pattern": "strong_bullish"})
+                                            elif body_ratio > 0.7 and cl < o:
+                                                candle_patterns.append({"bar": ci, "pattern": "strong_bearish"})
+                                    
+                                    # Engulfing
+                                    c_prev = candles[-2]
+                                    c_curr = candles[-1]
+                                    po, pc = float(c_prev["open"]), float(c_prev["close"])
+                                    co, cc = float(c_curr["open"]), float(c_curr["close"])
+                                    if pc < po and cc > co and cc > po and co < pc:
+                                        candle_patterns.append({"bar": -1, "pattern": "bullish_engulfing"})
+                                    elif pc > po and cc < co and cc < po and co > pc:
+                                        candle_patterns.append({"bar": -1, "pattern": "bearish_engulfing"})
+
+                                # 6. EMA-20 Distance (overextension check)
+                                ema_distance_pct = round(((current_price - ema_20) / ema_20) * 100, 2) if ema_20 > 0 else 0
+
                                 return {
                                     "symbol": symbol,
                                     "rsi_14": rsi,
                                     "ema_20": ema_20,
                                     "ema_trend": ema_trend,
-                                    "macd_val": round(macd_val, 2),
+                                    "ema_distance_pct": ema_distance_pct,
+                                    "macd_val": round(macd_val, 6),
                                     "macd_signal": macd_signal,
-                                    "atr_14": round(atr_14, 2),
-                                    "atr_pct": atr_pct
+                                    "macd_histogram": macd_histogram,
+                                    "histogram_momentum": histogram_momentum,
+                                    "atr_14": round(atr_14, 6),
+                                    "atr_pct": atr_pct,
+                                    # Algorithmic signals (deterministic, no LLM needed)
+                                    "algo_signals": {
+                                        "rsi_divergence": rsi_divergence,
+                                        "macd_crossover": macd_crossover,
+                                        "liquidity_sweeps": sweeps_detected,
+                                        "candle_patterns": candle_patterns
+                                    }
                                 }
         except Exception as e:
             print(f"⚠️ [MarketDataService] Ошибка расчёта индикаторов: {e}")
@@ -296,10 +397,27 @@ class MarketDataService:
                                 if base_asset == target_base:
                                     funding_rate = float(t.get("fundingRate", 0.0001) or 0.0001)
                                     open_interest = float(t.get("openInterest", 0) or 0)
+                                    
+                                    # QW #4: Track OI Trend
+                                    if not hasattr(self, "_oi_history"):
+                                        self._oi_history = {}
+                                        
+                                    oi_trend = "neutral"
+                                    if symbol in self._oi_history:
+                                        prev_oi = self._oi_history[symbol]
+                                        if open_interest > prev_oi * 1.01: # 1% increase
+                                            oi_trend = "rising"
+                                        elif open_interest < prev_oi * 0.99: # 1% decrease
+                                            oi_trend = "falling"
+                                        else:
+                                            oi_trend = "stable"
+                                            
+                                    self._oi_history[symbol] = open_interest
+
                                     return {
                                         "symbol": symbol,
                                         "open_interest": open_interest,
-                                        "open_interest_trend": "neutral",
+                                        "open_interest_trend": oi_trend,
                                         "funding_rate": round(funding_rate, 6)
                                     }
         except Exception as e:

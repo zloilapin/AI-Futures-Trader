@@ -41,6 +41,7 @@ class Config:
     MAX_POSITION_SIZE_USDT: float = 100.0
     MAX_LOSS_PER_TRADE_USDT: float = 5.0
     MAX_MARGIN_PCT: float = float(os.getenv("MAX_MARGIN_PCT", "0.5"))
+    MAX_CONCURRENT_POSITIONS: int = int(os.getenv("MAX_CONCURRENT_POSITIONS", "2"))
 
 # Глобальный экземпляр конфига для импорта в другие модули
 config = Config()

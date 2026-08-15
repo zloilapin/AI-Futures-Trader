@@ -7,10 +7,13 @@ class PaperTradingService:
     """
     Paper Trading & PnL Tracking Service for Kraken Futures.
     Features:
-    - Breakeven Guard: automatically moves Stop Loss to Breakeven (+0.1%) when 50% of Take Profit is reached.
-    - Trailing Stop: dynamic profit protection.
+    - Trailing Stop: activates at +1.5% profit, then trails by 1.5% (identical to KrakenTradingService).
+    - Taker Fee: 0.05% deducted on both entry and exit (deducted from PnL at close time).
+    - Time-Based Stop: positions older than 8 hours are auto-closed.
     - Persists balance, open positions, and trade history in data/memory/portfolio.json.
     """
+    TAKER_FEE_PCT = 0.0005  # 0.05% per side
+
     def __init__(self, data_file: str = "data/memory/portfolio.json"):
         self.data_file = data_file
         self.state = self._load_state()
@@ -85,29 +88,39 @@ class PaperTradingService:
         if margin_usd <= 0 or self.state["current_balance"] < margin_usd:
             return None
             
+        size_base = size_usd / entry_price if entry_price > 0 else 0.0
+
         position = {
             "id": f"{symbol}_{int(datetime.now().timestamp())}",
             "symbol": symbol,
             "direction": direction.upper(),
             "entry_price": entry_price,
             "size_usd": size_usd,        # NOTIONAL
+            "size_base": size_base,      # BASE AMOUNT (for parity with KrakenTradingService)
             "leverage": leverage,        # LEVERAGE
             "margin_usd": margin_usd,    # MARGIN
             "tp_price": tp_price,
             "sl_price": sl_price,
-            "breakeven_activated": False,
+            "highest_price": entry_price,
+            "lowest_price": entry_price,
             "opened_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
 
+        # Note: fees are NOT deducted from balance here.
+        # Both entry and exit fees are deducted from PnL at close time,
+        # so that total_pnl_usd accurately reflects net profit after all fees.
+
         self.state["active_positions"].append(position)
         self._save_state()
+        entry_fee = size_usd * self.TAKER_FEE_PCT
         print(f"💼 [PaperTrading] Открыта виртуальная позиция {direction} {symbol} на ${size_usd:,.2f} (Маржа: ${margin_usd:,.2f}) по цене ${entry_price:,.2f}")
+        print(f"💸 [PaperTrading] Комиссия за открытие (0.05%): ${entry_fee:.4f} — будет учтена при закрытии.")
         return position
 
     async def check_and_update_positions(self, symbol: str, current_price: float) -> List[Dict[str, Any]]:
         """
         Evaluates active positions against live current_price.
-        Applies Breakeven Guard (moves SL to Entry + 0.1% at 50% TP distance).
+        Applies Trailing Stop logic identical to KrakenTradingService (1.5% activation, 1.5% trail).
         Returns a list of position closure reports if TP or SL is triggered.
         """
         closed_reports = []
@@ -123,23 +136,28 @@ class PaperTradingService:
             tp = pos["tp_price"]
             sl = pos["sl_price"]
             size = pos["size_usd"]
-            be_active = pos.get("breakeven_activated", False)
             leverage = pos.get("leverage", 1)
 
-            # BREAKEVEN GUARD CHECK (При 50% пути к TP переносим Stop Loss в безубыток)
-            if not be_active and tp > 0 and entry > 0:
-                if direction == "LONG":
-                    halfway_tp = entry + (tp - entry) * 0.5
-                    if current_price >= halfway_tp and sl < entry:
-                        pos["sl_price"] = round(entry * 1.001, 2)
-                        pos["breakeven_activated"] = True
-                        print(f"🛡️ [BreakevenGuard] Позиция LONG {symbol} прошла 50% до TP! Stop Loss перенесен в безубыток: ${pos['sl_price']:,.2f}")
-                elif direction == "SHORT":
-                    halfway_tp = entry - (entry - tp) * 0.5
-                    if current_price <= halfway_tp and sl > entry:
-                        pos["sl_price"] = round(entry * 0.999, 2)
-                        pos["breakeven_activated"] = True
-                        print(f"🛡️ [BreakevenGuard] Позиция SHORT {symbol} прошла 50% до TP! Stop Loss перенесен в безубыток: ${pos['sl_price']:,.2f}")
+            # Initialize trailing tracking fields if missing
+            if "highest_price" not in pos: pos["highest_price"] = entry
+            if "lowest_price" not in pos: pos["lowest_price"] = entry
+
+            # Trailing Stop: identical to KrakenTradingService (1.5% trail)
+            trailing_pct = 0.015
+            if direction == "LONG":
+                pos["highest_price"] = max(pos["highest_price"], current_price)
+                if pos["highest_price"] >= entry * 1.015:
+                    trail_sl = pos["highest_price"] * (1 - trailing_pct)
+                    if trail_sl > pos["sl_price"]:
+                        pos["sl_price"] = trail_sl
+                        print(f"📈 [PaperTrading/Keeper] {symbol} Trailing Stop подтянут до {trail_sl:.4f}")
+            else:
+                pos["lowest_price"] = min(pos["lowest_price"], current_price)
+                if pos["lowest_price"] <= entry * 0.985:
+                    trail_sl = pos["lowest_price"] * (1 + trailing_pct)
+                    if trail_sl < pos["sl_price"]:
+                        pos["sl_price"] = trail_sl
+                        print(f"📉 [PaperTrading/Keeper] {symbol} Trailing Stop подтянут до {trail_sl:.4f}")
 
             sl = pos["sl_price"]
             triggered_exit = None
@@ -163,14 +181,14 @@ class PaperTradingService:
                         triggered_exit = "TP"
                         exit_price = tp
                     elif current_price <= sl and sl > 0:
-                        triggered_exit = "SL (Breakeven)" if pos.get("breakeven_activated") else "SL"
+                        triggered_exit = "SL"
                         exit_price = sl
                 elif direction == "SHORT":
                     if current_price <= tp and tp > 0:
                         triggered_exit = "TP"
                         exit_price = tp
                     elif current_price >= sl and sl > 0:
-                        triggered_exit = "SL (Breakeven)" if pos.get("breakeven_activated") else "SL"
+                        triggered_exit = "SL"
                         exit_price = sl
 
             if triggered_exit:
@@ -180,10 +198,17 @@ class PaperTradingService:
                     notional_pnl_pct = ((entry - exit_price) / entry) * 100
 
                 margin_usd = pos.get("margin_usd", size / leverage if leverage > 0 else size)
-                pnl_usd = size * (notional_pnl_pct / 100)
-                roi_pct = notional_pnl_pct * leverage
+                
+                # Gross PnL (before fees)
+                gross_pnl_usd = size * (notional_pnl_pct / 100)
+                
+                # Deduct BOTH entry and exit fees (Taker 0.05% each side)
+                total_fees = size * self.TAKER_FEE_PCT * 2  # entry + exit
+                pnl_usd = gross_pnl_usd - total_fees
+                
+                roi_pct = (pnl_usd / margin_usd) * 100 if margin_usd > 0 else 0
 
-                # Realized PnL is added to the wallet balance
+                # Realized PnL (net of all fees) is added to the wallet balance
                 self.state["current_balance"] += pnl_usd
                 self.state["total_pnl_usd"] += pnl_usd
                 
@@ -208,15 +233,80 @@ class PaperTradingService:
                     "margin_usd": round(margin_usd, 2),
                     "leverage": leverage,
                     "size_usd": size,
+                    "fees_usd": round(total_fees, 4),
                     "new_balance": round(self.state["current_balance"], 2),
                     "closed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
                 self.state["closed_trades"].append(closed_record)
                 closed_reports.append(closed_record)
-                print(f"🎉 [PaperTrading] ЗАКРЫТА ПОЗИЦИЯ {symbol} ({triggered_exit})! PnL: ${pnl_usd:+.2f} (ROI: {roi_pct:+.2f}%). Новый баланс: ${self.state['current_balance']:,.2f}")
+                print(f"🎉 [PaperTrading] ЗАКРЫТА ПОЗИЦИЯ {symbol} ({triggered_exit})! PnL: ${pnl_usd:+.2f} (ROI: {roi_pct:+.2f}%, Fees: ${total_fees:.4f}). Новый баланс: ${self.state['current_balance']:,.2f}")
             else:
                 remaining_positions.append(pos)
 
         self.state["active_positions"] = remaining_positions
         self._save_state()
         return closed_reports
+
+    async def force_close_position(self, symbol: str) -> tuple:
+        """Manually forces a close via Telegram button. Mirrors KrakenTradingService.force_close_position."""
+        target_pos = None
+        target_idx = -1
+        for i, pos in enumerate(self.state["active_positions"]):
+            if pos["symbol"] == symbol:
+                target_pos = pos
+                target_idx = i
+                break
+
+        if target_pos is None:
+            return False, "Позиция не найдена"
+
+        direction = target_pos["direction"]
+        entry_price = target_pos["entry_price"]
+        size_usd = target_pos["size_usd"]
+        leverage = target_pos.get("leverage", 1)
+        margin_usd = target_pos.get("margin_usd", size_usd / leverage if leverage > 0 else size_usd)
+
+        # Use entry_price as exit_price (we don't have a live feed here outside of the cycle)
+        # In practice, this method is called from Telegram which doesn't pass current_price,
+        # so we approximate. The live service does the same fallback.
+        exit_price = entry_price
+
+        # Calculate PnL
+        if direction == "LONG":
+            gross_pnl = (exit_price - entry_price) / entry_price * size_usd
+        else:
+            gross_pnl = (entry_price - exit_price) / entry_price * size_usd
+
+        total_fees = size_usd * self.TAKER_FEE_PCT * 2
+        pnl = gross_pnl - total_fees
+
+        if pnl > 0:
+            self.state["win_count"] += 1
+        else:
+            self.state["loss_count"] += 1
+
+        self.state["total_pnl_usd"] += pnl
+        self.state["current_balance"] += pnl
+
+        base_cap = self.state.get("initial_deposit", self.state.get("initial_balance", 0.0)) + self.state.get("net_transfers", 0.0)
+        self.state["total_pnl_pct"] = ((self.state["current_balance"] - base_cap) / base_cap) * 100 if base_cap > 0 else 0.0
+
+        closed_record = {
+            "position_id": target_pos["id"],
+            "symbol": symbol,
+            "direction": direction,
+            "entry_price": entry_price,
+            "exit_price": exit_price,
+            "triggered_by": "MANUAL_CLOSE",
+            "pnl_usd": round(pnl, 2),
+            "fees_usd": round(total_fees, 4),
+            "closed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        self.state["closed_trades"].append(closed_record)
+
+        # Remove from active positions
+        self.state["active_positions"].pop(target_idx)
+        self._save_state()
+
+        print(f"🔴 [PaperTrading] Принудительное закрытие {symbol}. PnL: ${pnl:+.2f}")
+        return True, {"pnl_usd": pnl, "exit_price": exit_price, "is_virtual": False}
