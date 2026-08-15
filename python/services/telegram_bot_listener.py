@@ -130,12 +130,12 @@ class TelegramBotListener:
                         direction = pos.get("direction", "UNKNOWN")
                         icon = "🟢" if direction == "LONG" else "🔴"
                         entry = pos.get("entry_price", 0)
-                        size = pos.get("size_usd", 0)
+                        notional = pos.get("notional_usd", 0)
                         leverage = pos.get("leverage", 1)
-                        margin = pos.get("margin_usd", size / leverage if leverage > 0 else size)
+                        margin = pos.get("margin_usd", notional / leverage if leverage > 0 else notional)
                         
                         reply_lines.append(f"{icon} *{sym}* | {direction} | {mode}")
-                        reply_lines.append(f"💵 Вход: `${entry:,.2f}` | Объем: `${size:,.0f}` (Маржа: ${margin:,.0f}, {leverage}x)\n")
+                        reply_lines.append(f"💵 Вход: `${entry:,.2f}` | Объем: `${notional:,.0f}` (Маржа: ${margin:,.0f}, {leverage}x)\n")
                         
                         inline_keyboard.append([{"text": f"❌ Закрыть {sym}", "callback_data": f"forceclose_{sym}"}])
                     

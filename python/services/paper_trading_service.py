@@ -101,11 +101,11 @@ class PaperTradingService(BaseTradingService):
             for pos, price in zip(self.state["active_positions"], prices):
                 if price > 0:
                     entry = pos["entry_price"]
-                    size_usd = pos["size_usd"]
+                    notional_usd = pos["notional_usd"]
                     if pos["direction"] == "LONG":
-                        unrealized_pnl += (price - entry) / entry * size_usd
+                        unrealized_pnl += (price - entry) / entry * notional_usd
                     else:
-                        unrealized_pnl += (entry - price) / entry * size_usd
+                        unrealized_pnl += (entry - price) / entry * notional_usd
             
         return {
             "initial_balance": base_capital,
@@ -132,21 +132,21 @@ class PaperTradingService(BaseTradingService):
     async def sync_with_exchange(self) -> None:
         pass
 
-    async def open_position(self, symbol: str, direction: str, entry_price: float, size_usd: float, tp_price: float, sl_price: float, leverage: int = 1) -> Optional[Dict[str, Any]]:
+    async def open_position(self, symbol: str, direction: str, entry_price: float, notional_usd: float, tp_price: float, sl_price: float, leverage: int = 1) -> Optional[Dict[str, Any]]:
         """Opens a virtual position if balance is sufficient."""
-        margin_usd = size_usd / leverage if leverage > 0 else size_usd
+        margin_usd = notional_usd / leverage if leverage > 0 else notional_usd
         # We only check if we have enough equity/free margin. We don't deduct it from current_balance (which tracks Wallet Balance/Equity)
         if margin_usd <= 0 or self.state["current_balance"] < margin_usd:
             return None
             
-        size_base = size_usd / entry_price if entry_price > 0 else 0.0
+        size_base = notional_usd / entry_price if entry_price > 0 else 0.0
 
         position = {
             "id": f"{symbol}_{int(datetime.now().timestamp())}",
             "symbol": symbol,
             "direction": direction.upper(),
             "entry_price": entry_price,
-            "size_usd": size_usd,        # NOTIONAL
+            "notional_usd": notional_usd,        # NOTIONAL
             "size_base": size_base,      # BASE AMOUNT (for parity with KrakenTradingService)
             "leverage": leverage,        # LEVERAGE
             "margin_usd": margin_usd,    # MARGIN
@@ -163,8 +163,8 @@ class PaperTradingService(BaseTradingService):
 
         self.state["active_positions"].append(position)
         self._save_state()
-        entry_fee = size_usd * self.TAKER_FEE_PCT
-        self._log(f"💼 [PaperTrading] Открыта виртуальная позиция {direction} {symbol} на ${size_usd:,.2f} (Маржа: ${margin_usd:,.2f}) по цене ${entry_price:,.2f}")
+        entry_fee = notional_usd * self.TAKER_FEE_PCT
+        self._log(f"💼 [PaperTrading] Открыта виртуальная позиция {direction} {symbol} на ${notional_usd:,.2f} (Маржа: ${margin_usd:,.2f}) по цене ${entry_price:,.2f}")
         self._log(f"💸 [PaperTrading] Комиссия за открытие (0.05%): ${entry_fee:.4f} — будет учтена при закрытии.")
         return position
 
@@ -186,7 +186,7 @@ class PaperTradingService(BaseTradingService):
             entry = pos["entry_price"]
             tp = pos["tp_price"]
             sl = pos["sl_price"]
-            size = pos["size_usd"]
+            notional_usd = pos["notional_usd"]
             leverage = pos.get("leverage", 1)
 
             # Update Extremes
@@ -266,13 +266,13 @@ class PaperTradingService(BaseTradingService):
                 else:
                     notional_pnl_pct = ((entry - exit_price) / entry) * 100
 
-                margin_usd = pos.get("margin_usd", size / leverage if leverage > 0 else size)
+                margin_usd = pos.get("margin_usd", notional_usd / leverage if leverage > 0 else notional_usd)
                 
                 # Gross PnL (before fees)
-                gross_pnl_usd = size * (notional_pnl_pct / 100)
+                gross_pnl_usd = notional_usd * (notional_pnl_pct / 100)
                 
                 # Deduct BOTH entry and exit fees (Taker 0.05% each side)
-                total_fees = size * self.TAKER_FEE_PCT * 2  # entry + exit
+                total_fees = notional_usd * self.TAKER_FEE_PCT * 2  # entry + exit
                 pnl_usd = gross_pnl_usd - total_fees
                 
                 roi_pct = (pnl_usd / margin_usd) * 100 if margin_usd > 0 else 0
@@ -301,7 +301,7 @@ class PaperTradingService(BaseTradingService):
                     "roi_pct": round(roi_pct, 2),
                     "margin_usd": round(margin_usd, 2),
                     "leverage": leverage,
-                    "size_usd": size,
+                    "notional_usd": notional_usd,
                     "fees_usd": round(total_fees, 4),
                     "new_balance": round(self.state["current_balance"], 2),
                     "closed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -331,9 +331,9 @@ class PaperTradingService(BaseTradingService):
 
         direction = target_pos["direction"]
         entry_price = target_pos["entry_price"]
-        size_usd = target_pos["size_usd"]
+        notional_usd = target_pos["notional_usd"]
         leverage = target_pos.get("leverage", 1)
-        margin_usd = target_pos.get("margin_usd", size_usd / leverage if leverage > 0 else size_usd)
+        margin_usd = target_pos.get("margin_usd", notional_usd / leverage if leverage > 0 else notional_usd)
 
         # Запрашиваем реальную цену, чтобы не закрывать в ноль
         exit_price = await self._fetch_current_price(symbol)
@@ -343,11 +343,11 @@ class PaperTradingService(BaseTradingService):
 
         # Calculate PnL
         if direction == "LONG":
-            gross_pnl = (exit_price - entry_price) / entry_price * size_usd
+            gross_pnl = (exit_price - entry_price) / entry_price * notional_usd
         else:
-            gross_pnl = (entry_price - exit_price) / entry_price * size_usd
+            gross_pnl = (entry_price - exit_price) / entry_price * notional_usd
 
-        total_fees = size_usd * self.TAKER_FEE_PCT * 2
+        total_fees = notional_usd * self.TAKER_FEE_PCT * 2
         pnl = gross_pnl - total_fees
 
         if pnl > 0:
