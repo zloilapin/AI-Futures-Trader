@@ -9,7 +9,8 @@ from core.llm_client import LLMClient
 def risk_manager():
     logger = TradeLogger()
     llm_client = AsyncMock(spec=LLMClient)
-    llm_client.generate.return_value = '{"approved": true, "reasoning": "Test", "position_size_usd": 100, "position_size_pct": 10, "entry_price": 50000, "take_profit_price": 51000, "stop_loss_price": 49000, "risk_reward_ratio": 2.0, "liquidation_price": 48000}'
+    # Mocking LLM return value for Risk Manager decision
+    llm_client.generate.return_value = '{"approved": true, "reasoning": "Test", "notional_size_usd": 100, "position_size_pct": 10, "entry_price": 50000, "take_profit_price": 51000, "stop_loss_price": 49000, "risk_reward_ratio": 2.0, "liquidation_price": 48000}'
     return RiskManager(logger, llm_client)
 
 @pytest.mark.asyncio
@@ -22,12 +23,14 @@ async def test_risk_manager_minimum_notional(risk_manager):
         "order_book_data": {"spread_pct": 0.01}
     }
     
-    # Balance 1000. Risk 1% = $10. SL dist = 50000 * 1.5 = 75000. 
-    # units = 10 / 75000 = 0.0001333. pos_usd = 6.66
+    # With 60 balance, aggressive profile (5%), risk is $3. 
+    # Current price 50000. SL distance is 1000. Units = 3 / 1000 = 0.003
+    # notional = 0.003 * 50000 = 150
     # This is < 15. But total_balance * leverage (1000) > 15, so it should bump to 15.
     res = await risk_manager.analyze(ceo_decision, portfolio_data, market_data)
+    assert "notional_size_usd" in res
     assert res["approved"] is True
-    assert res["position_size_usd"] == 15.0
+    assert res["notional_size_usd"] == 15.0
 
 @pytest.mark.asyncio
 async def test_risk_manager_minimum_notional_veto(risk_manager):

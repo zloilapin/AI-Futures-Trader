@@ -210,8 +210,13 @@ async def run_single_cycle(
         
         # QW Concurrency: Запуск аналитиков параллельно
         reports = await asyncio.gather(*[agent.analyze(market_data) for agent in analyst_list], return_exceptions=True)
-            
-        valid_reports = [r for r in reports if isinstance(r, dict) and r.get("signal") != "ERROR"]
+        
+        # Tag each report with agent_name for the deterministic CEO voting engine
+        valid_reports = []
+        for agent, report in zip(analyst_list, reports):
+            if isinstance(report, dict) and report.get("signal") != "ERROR":
+                report["agent_name"] = agent.name
+                valid_reports.append(report)
 
         # СТАДИЯ 4: СИНТЕЗ CEO И МУЛЬТИ-ТАЙМФРЕЙМ ТРЕНД
         logger.info(f"[Stage 4] CEO Agent проверяет согласованность 1H/4H тренда и выносит решение по {symbol}...")
@@ -256,15 +261,14 @@ async def run_single_cycle(
 
         if risk_verdict.get("approved"):
             logger.info(f"✅ Status: APPROVED BY RISK MANAGER")
-            print(f"💰 Position Amount: ${risk_verdict.get('position_size_usd', 0):,.2f} ({risk_verdict.get('position_size_pct', 0)}% of portfolio)")
-            print(f"🎯 Entry Price: ${risk_verdict.get('entry_price', 0):,.2f}")
+            print(f"💰 Position Amount: ${risk_verdict.get('notional_size_usd', 0):,.2f} ({risk_verdict.get('position_size_pct', 0)}% of portfolio)")
             print(f"🟢 Take Profit (TP): ${risk_verdict.get('take_profit_price', 0):,.2f} (+{risk_verdict.get('take_profit_pct', 0)}%)")
             # Автоматическая торговля 24/7 (полностью автономный режим)
             await trading_service.open_position(
                 symbol=symbol,
                 direction=decision,
-                entry_price=risk_verdict.get("entry_price", current_price),
-                size_usd=risk_verdict.get("position_size_usd", 0),
+                entry_price=current_price,
+                notional_usd=risk_verdict.get("notional_size_usd", 0),
                 tp_price=risk_verdict.get("take_profit_price", 0),
                 sl_price=risk_verdict.get("stop_loss_price", 0),
                 leverage=config.LEVERAGE
@@ -412,6 +416,15 @@ async def main():
         from services.kraken_trading_service import KrakenTradingService
         trading_service = KrakenTradingService()
         exchange_name = "Kraken Futures"
+    
+    # P0.3: Startup sync — rebuild state from Kraken BEFORE any trading logic
+    if hasattr(trading_service, "sync_with_exchange"):
+        print("🔄 [P0.3 Startup Sync] Синхронизация состояния с биржей при старте...")
+        try:
+            await trading_service.sync_with_exchange()
+            print(f"✅ [P0.3 Startup Sync] Состояние синхронизировано. Активных позиций: {len(trading_service.active_positions)}")
+        except Exception as e:
+            print(f"⚠️ [P0.3 Startup Sync] Ошибка синхронизации при старте: {e}")
     
     universe_agent = UniverseAgent(logger, llm_client)
     scanner_agent = ScannerAgent(logger, llm_client)

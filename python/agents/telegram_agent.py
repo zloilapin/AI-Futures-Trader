@@ -46,7 +46,7 @@ class TelegramAgent(BaseAgent):
         tp_pct = risk.get("take_profit_pct", 0)
         sl_price = risk.get("stop_loss_price", 0)
         sl_pct = risk.get("stop_loss_pct", 0)
-        pos_usd = risk.get("position_size_usd", 0)
+        notional_usd = risk.get("notional_size_usd", 0)
         pos_pct = risk.get("position_size_pct", 0)
         rr_ratio = risk.get("risk_reward_ratio", 0)
 
@@ -55,7 +55,7 @@ class TelegramAgent(BaseAgent):
             f"🪙 *Asset / Монета:* `{symbol}`\n"
             f"📊 *Direction / Направление:* {dir_emoji}\n"
             f"🔥 *AI Conviction / Уверенность:* `{conviction}%` \n"
-            f"💰 *Position / Сумма сделки:* `${pos_usd:,.2f}` ({pos_pct}%)\n"
+            f"💰 *Position / Сумма сделки:* `${notional_usd:,.2f}` ({pos_pct}%)\n"
             f"🎯 *Entry / Цена входа:* `${entry_price:,.2f}`\n\n"
             f"🟢 *Take Profit (TP):* `${tp_price:,.2f}` (+{tp_pct}%)\n"
             f"🔴 *Stop Loss (SL):* `${sl_price:,.2f}` (-{sl_pct}%)\n"

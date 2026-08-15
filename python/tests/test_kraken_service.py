@@ -9,6 +9,13 @@ def kraken_service():
     service.api_key = "test"
     service.api_secret = "test"
     service.exchange = AsyncMock()
+    service.exchange.apiKey = "test"
+    service.exchange.markets = {"BTC/USD:USD": {}, "ETH/USD:USD": {}}
+    # P0.1: Default no positions on exchange
+    service.exchange.fetch_positions = AsyncMock(return_value=[])
+    # P0.2: Default no open orders
+    service.exchange.fetch_open_orders = AsyncMock(return_value=[])
+    service.active_positions = {}
     return service
 
 @pytest.mark.asyncio
@@ -23,7 +30,10 @@ async def test_kraken_slippage_detection(kraken_service):
     mock_order = {
         "id": "123",
         "status": "closed",
-        "average": 50050.0 # Slippage! (planned 50000.0)
+        "filled": 0.002,
+        "remaining": 0.0,
+        "average": 50050.0, # Slippage! (planned 50000.0)
+        "amount": 0.002
     }
     kraken_service._execute_market_order = AsyncMock(return_value=mock_order)
     

@@ -37,7 +37,6 @@ class KrakenTradingService:
         
     def _load_stats(self):
         import os, json
-        self.total_pnl_usd = 0.0
         self.win_count = 0
         self.loss_count = 0
         self.recent_streak = []
@@ -47,7 +46,6 @@ class KrakenTradingService:
             try:
                 with open(self.stats_file, 'r') as f:
                     st = json.load(f)
-                    self.total_pnl_usd = st.get('total_pnl_usd', 0.0)
                     self.win_count = st.get('win_count', 0)
                     self.loss_count = st.get('loss_count', 0)
                     self.recent_streak = st.get('recent_streak', [])
@@ -62,7 +60,6 @@ class KrakenTradingService:
         try:
             with open(self.stats_file, 'w') as f:
                 json.dump({
-                    "total_pnl_usd": self.total_pnl_usd,
                     "win_count": self.win_count,
                     "loss_count": self.loss_count,
                     "recent_streak": self.recent_streak,
@@ -176,13 +173,14 @@ class KrakenTradingService:
             self._save_stats()
             
         base_capital = self.initial_deposit + self.net_transfers
-        account_roi_pct = ((total_balance - base_capital) / base_capital * 100) if base_capital > 0 else 0.0
+        total_pnl_usd = total_balance - base_capital if base_capital > 0 else 0.0
+        account_roi_pct = (total_pnl_usd / base_capital * 100) if base_capital > 0 else 0.0
         
         return {
             "total_usd": total_balance,
             "current_balance": total_balance,
             "initial_balance": base_capital,
-            "total_pnl_usd": self.total_pnl_usd,
+            "total_pnl_usd": total_pnl_usd,
             "total_pnl_pct": account_roi_pct,
             "win_rate_pct": win_rate,
             "win_count": self.win_count,
@@ -195,8 +193,8 @@ class KrakenTradingService:
             "roi_pct": (unrealized / used_margin * 100) if used_margin > 0 else 0.0
         }
 
-    async def _execute_market_order(self, symbol: str, direction: str, size_base: float, leverage: int = 1, sl_price: float = None):
-        """Helper to execute order via CCXT, with optional Hard Stop-Loss"""
+    async def _execute_market_order(self, symbol: str, direction: str, size_base: float, leverage: int = 1, sl_price: float = None, tp_price: float = None):
+        """Helper to execute order via CCXT, with optional atomic Hard Stop-Loss and Take-Profit"""
         formatted_symbol = self._format_symbol(symbol)
         side = 'buy' if direction == 'LONG' else 'sell'
         
@@ -227,11 +225,21 @@ class KrakenTradingService:
                 except Exception as e:
                     print(f"⚠️ [KrakenTradingService] Не удалось динамически установить плечо {leverage}x: {e}")
                     
+            params = {}
+            if sl_price:
+                params['stopLossPrice'] = sl_price
+            if tp_price:
+                params['takeProfitPrice'] = tp_price
+                
             print(f"🌐 [KrakenTradingService] Отправка MARKET {side.upper()} ордера {size_base} {formatted_symbol}...")
-            order = await self.exchange.create_market_order(formatted_symbol, side, size_base)
+            if params:
+                print(f"🛡️ [KrakenTradingService] Прикреплены атомные параметры: {params}")
+                
+            order = await self.exchange.create_market_order(formatted_symbol, side, size_base, params=params)
             
             status = order.get('status', 'unknown')
-            print(f"✅ [KrakenTradingService] ЗАПРОС ПРИНЯТ! ID: {order.get('id')} | Статус: {status}")
+            order_id = order.get('id')
+            print(f"✅ [KrakenTradingService] ЗАПРОС ПРИНЯТ! ID: {order_id} | Статус: {status}")
             
             if status == 'rejected':
                 print(f"❌ [KrakenTradingService] БИРЖА ОТКЛОНИЛА ОРДЕР! (Слишком большое плечо, нехватка маржи или Post-Only). Полный ответ: {order}")
@@ -239,30 +247,70 @@ class KrakenTradingService:
             elif status == 'canceled':
                 print(f"❌ [KrakenTradingService] БИРЖА ОТМЕНИЛА ОРДЕР! Полный ответ: {order}")
                 return None
+            
+            # P0.4: Fill verification — if status is not final, poll for actual fill
+            if status not in ('closed', 'canceled', 'rejected') and order_id:
+                print(f"⏳ [P0.4 Fill Verify] Статус '{status}' — ожидание 2 сек и проверка финального fill...")
+                await asyncio.sleep(2)
+                try:
+                    final_order = await self.exchange.fetch_order(order_id, formatted_symbol)
+                    order = final_order  # Replace with verified data
+                    print(f"✅ [P0.4 Fill Verify] Финальный статус: {order.get('status')} | filled: {order.get('filled')} | remaining: {order.get('remaining')}")
+                except Exception as e:
+                    print(f"⚠️ [P0.4 Fill Verify] Не удалось проверить финальный статус ордера: {e}")
+            
             return order
         except Exception as e:
             print(f"❌ [KrakenTradingService] Ошибка сети при отправке ордера: {e}")
             return None
 
 
-    async def open_position(self, symbol: str, direction: str, entry_price: float, size_usd: float, tp_price: float, sl_price: float, leverage: int = 1, is_virtual: bool = False):
+    async def open_position(self, symbol: str, direction: str, entry_price: float, notional_usd: float, tp_price: float, sl_price: float, leverage: int = 1, is_virtual: bool = False):
         """
         Calculates position size in base currency and opens a Market order via Kraken Futures API.
         If is_virtual is True, skips the API call and simulates the trade.
+        
+        Safety guards:
+        - P0.5: Local idempotency — rejects if symbol already in active_positions
+        - P0.1: Exchange duplicate guard — checks fetch_positions() before opening
         """
         if not self.api_key and not is_virtual:
             print(f"❌ [KrakenTradingService] Нет API ключей. Сделка {direction} по {symbol} отменена.")
             return False
 
+        # ═══ P0.5: Local idempotency guard ═══
+        if symbol in self.active_positions:
+            existing = self.active_positions[symbol]
+            if not existing.get("manually_closed", False):
+                print(f"❌ [P0.5 Idempotency] Позиция {symbol} уже существует в active_positions (dir={existing.get('direction')}). Дубликат заблокирован.")
+                return False
+
+        # ═══ P0.1: Exchange-level duplicate guard ═══
+        if not is_virtual and self.api_key:
+            try:
+                exchange_positions = await self.exchange.fetch_positions()
+                formatted_symbol = self._format_symbol(symbol)
+                for p in exchange_positions:
+                    ex_sym = p.get('symbol', '')
+                    ex_contracts = float(p.get('contracts', 0) or 0)
+                    ex_info_size = abs(float(p.get('info', {}).get('size', 0) or 0))
+                    if (ex_sym == formatted_symbol or ex_sym.replace(':', '') == formatted_symbol.replace(':', '')):
+                        if ex_contracts > 0 or ex_info_size > 0:
+                            print(f"❌ [P0.1 Duplicate Guard] Позиция {symbol} УЖЕ ОТКРЫТА на бирже (contracts={ex_contracts})! Дубликат заблокирован.")
+                            return False
+            except Exception as e:
+                print(f"⚠️ [P0.1 Duplicate Guard] Не удалось проверить позиции на бирже: {e}. Продолжаем с осторожностью.")
+
         mode_str = "ВИРТУАЛЬНОЙ" if is_virtual else "БОЕВОЙ"
         print(f"🚀 [KrakenTradingService] ПОДГОТОВКА {mode_str} СДЕЛКИ: {direction} {symbol}")
         
-        size_base = size_usd / entry_price
+        size_base = notional_usd / entry_price
+        actual_size = size_base  # Default; overridden by actual fill data for live trades
         
         # Execute trade
         order_result = True
         if not is_virtual:
-            order_result = await self._execute_market_order(symbol, direction, size_base, leverage, sl_price)
+            order_result = await self._execute_market_order(symbol, direction, size_base, leverage, sl_price, tp_price)
             if isinstance(order_result, dict):
                 # Проверка фактического исполнения и комиссии
                 filled = order_result.get('filled')
@@ -302,21 +350,49 @@ class KrakenTradingService:
                     print(f"🔄 [KrakenTradingService] Уровни скорректированы. Новый SL: {sl_price}, Новый TP: {tp_price}")
                     entry_price = float(fill_price)
                     
-                # Устанавливаем Hard Stop-Loss с учетом скорректированной цены и актуального объема
-                if sl_price:
+                    # Если было проскальзывание, обновляем SL/TP на бирже на новые значения (Hard SL Update)
+                    if sl_price:
+                        print("🔄 [KrakenTradingService] Обновление атомарного стопа из-за проскальзывания...")
+                        asyncio.create_task(self._update_exchange_sl(symbol, direction, sl_price, actual_size))
+
+                # ═══ P0.2: SL Verification — confirm stop order exists on exchange ═══
+                if sl_price and sl_price > 0:
+                    await asyncio.sleep(1)  # Give exchange time to register conditional orders
                     try:
-                        stop_side = 'sell' if direction == 'LONG' else 'buy'
-                        await self.exchange.create_order(formatted_symbol, 'stop', stop_side, actual_size, None, {'stopPrice': sl_price, 'reduceOnly': True})
-                        print(f"🛡️ [KrakenTradingService] Установлен ЖЕСТКИЙ Stop-Loss на бирже по цене {sl_price}!")
+                        formatted_symbol = self._format_symbol(symbol)
+                        open_orders = await self.exchange.fetch_open_orders(formatted_symbol)
+                        sl_found = False
+                        for o in open_orders:
+                            o_type = (o.get('type') or '').lower()
+                            if o_type in ('stop', 'stop-loss', 'stopmarket', 'stop_loss_limit'):
+                                sl_found = True
+                                break
+                        
+                        if sl_found:
+                            print(f"✅ [P0.2 SL Verify] Hard Stop-Loss подтверждён на бирже для {symbol}.")
+                        else:
+                            print(f"⚠️ [P0.2 SL Verify] Hard Stop-Loss НЕ НАЙДЕН на бирже! Создаём отдельно...")
+                            stop_side = 'sell' if direction == 'LONG' else 'buy'
+                            try:
+                                await self.exchange.create_order(
+                                    formatted_symbol, 'stop', stop_side, actual_size, None,
+                                    {'stopPrice': sl_price, 'reduceOnly': True}
+                                )
+                                print(f"✅ [P0.2 SL Verify] Резервный Hard Stop-Loss успешно создан: {sl_price}")
+                            except Exception as sl_err:
+                                print(f"🚨 [P0.2 SL Verify] КРИТИЧЕСКАЯ ОШИБКА: не удалось создать SL! Аварийное закрытие позиции...")
+                                print(f"🚨 [P0.2 SL Verify] Ошибка: {sl_err}")
+                                # Emergency close
+                                try:
+                                    close_side = 'sell' if direction == 'LONG' else 'buy'
+                                    await self.exchange.create_market_order(formatted_symbol, close_side, actual_size, params={'reduceOnly': True})
+                                    print(f"🚨 [P0.2 SL Verify] Позиция аварийно закрыта из-за невозможности установить SL!")
+                                    return False
+                                except Exception as close_err:
+                                    print(f"🚨🚨🚨 [P0.2] НЕВОЗМОЖНО ЗАКРЫТЬ ПОЗИЦИЮ БЕЗ SL! ТРЕБУЕТСЯ РУЧНОЕ ВМЕШАТЕЛЬСТВО! Ошибка: {close_err}")
                     except Exception as e:
-                        print(f"⚠️ [KrakenTradingService] Биржа не приняла хард-стоп ({e}). НЕМЕДЛЕННО ЗАКРЫВАЕМ ПОЗИЦИЮ во избежание риска.")
-                        try:
-                            abort_side = 'sell' if direction == 'LONG' else 'buy'
-                            await self.exchange.create_market_order(formatted_symbol, abort_side, actual_size)
-                            print(f"✅ [KrakenTradingService] Аварийное закрытие (отмена) позиции {formatted_symbol} выполнено успешно.")
-                        except Exception as abort_err:
-                            print(f"🚨 [KrakenTradingService] КРИТИЧЕСКАЯ ОШИБКА АВАРИЙНОГО ЗАКРЫТИЯ: {abort_err}")
-                        order_result = None  # Сбрасываем, чтобы позиция не добавилась
+                        print(f"⚠️ [P0.2 SL Verify] Не удалось проверить наличие SL: {e}")
+
             else:
                 actual_size = size_base
         
@@ -327,9 +403,9 @@ class KrakenTradingService:
                 "symbol": symbol,
                 "direction": direction,
                 "entry_price": entry_price,
-                "size_usd": size_usd,        # NOTIONAL
+                "notional_usd": notional_usd,        # NOTIONAL
                 "leverage": leverage,        # LEVERAGE
-                "margin_usd": size_usd / leverage if leverage > 0 else size_usd, # MARGIN
+                "margin_usd": notional_usd / leverage if leverage > 0 else notional_usd, # MARGIN
                 "size_base": actual_size,
                 "tp_price": tp_price,
                 "sl_price": sl_price,
@@ -359,35 +435,39 @@ class KrakenTradingService:
 
     async def sync_with_exchange(self):
         """
-        Синхронизирует локальные позиции с реальными позициями на бирже.
-        Если сделка была закрыта вручную, она бесшумно удаляется из памяти.
+        Bidirectional state synchronization with Kraken Futures.
+        
+        1. Removes local positions that no longer exist on the exchange (closed externally).
+        2. Restores exchange positions that are missing from local state (crash recovery, manual opens).
+        
+        JSON is treated as a CACHE. Kraken is the source of truth.
         """
         if not self.exchange.apiKey:
             return
 
         try:
             exchange_positions = await self.exchange.fetch_positions()
-            open_symbols = set()
+            
+            # Build a map of real exchange positions: { formatted_symbol: position_data }
+            exchange_map = {}
             for p in exchange_positions:
                 size = float(p.get('contracts', 0) or 0)
                 info_size = float(p.get('info', {}).get('size', 0) or 0)
                 if size > 0 or abs(info_size) > 0:
                     sym = p.get('symbol')
                     if sym:
-                        open_symbols.add(sym)
+                        exchange_map[sym] = p
 
+            # --- PHASE 1: Remove stale local positions ---
             symbols_to_remove = []
             for symbol, pos in self.active_positions.items():
                 if pos.get("is_virtual", False):
                     continue
                     
-                formatted_symbol = symbol
-                if hasattr(self, '_format_symbol'):
-                    formatted_symbol = self._format_symbol(symbol)
+                formatted_symbol = self._format_symbol(symbol)
                 
-                # Check if it matches exactly or starts with the symbol (some exchanges use BTC/USD:USD vs BTC/USD)
                 found = False
-                for open_sym in open_symbols:
+                for open_sym in exchange_map:
                     if open_sym == formatted_symbol or open_sym.replace(':', '') == formatted_symbol.replace(':', ''):
                         found = True
                         break
@@ -401,6 +481,119 @@ class KrakenTradingService:
                 
             if symbols_to_remove:
                 self._save_positions()
+
+            # --- PHASE 2: Restore orphaned exchange positions ---
+            # Build a set of formatted symbols we already track locally
+            local_formatted = set()
+            for symbol in self.active_positions:
+                if not self.active_positions[symbol].get("is_virtual", False):
+                    local_formatted.add(self._format_symbol(symbol))
+
+            restored_count = 0
+            for ex_symbol, ex_pos in exchange_map.items():
+                # Check if we already track this position
+                already_tracked = False
+                for local_sym in local_formatted:
+                    if ex_symbol == local_sym or ex_symbol.replace(':', '') == local_sym.replace(':', ''):
+                        already_tracked = True
+                        break
+                
+                if already_tracked:
+                    continue
+                
+                # --- Reconstruct position from exchange data ---
+                try:
+                    contracts = float(ex_pos.get('contracts', 0) or 0)
+                    info_size = float(ex_pos.get('info', {}).get('size', 0) or 0)
+                    size_base = contracts if contracts > 0 else abs(info_size)
+                    
+                    if size_base <= 0:
+                        continue
+                    
+                    # Direction
+                    side = ex_pos.get('side', '').lower()
+                    if side == 'long':
+                        direction = 'LONG'
+                    elif side == 'short':
+                        direction = 'SHORT'
+                    else:
+                        # Fallback: positive info.size = long, negative = short
+                        direction = 'LONG' if info_size > 0 else 'SHORT'
+                    
+                    # Entry price
+                    entry_price = float(ex_pos.get('entryPrice', 0) or 0)
+                    if entry_price <= 0:
+                        entry_price = float(ex_pos.get('info', {}).get('entry_price', 0) or 0)
+                    if entry_price <= 0:
+                        print(f"⚠️ [State Sync] Позиция {ex_symbol} на бирже, но entry_price = 0. Пропуск.")
+                        continue
+                    
+                    # Leverage
+                    leverage = int(float(ex_pos.get('leverage', 1) or 1))
+                    if leverage <= 0:
+                        leverage = 1
+                    
+                    # Notional & Margin
+                    notional_usd = size_base * entry_price
+                    margin_usd = notional_usd / leverage if leverage > 0 else notional_usd
+                    
+                    # Derive short symbol key (e.g. "BTC" from "BTC/USD:USD")
+                    short_symbol = ex_symbol.split('/')[0] if '/' in ex_symbol else ex_symbol
+                    
+                    # Best-effort SL/TP recovery from open conditional orders
+                    sl_price = 0.0
+                    tp_price = 0.0
+                    try:
+                        open_orders = await self.exchange.fetch_open_orders(ex_symbol)
+                        for order in open_orders:
+                            order_type = (order.get('type') or '').lower()
+                            trigger = float(order.get('triggerPrice') or order.get('stopPrice') or order.get('info', {}).get('triggerPrice', 0) or 0)
+                            if trigger <= 0:
+                                continue
+                            
+                            if order_type in ('stop', 'stop-loss', 'stopmarket', 'stop_loss_limit'):
+                                sl_price = trigger
+                            elif order_type in ('take_profit', 'takeprofit', 'takeprofitmarket', 'take_profit_limit'):
+                                tp_price = trigger
+                    except Exception as e:
+                        print(f"⚠️ [State Sync] Не удалось загрузить ордера для {ex_symbol}: {e}")
+                    
+                    # Build position record
+                    pos_id = str(uuid.uuid4())[:8]
+                    self.active_positions[short_symbol] = {
+                        "id": pos_id,
+                        "symbol": short_symbol,
+                        "direction": direction,
+                        "entry_price": entry_price,
+                        "notional_usd": notional_usd,
+                        "leverage": leverage,
+                        "margin_usd": margin_usd,
+                        "size_base": size_base,
+                        "tp_price": tp_price,
+                        "sl_price": sl_price,
+                        "breakeven_activated": False,
+                        "is_virtual": False,
+                        "timestamp": time.time(),
+                        "restored_from_exchange": True
+                    }
+                    restored_count += 1
+                    
+                    sl_status = f"${sl_price:,.2f}" if sl_price > 0 else "НЕТ"
+                    tp_status = f"${tp_price:,.2f}" if tp_price > 0 else "НЕТ"
+                    print(f"🔄 [State Sync] ═══════════════════════════════════════")
+                    print(f"🔄 [State Sync] ВОССТАНОВЛЕНА ПОТЕРЯННАЯ ПОЗИЦИЯ ИЗ KRAKEN!")
+                    print(f"🔄 [State Sync]   Символ: {short_symbol} | Направление: {direction}")
+                    print(f"🔄 [State Sync]   Вход: ${entry_price:,.2f} | Объем: {size_base}")
+                    print(f"🔄 [State Sync]   Notional: ${notional_usd:,.2f} | Маржа: ${margin_usd:,.2f}")
+                    print(f"🔄 [State Sync]   SL: {sl_status} | TP: {tp_status}")
+                    print(f"🔄 [State Sync] ═══════════════════════════════════════")
+                    
+                except Exception as e:
+                    print(f"⚠️ [State Sync] Ошибка восстановления позиции {ex_symbol}: {e}")
+            
+            if restored_count > 0:
+                self._save_positions()
+                print(f"✅ [State Sync] Восстановлено {restored_count} позиций из Kraken.")
                 
         except Exception as e:
             print(f"⚠️ [State Sync] Ошибка синхронизации позиций: {e}")
@@ -487,7 +680,21 @@ class KrakenTradingService:
             # Correct PnL calculation independent of exit reason
             if triggered_exit == "MANUAL_CLOSE":
                 pnl = 0.0
-                print(f"ℹ️ [Keeper] Оценка PnL пропущена для {symbol}, так как позиция была закрыта вне бота (Hard SL/TP или вручную).")
+                print(f"ℹ️ [Keeper] Позиция закрыта вне бота (Hard SL/TP или вручную). Оцениваем Win/Loss по текущей рыночной цене {current_price}.")
+                if direction == "LONG":
+                    estimated_pnl = (current_price - entry_price) * pos["size_base"]
+                else:
+                    estimated_pnl = (entry_price - current_price) * pos["size_base"]
+                
+                if estimated_pnl > 0:
+                    self.win_count += 1
+                    self.recent_streak.append("WIN")
+                else:
+                    self.loss_count += 1
+                    self.recent_streak.append("LOSS")
+                
+                self.recent_streak = self.recent_streak[-10:]
+                self._save_stats()
             else:
                 if direction == "LONG":
                     pnl = (actual_exit_price - entry_price) * pos["size_base"]
@@ -496,7 +703,7 @@ class KrakenTradingService:
                 
                 # Deduct exit fee (Taker 0.05%) from PnL for accurate tracking
                 # Entry fee is already deducted via adjust_ledger when the order is placed.
-                exit_fee = pos.get("size_usd", 0) * 0.0005
+                exit_fee = pos.get("notional_usd", 0) * 0.0005
                 if exit_fee > 0:
                     pnl -= exit_fee
                     print(f"💸 [Keeper] Комиссия за закрытие (Taker 0.05%): ${exit_fee:.4f} вычтена из PnL.")
@@ -509,7 +716,6 @@ class KrakenTradingService:
                     self.recent_streak.append("LOSS")
                     
                 self.recent_streak = self.recent_streak[-10:] # Keep only last 10
-                self.total_pnl_usd += pnl
                 self._save_stats()
             
             trigger_reason = triggered_exit
@@ -518,8 +724,8 @@ class KrakenTradingService:
             elif is_virtual:
                 trigger_reason = f"{triggered_exit} (Виртуально)"
                 
-            size_usd = pos.get("size_usd", 0.0)
-            margin_usd = pos.get("margin_usd", size_usd / pos.get("leverage", 1) if pos.get("leverage", 1) > 0 else size_usd)
+            notional_usd = pos.get("notional_usd", 0.0)
+            margin_usd = pos.get("margin_usd", notional_usd / pos.get("leverage", 1) if pos.get("leverage", 1) > 0 else notional_usd)
                 
             report = {
                 "symbol": symbol,
@@ -527,7 +733,7 @@ class KrakenTradingService:
                 "entry_price": entry_price,
                 "exit_price": actual_exit_price,
                 "pnl_usd": pnl,
-                "pnl_pct": (pnl / size_usd) * 100 if size_usd > 0 else 0.0,
+                "pnl_pct": (pnl / notional_usd) * 100 if notional_usd > 0 else 0.0,
                 "roi_pct": (pnl / margin_usd) * 100 if margin_usd > 0 else 0.0,
                 "margin_usd": margin_usd,
                 "leverage": pos.get("leverage", 1),
@@ -565,13 +771,12 @@ class KrakenTradingService:
             return False, f"Ошибка биржи: {e}"
             
         entry_price = pos["entry_price"]
-        pnl = abs(current_price - entry_price) * (pos["size_usd"] / entry_price)
+        pnl = abs(current_price - entry_price) * (pos["notional_usd"] / entry_price)
         if (direction == "LONG" and current_price < entry_price) or (direction == "SHORT" and current_price > entry_price):
             pnl = -pnl
             
         if pnl > 0: self.win_count += 1
         else: self.loss_count += 1
-        self.total_pnl_usd += pnl
         self._save_stats()
         
         del self.active_positions[symbol]
@@ -587,5 +792,4 @@ class KrakenTradingService:
         """Сбрасывает Ledger и устанавливает текущий баланс как начальный."""
         self.initial_deposit = new_balance
         self.net_transfers = 0.0
-        self.total_pnl_usd = 0.0
         self._save_stats()
