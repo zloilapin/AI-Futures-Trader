@@ -4,6 +4,11 @@ import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any
 from dotenv import load_dotenv
+
+# Fix for Windows console UnicodeEncodeError
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding='utf-8')
+
 load_dotenv(override=True)
 
 # --- CORE IMPORTS ---
@@ -96,7 +101,7 @@ async def run_single_cycle(
         print(f"⚡ [ForceScan] Ручной запуск /scan во время отдыха ({time_str}). Пропуск тихого режима!")
 
     # СТАДИЯ 1: UNIVERSE (Выбор активов)
-    print("\n[Stage 1] Universe Agent сканирует DEX на наличие ликвидных активов...")
+    logger.info("[Stage 1] Universe Agent сканирует DEX на наличие ликвидных активов...")
     active_perps = await fetcher.fetch_active_perps(limit=15)
     broad_market_data = {
         "trending_perps": active_perps, 
@@ -115,7 +120,7 @@ async def run_single_cycle(
     valid_symbols = {p["symbol"] for p in active_perps}
     selected_assets = [s for s in selected_assets if s in valid_symbols]
 
-    print(f"🎯 Отобраны уникальные валидные активы для сканирования: {', '.join(selected_assets)}")
+    logger.info(f"🎯 Отобраны уникальные валидные активы для сканирования: {', '.join(selected_assets)}")
     portfolio_data = await trading_service.get_portfolio_summary()
 
     recent_lessons = reflector_agent.get_lessons(limit=5)
@@ -127,12 +132,12 @@ async def run_single_cycle(
 
     # СТАДИЯ 1.5: ПРОВЕРКА УЖЕ ОТКРЫТЫХ ПОЗИЦИЙ (TP/SL)
     if hasattr(trading_service, "sync_with_exchange"):
-        print("\n[Stage 1.5] Синхронизация состояний позиций с биржей...")
+        logger.info("[Stage 1.5] Синхронизация состояний позиций с биржей...")
         await trading_service.sync_with_exchange()
 
     active_symbols = list(trading_service.active_positions.keys())
     if active_symbols:
-        print("[Stage 1.5] Keeper проверяет TP/SL для открытых позиций...")
+        logger.info("[Stage 1.5] Keeper проверяет TP/SL для открытых позиций...")
     for symbol in active_symbols:
         try:
             market_data = await fetcher.fetch_all_market_data(symbol)
@@ -153,9 +158,14 @@ async def run_single_cycle(
                 print("--------------------------------------------")
                 await tg_sender.send_message(closed_msg)
                 await tg_sender.broadcast_to_channel(closed_msg)
-                asyncio.create_task(reflector_agent.reflect(closed, market_data))
+                asyncio.create_task(safe_reflect(closed, market_data))
         except Exception as e:
             print(f"❌ Ошибка проверки позиции {symbol}: {e}")
+
+    # QW Quiet Rest: Выход из цикла, если сейчас тихий час и нет force_scan
+    if is_rest and not force_scan:
+        print(f"⏸️ [Schedule] Тихий час. Позиции проверены. Пропуск новых сделок.")
+        return
 
     # Фильтруем активы: не сканируем то, что уже открыто
     selected_assets = [s for s in selected_assets if s not in trading_service.active_positions]
@@ -172,7 +182,7 @@ async def run_single_cycle(
         print(f"\n🔍 ПОЛНЫЙ АНАЛИЗ (15m, 1H, 4H) KRAKEN FUTURES: {symbol}")
         
         # СТАДИЯ 2: СБОР ДАННЫХ И ПРОВЕРКА СТАТУСА
-        print(f"[Stage 2] Сбор мульти-таймфреймовых данных (15m, 1H, 4H) для {symbol}...")
+        logger.info(f"[Stage 2] Сбор мульти-таймфреймовых данных (15m, 1H, 4H) для {symbol}...")
         try:
             market_data = await fetcher.fetch_all_market_data(symbol)
         except Exception as e:
@@ -183,7 +193,7 @@ async def run_single_cycle(
         current_price = market_data.get("price_data", {}).get("current_price", 0)
 
         # 2.5 Scanner Agent (ATR Volatility & Spread Guard)
-        print(f"[Stage 2.5] Scanner Agent проверяет ATR волатильность и спред для {symbol}...")
+        logger.info(f"[Stage 2.5] Scanner Agent проверяет ATR волатильность и спред для {symbol}...")
         scan_result = await scanner_agent.analyze(market_data)
 
         scanner_blocked = not scan_result.get("proceed", True)
@@ -195,18 +205,16 @@ async def run_single_cycle(
             continue
 
         # СТАДИЯ 3: СИНДИКАТ АНАЛИТИКОВ
-        print(f"[Stage 3] Запуск синдиката аналитиков для {symbol}...")
+        logger.info(f"[Stage 3] Запуск синдиката аналитиков для {symbol} (Concurrent)...")
         analyst_list = [candle_agent, ob_agent, oi_agent, news_agent, indicator_agent]
-        reports = []
-        for agent in analyst_list:
-            rep = await agent.analyze(market_data)
-            reports.append(rep)
-            await asyncio.sleep(0.6)
+        
+        # QW Concurrency: Запуск аналитиков параллельно
+        reports = await asyncio.gather(*[agent.analyze(market_data) for agent in analyst_list], return_exceptions=True)
             
         valid_reports = [r for r in reports if isinstance(r, dict) and r.get("signal") != "ERROR"]
 
         # СТАДИЯ 4: СИНТЕЗ CEO И МУЛЬТИ-ТАЙМФРЕЙМ ТРЕНД
-        print(f"[Stage 4] CEO Agent проверяет согласованность 1H/4H тренда и выносит решение по {symbol}...")
+        logger.info(f"[Stage 4] CEO Agent проверяет согласованность 1H/4H тренда и выносит решение по {symbol}...")
         historical_context = memory_manager.get_recent_context(limit=3)
         ceo_payload = {
             "symbol": symbol,
@@ -243,11 +251,11 @@ async def run_single_cycle(
             continue
 
         # СТАДИЯ 5: РИСК-МЕНЕДЖМЕНТ
-        print(f"[Stage 5] Risk Manager ({profile}) проверяет параметры сделки для {symbol}...")
+        logger.info(f"[Stage 5] Risk Manager ({profile}) проверяет параметры сделки для {symbol}...")
         risk_verdict = await risk_manager.analyze(ceo_verdict, portfolio_data, market_data)
 
         if risk_verdict.get("approved"):
-            print(f"✅ Status: APPROVED BY RISK MANAGER")
+            logger.info(f"✅ Status: APPROVED BY RISK MANAGER")
             print(f"💰 Position Amount: ${risk_verdict.get('position_size_usd', 0):,.2f} ({risk_verdict.get('position_size_pct', 0)}% of portfolio)")
             print(f"🎯 Entry Price: ${risk_verdict.get('entry_price', 0):,.2f}")
             print(f"🟢 Take Profit (TP): ${risk_verdict.get('take_profit_price', 0):,.2f} (+{risk_verdict.get('take_profit_pct', 0)}%)")
@@ -262,7 +270,7 @@ async def run_single_cycle(
                 leverage=config.LEVERAGE
             )
         else:
-            print(f"❌ Status: VETOED BY RISK MANAGER ({risk_verdict.get('reasoning')})")
+            logger.error(f"❌ Status: VETOED BY RISK MANAGER ({risk_verdict.get('reasoning')})")
 
         # СТАДИЯ 6: ТЕЛЕГРАМ
         # Собираем сводку по активу для отчёта ручного /scan
@@ -390,7 +398,7 @@ async def main():
     
     logger = TradeLogger()
     llm_client = LLMClient()
-    fetcher = MarketDataService()
+    fetcher = MarketDataService(exchange_name="Kraken Futures", logger=logger)
     tg_sender = TelegramService()
     print("Инициализация сервисов...")
     
@@ -398,7 +406,7 @@ async def main():
     
     if trading_engine == "PAPER" and not config.LIVE_TRADING_ENABLED:
         from services.paper_trading_service import PaperTradingService
-        trading_service = PaperTradingService()
+        trading_service = PaperTradingService(logger=logger)
         exchange_name = "Paper Trading"
     else:
         from services.kraken_trading_service import KrakenTradingService
@@ -497,9 +505,23 @@ async def main():
         if 'llm_client' in locals() and hasattr(llm_client, "close"):
             await llm_client.close()
             
+        if 'fetcher' in locals() and hasattr(fetcher, "close"):
+            await fetcher.close()
+            
         if hasattr(trading_service, "_close_exchange_async"):
             await trading_service._close_exchange_async()
             print("🧹 [System] Ресурсы соединения с биржей успешно очищены.")
+            
+        # Завершение всех зависших asyncio задач (включая bot_listener)
+        pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        if pending:
+            print(f"🧹 [System] Отмена {len(pending)} фоновых задач (Telegram Polling и др.)...")
+            for task in pending:
+                task.cancel()
+            import contextlib
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.gather(*pending, return_exceptions=True)
+            print("🧹 [System] Все фоновые задачи успешно отменены.")
 
 if __name__ == "__main__":
     asyncio.run(main())

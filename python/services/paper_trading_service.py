@@ -1,9 +1,10 @@
+from core.interfaces import BaseTradingService
 import os
 import json
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 
-class PaperTradingService:
+class PaperTradingService(BaseTradingService):
     """
     Paper Trading & PnL Tracking Service for Kraken Futures.
     Features:
@@ -14,9 +15,18 @@ class PaperTradingService:
     """
     TAKER_FEE_PCT = 0.0005  # 0.05% per side
 
-    def __init__(self, data_file: str = "data/memory/portfolio.json"):
+    def __init__(self, data_file: str = "data/memory/portfolio.json", logger=None):
         self.data_file = data_file
+        self.logger = logger
         self.state = self._load_state()
+
+    def _log(self, msg: str, level: str = "info"):
+        if self.logger:
+            if level == "error": self.logger.error(msg)
+            elif level == "warning": self.logger.warning(msg)
+            else: self.logger.info(msg)
+        else:
+            self._log(msg)
 
     def _load_state(self) -> Dict[str, Any]:
         if os.path.exists(self.data_file):
@@ -24,7 +34,7 @@ class PaperTradingService:
                 with open(self.data_file, "r", encoding="utf-8") as f:
                     return json.load(f)
             except Exception as e:
-                print(f"⚠️ [PaperTradingService] Ошибка чтения файла портфеля: {e}")
+                self._log(f"⚠️ [PaperTradingService] Ошибка чтения файла портфеля: {e}")
         
         starting_balance = float(os.getenv("STARTING_BALANCE", "60.0"))
         default_state = {
@@ -50,6 +60,26 @@ class PaperTradingService:
         with open(self.data_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4, ensure_ascii=False)
 
+    async def _fetch_current_price(self, symbol: str) -> float:
+        import aiohttp
+        try:
+            base = symbol
+            if symbol == "BTC": base = "XBT"
+            elif symbol == "DOGE": base = "XDG"
+            elif symbol == "LUNA": base = "LUNA2"
+            pair = f"PI_{base}USD"
+            url = "https://futures.kraken.com/derivatives/api/v3/tickers"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        for t in data.get("tickers", []):
+                            if t.get("symbol") == pair:
+                                return float(t.get("last", 0))
+        except Exception as e:
+            self._log(f"⚠️ [PaperTrading] Ошибка загрузки цены {symbol}: {e}")
+        return 0.0
+
     async def get_portfolio_summary(self) -> Dict[str, Any]:
         """Returns current balance, PnL, active positions count, win rate, and recent streak."""
         total_trades = self.state["win_count"] + self.state["loss_count"]
@@ -62,24 +92,45 @@ class PaperTradingService:
             
         base_capital = self.state.get("initial_deposit", self.state.get("initial_balance", 0.0)) + self.state.get("net_transfers", 0.0)
         account_roi_pct = ((self.state["current_balance"] - base_capital) / base_capital * 100) if base_capital > 0 else 0.0
+        
+        unrealized_pnl = 0.0
+        import asyncio
+        if self.state["active_positions"]:
+            tasks = [self._fetch_current_price(pos["symbol"]) for pos in self.state["active_positions"]]
+            prices = await asyncio.gather(*tasks)
+            for pos, price in zip(self.state["active_positions"], prices):
+                if price > 0:
+                    entry = pos["entry_price"]
+                    size_usd = pos["size_usd"]
+                    if pos["direction"] == "LONG":
+                        unrealized_pnl += (price - entry) / entry * size_usd
+                    else:
+                        unrealized_pnl += (entry - price) / entry * size_usd
             
         return {
             "initial_balance": base_capital,
             "current_balance": round(self.state["current_balance"], 2),
             "total_pnl_usd": round(self.state["total_pnl_usd"], 2),
             "total_pnl_pct": round(account_roi_pct, 2),
+            "unrealized_pnl_usd": round(unrealized_pnl, 2),
             "active_positions_count": len(self.state["active_positions"]),
             "win_rate_pct": round(win_rate, 2),
             "win_count": self.state["win_count"],
             "loss_count": self.state["loss_count"],
             "recent_streak": recent_streak,
-            "roi_pct": 0.0 # Paper service doesn't track unrealized yet, but keeping field for UI compat
+            "roi_pct": round(account_roi_pct, 2)
         }
 
     @property
     def active_positions(self) -> Dict[str, Any]:
         """Returns active positions as a dictionary mapping symbol to position data, for compatibility with KrakenTradingService."""
         return {pos["symbol"]: pos for pos in self.state["active_positions"]}
+        
+    async def get_active_positions(self) -> list:
+        return self.state["active_positions"]
+        
+    async def sync_with_exchange(self) -> None:
+        pass
 
     async def open_position(self, symbol: str, direction: str, entry_price: float, size_usd: float, tp_price: float, sl_price: float, leverage: int = 1) -> Optional[Dict[str, Any]]:
         """Opens a virtual position if balance is sufficient."""
@@ -113,8 +164,8 @@ class PaperTradingService:
         self.state["active_positions"].append(position)
         self._save_state()
         entry_fee = size_usd * self.TAKER_FEE_PCT
-        print(f"💼 [PaperTrading] Открыта виртуальная позиция {direction} {symbol} на ${size_usd:,.2f} (Маржа: ${margin_usd:,.2f}) по цене ${entry_price:,.2f}")
-        print(f"💸 [PaperTrading] Комиссия за открытие (0.05%): ${entry_fee:.4f} — будет учтена при закрытии.")
+        self._log(f"💼 [PaperTrading] Открыта виртуальная позиция {direction} {symbol} на ${size_usd:,.2f} (Маржа: ${margin_usd:,.2f}) по цене ${entry_price:,.2f}")
+        self._log(f"💸 [PaperTrading] Комиссия за открытие (0.05%): ${entry_fee:.4f} — будет учтена при закрытии.")
         return position
 
     async def check_and_update_positions(self, symbol: str, current_price: float) -> List[Dict[str, Any]]:
@@ -138,26 +189,44 @@ class PaperTradingService:
             size = pos["size_usd"]
             leverage = pos.get("leverage", 1)
 
-            # Initialize trailing tracking fields if missing
-            if "highest_price" not in pos: pos["highest_price"] = entry
-            if "lowest_price" not in pos: pos["lowest_price"] = entry
+            # Update Extremes
+            if current_price > pos.get("highest_price", entry):
+                pos["highest_price"] = current_price
+            if current_price < pos.get("lowest_price", entry):
+                pos["lowest_price"] = current_price
 
-            # Trailing Stop: identical to KrakenTradingService (1.5% trail)
-            trailing_pct = 0.015
+            highest = pos["highest_price"]
+            lowest = pos["lowest_price"]
+            
+            # Trailing Stop: activates at +1.5% profit, then trails by 1.5%
+            trail_pct = 0.015
+            activation_pct = 0.015
+
+            # Breakeven Guard (SL -> Entry at 50% TP)
             if direction == "LONG":
-                pos["highest_price"] = max(pos["highest_price"], current_price)
-                if pos["highest_price"] >= entry * 1.015:
-                    trail_sl = pos["highest_price"] * (1 - trailing_pct)
-                    if trail_sl > pos["sl_price"]:
-                        pos["sl_price"] = trail_sl
-                        print(f"📈 [PaperTrading/Keeper] {symbol} Trailing Stop подтянут до {trail_sl:.4f}")
+                halfway_to_tp = entry + ((tp - entry) * 0.5)
+                if current_price >= halfway_to_tp and pos["sl_price"] < entry:
+                    pos["sl_price"] = entry
+                    self._log(f"🛡️ [Breakeven Guard] {symbol} Цена прошла 50% до TP. SL переведен в безубыток: {entry:.4f}")
+                
+                # Check Trailing Stop
+                if (highest - entry) / entry >= activation_pct:
+                    new_sl = highest * (1 - trail_pct)
+                    if new_sl > pos["sl_price"]:
+                        pos["sl_price"] = new_sl
+                        self._log(f"📈 [Trailing Stop] {symbol} SL подтянут до: {new_sl:.4f}")
             else:
-                pos["lowest_price"] = min(pos["lowest_price"], current_price)
-                if pos["lowest_price"] <= entry * 0.985:
-                    trail_sl = pos["lowest_price"] * (1 + trailing_pct)
-                    if trail_sl < pos["sl_price"]:
-                        pos["sl_price"] = trail_sl
-                        print(f"📉 [PaperTrading/Keeper] {symbol} Trailing Stop подтянут до {trail_sl:.4f}")
+                halfway_to_tp = entry - ((entry - tp) * 0.5)
+                if current_price <= halfway_to_tp and pos["sl_price"] > entry:
+                    pos["sl_price"] = entry
+                    self._log(f"🛡️ [Breakeven Guard] {symbol} Цена прошла 50% до TP. SL переведен в безубыток: {entry:.4f}")
+                
+                # Check Trailing Stop
+                if (entry - lowest) / entry >= activation_pct:
+                    new_sl = lowest * (1 + trail_pct)
+                    if new_sl < pos["sl_price"] or pos["sl_price"] == 0:
+                        pos["sl_price"] = new_sl
+                        self._log(f"📉 [Trailing Stop] {symbol} SL подтянут до: {new_sl:.4f}")
 
             sl = pos["sl_price"]
             triggered_exit = None
@@ -171,7 +240,7 @@ class PaperTradingService:
                     opened_dt = datetime.strptime(opened_at_str, "%Y-%m-%d %H:%M:%S")
                     if (datetime.now() - opened_dt).total_seconds() > ttl_seconds:
                         triggered_exit = "TIME_STOP"
-                        print(f"⏱️ [PaperTradingService/Keeper] Сделка по {symbol} открыта более 8 часов. Срабатывает Time-Based Stop.")
+                        self._log(f"⏱️ [PaperTradingService/Keeper] Сделка по {symbol} открыта более 8 часов. Срабатывает Time-Based Stop.")
                 except Exception:
                     pass
 
@@ -239,7 +308,7 @@ class PaperTradingService:
                 }
                 self.state["closed_trades"].append(closed_record)
                 closed_reports.append(closed_record)
-                print(f"🎉 [PaperTrading] ЗАКРЫТА ПОЗИЦИЯ {symbol} ({triggered_exit})! PnL: ${pnl_usd:+.2f} (ROI: {roi_pct:+.2f}%, Fees: ${total_fees:.4f}). Новый баланс: ${self.state['current_balance']:,.2f}")
+                self._log(f"🎉 [PaperTrading] ЗАКРЫТА ПОЗИЦИЯ {symbol} ({triggered_exit})! PnL: ${pnl_usd:+.2f} (ROI: {roi_pct:+.2f}%, Fees: ${total_fees:.4f}). Новый баланс: ${self.state['current_balance']:,.2f}")
             else:
                 remaining_positions.append(pos)
 
@@ -266,10 +335,11 @@ class PaperTradingService:
         leverage = target_pos.get("leverage", 1)
         margin_usd = target_pos.get("margin_usd", size_usd / leverage if leverage > 0 else size_usd)
 
-        # Use entry_price as exit_price (we don't have a live feed here outside of the cycle)
-        # In practice, this method is called from Telegram which doesn't pass current_price,
-        # so we approximate. The live service does the same fallback.
-        exit_price = entry_price
+        # Запрашиваем реальную цену, чтобы не закрывать в ноль
+        exit_price = await self._fetch_current_price(symbol)
+        if exit_price <= 0:
+            self._log(f"⚠️ [PaperTrading] Не удалось получить цену для закрытия {symbol}. Используем цену входа.")
+            exit_price = entry_price
 
         # Calculate PnL
         if direction == "LONG":
@@ -308,5 +378,5 @@ class PaperTradingService:
         self.state["active_positions"].pop(target_idx)
         self._save_state()
 
-        print(f"🔴 [PaperTrading] Принудительное закрытие {symbol}. PnL: ${pnl:+.2f}")
+        self._log(f"🔴 [PaperTrading] Принудительное закрытие {symbol}. PnL: ${pnl:+.2f}")
         return True, {"pnl_usd": pnl, "exit_price": exit_price, "is_virtual": False}

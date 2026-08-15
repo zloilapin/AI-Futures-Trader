@@ -42,6 +42,13 @@ class Config:
     MAX_LOSS_PER_TRADE_USDT: float = 5.0
     MAX_MARGIN_PCT: float = float(os.getenv("MAX_MARGIN_PCT", "0.5"))
     MAX_CONCURRENT_POSITIONS: int = int(os.getenv("MAX_CONCURRENT_POSITIONS", "2"))
+    
+    # Расширенные лимиты Risk Manager
+    MIN_SL_PCT: float = 0.012
+    MIN_TP_PCT: float = 0.036
+    MIN_NOTIONAL: float = 15.0
+    SPREAD_PENALTY_THRESHOLD: float = 0.4
+    SPREAD_VETO_THRESHOLD: float = 1.0
 
 # Глобальный экземпляр конфига для импорта в другие модули
 config = Config()

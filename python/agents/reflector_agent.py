@@ -15,19 +15,10 @@ class ReflectorAgent(BaseAgent):
     def __init__(self, logger: TradeLogger, llm_client: LLMClient, lessons_file: str = "data/memory/lessons.json"):
         super().__init__("Reflector_Agent", logger, llm_client)
         self.lessons_file = lessons_file
-        self.system_instruction = (
-            "You are a Senior Trading Post-Mortem & Machine Learning Reflection Specialist.\n"
-            "Your objective: Perform a post-trade autopsy on a closed position (especially losing trades).\n"
-            "Identify the root cause of the failure or success, and extract a concise, actionable trading lesson.\n\n"
-            "Output JSON strictly matching this schema:\n"
-            "{\n"
-            '  "symbol": "<e.g., BTC>",\n'
-            '  "reasoning": "<step-by-step brief post-mortem breakdown>",\n'
-            '  "root_cause": "<e.g., Entered LONG into 4H bear trend / RSI divergence fakeout>",\n'
-            '  "actionable_rule": "<e.g., WARNING: Do not enter LONG when 4H trend is BEARISH and RSI > 60>",\n'
-            '  "trade_outcome": "WIN" | "LOSS"\n'
-            "}"
-        )
+        import os
+        prompt_path = os.path.join(os.path.dirname(__file__), "..", "prompts", "reflector_prompt.txt")
+        with open(prompt_path, "r", encoding="utf-8") as f:
+            self.system_instruction = f.read()
 
     def get_lessons(self, limit: int = 5, symbol: str = None) -> List[str]:
         """Returns the most recent actionable rules/lessons learned, prioritizing LOSSes and specific symbols."""
@@ -67,6 +58,11 @@ class ReflectorAgent(BaseAgent):
                 data = []
 
         data.append(reflection)
+        
+        # Enforce memory rotation limit
+        if len(data) > 100:
+            data = data[-100:]
+            
         with open(self.lessons_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4, ensure_ascii=False)
 

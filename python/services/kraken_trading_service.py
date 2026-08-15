@@ -1,3 +1,4 @@
+from core.interfaces import BaseTradingService
 import os
 import time
 import asyncio
@@ -420,33 +421,24 @@ class KrakenTradingService:
         sl_price = pos["sl_price"]
         entry_price = pos["entry_price"]
         
-        # Trailing Stop Logic (1.5% trail)
-        trailing_pct = 0.015
-        
-        if "highest_price" not in pos: pos["highest_price"] = entry_price
-        if "lowest_price" not in pos: pos["lowest_price"] = entry_price
-        
+        # Breakeven Guard (SL -> Entry at 50% TP)
+        # Если цена прошла 50% пути до тейк-профита, стоп лосс переводится в безубыток
         if direction == "LONG":
-            pos["highest_price"] = max(pos["highest_price"], current_price)
-            # Activate trailing stop only when profit > 1.5%
-            if pos["highest_price"] >= entry_price * 1.015:
-                trail_sl = pos["highest_price"] * (1 - trailing_pct)
-                if trail_sl > pos["sl_price"]:
-                    pos["sl_price"] = trail_sl
-                    print(f"📈 [Keeper] {symbol} Trailing Stop подтянут до {trail_sl:.4f}")
-                    if not pos.get("is_virtual", False):
-                        import asyncio
-                        asyncio.create_task(self._update_exchange_sl(symbol, direction, trail_sl, pos["size_base"]))
+            halfway_to_tp = entry_price + ((tp_price - entry_price) * 0.5)
+            if current_price >= halfway_to_tp and pos["sl_price"] < entry_price:
+                pos["sl_price"] = entry_price
+                print(f"🛡️ [Breakeven Guard] {symbol} Цена прошла 50% до TP. SL переведен в безубыток: {entry_price:.4f}")
+                if not pos.get("is_virtual", False):
+                    import asyncio
+                    asyncio.create_task(self._update_exchange_sl(symbol, direction, entry_price, pos["size_base"]))
         else:
-            pos["lowest_price"] = min(pos["lowest_price"], current_price)
-            if pos["lowest_price"] <= entry_price * 0.985:
-                trail_sl = pos["lowest_price"] * (1 + trailing_pct)
-                if trail_sl < pos["sl_price"]:
-                    pos["sl_price"] = trail_sl
-                    print(f"📉 [Keeper] {symbol} Trailing Stop подтянут до {trail_sl:.4f}")
-                    if not pos.get("is_virtual", False):
-                        import asyncio
-                        asyncio.create_task(self._update_exchange_sl(symbol, direction, trail_sl, pos["size_base"]))
+            halfway_to_tp = entry_price - ((entry_price - tp_price) * 0.5)
+            if current_price <= halfway_to_tp and pos["sl_price"] > entry_price:
+                pos["sl_price"] = entry_price
+                print(f"🛡️ [Breakeven Guard] {symbol} Цена прошла 50% до TP. SL переведен в безубыток: {entry_price:.4f}")
+                if not pos.get("is_virtual", False):
+                    import asyncio
+                    asyncio.create_task(self._update_exchange_sl(symbol, direction, entry_price, pos["size_base"]))
 
         # TP / SL Execution trigger
         triggered_exit = None

@@ -14,6 +14,13 @@ class TelegramAgent(BaseAgent):
     def __init__(self, logger: TradeLogger, llm_client: LLMClient):
         super().__init__("Telegram_Agent", logger, llm_client)
 
+    def _escape_md(self, text: str) -> str:
+        """Экранирует спецсимволы Markdown для Telegram."""
+        escape_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+        for char in escape_chars:
+            text = text.replace(char, f"\\{char}")
+        return text
+
     def format_signal(self, final_trade_data: Dict[str, Any]) -> str:
         symbol = final_trade_data.get("symbol", "UNKNOWN")
         ceo = final_trade_data.get("ceo_verdict", {})
@@ -23,7 +30,7 @@ class TelegramAgent(BaseAgent):
         conviction = ceo.get("conviction", 0)
         dir_emoji = "🟢 LONG" if decision == "LONG" else ("🔴 SHORT" if decision == "SHORT" else "⚪ HOLD")
         reasoning_en = ceo.get("reasoning_en", "")
-        reasoning = f"{reasoning_en}".strip()
+        reasoning = self._escape_md(f"{reasoning_en}".strip())
 
         if decision == "HOLD":
             return (

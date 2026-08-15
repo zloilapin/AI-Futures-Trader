@@ -8,8 +8,49 @@ class MarketDataService:
     Retrieves live price tickers, multi-timeframe candlesticks (15m, 1H, 4H), order book depth,
     technical indicators (RSI, EMA, MACD), and sentiment (Crypto Fear & Greed Index).
     """
-    def __init__(self, exchange_name: str = "Nado_DEX (Ink L2)"):
+    def __init__(self, exchange_name: str = "Nado_DEX (Ink L2)", logger=None):
         self.exchange_name = exchange_name
+        self.logger = logger
+        self.session = None
+        import os
+        self._oi_file = "data/memory/oi_history.json"
+        self._oi_history = self._load_oi_history()
+
+    def _load_oi_history(self) -> dict:
+        import os, json
+        if os.path.exists(self._oi_file):
+            try:
+                with open(self._oi_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {}
+
+    def _save_oi_history(self):
+        import os, json
+        os.makedirs(os.path.dirname(self._oi_file), exist_ok=True)
+        try:
+            with open(self._oi_file, "w", encoding="utf-8") as f:
+                json.dump(self._oi_history, f, indent=4)
+        except Exception:
+            pass
+
+    def _log(self, msg: str, level: str = "error"):
+        if self.logger:
+            if level == "error": self.logger.error(msg)
+            elif level == "warning": self.logger.warning(msg)
+            else: self.logger.info(msg)
+        else:
+            print(f"[{level.upper()}] {msg}")
+
+    async def _get_session(self):
+        if self.session is None or self.session.closed:
+            self.session = aiohttp.ClientSession()
+        return self.session
+
+    async def close(self):
+        if self.session and not self.session.closed:
+            await self.session.close()
 
     async def fetch_active_perps(self, limit: int = 15) -> List[Dict[str, Any]]:
         """
@@ -18,7 +59,8 @@ class MarketDataService:
         """
         url = "https://futures.kraken.com/derivatives/api/v3/tickers"
         try:
-            async with aiohttp.ClientSession() as session:
+            session = await self._get_session()
+            if True:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
@@ -50,7 +92,7 @@ class MarketDataService:
                         if top_symbols:
                             return top_symbols
         except Exception as e:
-            print(f"⚠️ [MarketDataService] Ошибка загрузки списка перпов: {e}")
+            self._log(f"⚠️ [MarketDataService] Ошибка загрузки списка перпов: {e}")
             
         # Fallback list if API fails
         return [{"symbol": s, "vol24h": 0, "change24h": 0} for s in ["BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "LINK", "AVAX"]]
@@ -74,7 +116,8 @@ class MarketDataService:
         
         url = f"https://futures.kraken.com/api/charts/v1/trade/{pair}/{interval_str}"
         try:
-            async with aiohttp.ClientSession() as session:
+            session = await self._get_session()
+            if True:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
@@ -95,7 +138,7 @@ class MarketDataService:
                                 "candles_20": candles[-20:]
                             }
         except Exception as e:
-            print(f"⚠️ [MarketDataService] Ошибка загрузки OHLC {interval_min}m для {symbol}: {e}")
+            self._log(f"⚠️ [MarketDataService] Ошибка загрузки OHLC {interval_min}m для {symbol}: {e}")
             raise Exception(f"Не удалось получить OHLC {interval_min}m для {symbol}") from e
 
     async def fetch_multi_timeframe(self, symbol: str) -> Dict[str, Any]:
@@ -149,7 +192,8 @@ class MarketDataService:
         pair = self._normalize_pair(symbol)
         url = f"https://futures.kraken.com/derivatives/api/v3/orderbook?symbol={pair}"
         try:
-            async with aiohttp.ClientSession() as session:
+            session = await self._get_session()
+            if True:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
@@ -157,6 +201,9 @@ class MarketDataService:
                         bids = order_book.get("bids", [])
                         asks = order_book.get("asks", [])
                         if bids and asks:
+                            bids = sorted(bids, key=lambda x: float(x[0]), reverse=True)
+                            asks = sorted(asks, key=lambda x: float(x[0]))
+                            
                             best_bid = float(bids[0][0])
                             best_ask = float(asks[0][0])
                             spread = round(best_ask - best_bid, 4)
@@ -172,7 +219,7 @@ class MarketDataService:
                                 "imbalance_ratio": round(bid_vol / (ask_vol + 1e-6), 2)
                             }
         except Exception as e:
-            print(f"⚠️ [MarketDataService] Ошибка загрузки стакана: {e}")
+            self._log(f"⚠️ [MarketDataService] Ошибка загрузки стакана: {e}")
             raise Exception(f"Не удалось получить стакан для {symbol}") from e
 
     async def fetch_indicators(self, symbol: str) -> Dict[str, Any]:
@@ -186,7 +233,8 @@ class MarketDataService:
             pair = self._normalize_pair(symbol)
             url = f"https://futures.kraken.com/api/charts/v1/trade/{pair}/15m"
             
-            async with aiohttp.ClientSession() as session:
+            session = await self._get_session()
+            if True:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
@@ -355,16 +403,60 @@ class MarketDataService:
                                         "candle_patterns": candle_patterns
                                     }
                                 }
+                            else:
+                                self._log(f"⚠️ [MarketDataService] Недостаточно истории для индикаторов {symbol} (нужно >= 35, есть {len(closes)}).")
+                                return {
+                                    "symbol": symbol,
+                                    "rsi_14": 50.0,
+                                    "ema_20": 0.0,
+                                    "ema_trend": "flat",
+                                    "ema_distance_pct": 0.0,
+                                    "macd_val": 0.0,
+                                    "macd_signal": "neutral",
+                                    "macd_histogram": 0.0,
+                                    "histogram_momentum": "neutral",
+                                    "atr_14": 0.0,
+                                    "atr_pct": 0.0,
+                                    "algo_signals": {
+                                        "rsi_divergence": "none",
+                                        "macd_crossover": "none",
+                                        "liquidity_sweeps": [],
+                                        "candle_patterns": []
+                                    }
+                                }
+                        else:
+                            self._log(f"⚠️ [MarketDataService] Пустой массив свечей от Kraken для {symbol}.")
+                            return {
+                                "symbol": symbol,
+                                "rsi_14": 50.0,
+                                "ema_20": 0.0,
+                                "ema_trend": "flat",
+                                "ema_distance_pct": 0.0,
+                                "macd_val": 0.0,
+                                "macd_signal": "neutral",
+                                "macd_histogram": 0.0,
+                                "histogram_momentum": "neutral",
+                                "atr_14": 0.0,
+                                "atr_pct": 0.0,
+                                "algo_signals": {
+                                    "rsi_divergence": "none",
+                                    "macd_crossover": "none",
+                                    "liquidity_sweeps": [],
+                                    "candle_patterns": []
+                                }
+                            }
+
         except Exception as e:
-            print(f"⚠️ [MarketDataService] Ошибка расчёта индикаторов: {e}")
+            self._log(f"⚠️ [MarketDataService] Ошибка расчёта индикаторов: {e}")
             raise Exception(f"Не удалось получить индикаторы для {symbol}") from e
 
     async def fetch_news_sentiment(self, symbol: str) -> Dict[str, Any]:
         """Fetches real Crypto Fear & Greed Index from Alternative.me."""
         url = "https://api.alternative.me/fng/"
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
+            async with aiohttp.ClientSession(headers=headers) as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         item = data.get("data", [{}])[0]
@@ -376,14 +468,19 @@ class MarketDataService:
                             "latest_event": f"Market Sentiment: {classif} (Fear & Greed Index: {int(val)})"
                         }
         except Exception as e:
-            print(f"⚠️ [MarketDataService] Ошибка загрузки сентимента: {e}")
-            raise Exception(f"Не удалось получить сентимент для {symbol}") from e
+            self._log(f"⚠️ [MarketDataService] Ошибка загрузки сентимента для {symbol}: {e}. Используем Neutral.")
+            return {
+                "symbol": symbol,
+                "sentiment_score": 50.0,
+                "latest_event": "Market Sentiment: Neutral (Fallback due to API error)"
+            }
 
     async def fetch_oi_funding(self, symbol: str) -> Dict[str, Any]:
         """Fetches real Open Interest and funding rates from Kraken Futures."""
         url = "https://futures.kraken.com/derivatives/api/v3/tickers"
         try:
-            async with aiohttp.ClientSession() as session:
+            session = await self._get_session()
+            if True:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
@@ -399,9 +496,7 @@ class MarketDataService:
                                     open_interest = float(t.get("openInterest", 0) or 0)
                                     
                                     # QW #4: Track OI Trend
-                                    if not hasattr(self, "_oi_history"):
-                                        self._oi_history = {}
-                                        
+
                                     oi_trend = "neutral"
                                     if symbol in self._oi_history:
                                         prev_oi = self._oi_history[symbol]
@@ -413,6 +508,7 @@ class MarketDataService:
                                             oi_trend = "stable"
                                             
                                     self._oi_history[symbol] = open_interest
+                                    self._save_oi_history()
 
                                     return {
                                         "symbol": symbol,
@@ -421,29 +517,39 @@ class MarketDataService:
                                         "funding_rate": round(funding_rate, 6)
                                     }
         except Exception as e:
-            print(f"⚠️ [MarketDataService] Ошибка загрузки OI/Funding: {e}")
+            self._log(f"⚠️ [MarketDataService] Ошибка загрузки OI/Funding: {e}")
             raise Exception(f"Не удалось получить OI/Funding для {symbol}") from e
 
     async def fetch_all_market_data(self, symbol: str) -> Dict[str, Any]:
         """
         Aggregates all real-time market data asynchronously including Multi-Timeframe Alignment.
+        Includes a 3-attempt retry mechanism for resilience against temporary API failures.
         """
-        mtf, ohlcv, ob, oi, indicators, news = await asyncio.gather(
-            self.fetch_multi_timeframe(symbol),
-            self.fetch_ohlcv(symbol),
-            self.fetch_order_book(symbol),
-            self.fetch_oi_funding(symbol),
-            self.fetch_indicators(symbol),
-            self.fetch_news_sentiment(symbol)
-        )
+        for attempt in range(3):
+            try:
+                mtf, ohlcv, ob, oi, indicators, news = await asyncio.gather(
+                    self.fetch_multi_timeframe(symbol),
+                    self.fetch_ohlcv(symbol),
+                    self.fetch_order_book(symbol),
+                    self.fetch_oi_funding(symbol),
+                    self.fetch_indicators(symbol),
+                    self.fetch_news_sentiment(symbol)
+                )
 
-        return {
-            "exchange": self.exchange_name,
-            "symbol": symbol,
-            "multi_timeframe": mtf,
-            "price_data": ohlcv,
-            "order_book_data": ob,
-            "derivatives_data": oi,
-            "indicators": indicators,
-            "news_data": news
-        }
+                return {
+                    "exchange": self.exchange_name,
+                    "symbol": symbol,
+                    "multi_timeframe": mtf,
+                    "price_data": ohlcv,
+                    "order_book_data": ob,
+                    "derivatives_data": oi,
+                    "indicators": indicators,
+                    "news_data": news
+                }
+            except Exception as e:
+                if attempt < 2:
+                    self._log(f"⚠️ [MarketDataService] Ошибка агрегации для {symbol}: {e}. Повтор ({attempt+1}/3) через 2 сек...")
+                    await asyncio.sleep(2)
+                else:
+                    self._log(f"❌ [MarketDataService] Критическая ошибка агрегации для {symbol} после 3 попыток.")
+                    raise

@@ -33,6 +33,16 @@ class MemoryManager:
                 json.dump(cycle_data, f, indent=4, ensure_ascii=False)
                 
             self.logger.info(f"[{self.name}] Данные цикла успешно сохранены в {filename}")
+            
+            # File Rotation: keep only the latest 100 cycle logs
+            files = [f for f in os.listdir(self.storage_path) if f.startswith('cycle_') and f.endswith('.json')]
+            if len(files) > 100:
+                files.sort() # Oldest first because of timestamp naming
+                for old_file in files[:-100]:
+                    try:
+                        os.remove(os.path.join(self.storage_path, old_file))
+                    except Exception:
+                        pass
         except Exception as e:
             self.logger.error(f"[{self.name}] Ошибка при сохранении данных цикла: {e}")
 

@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  aft-bot:
+    build: .
+    container_name: aft-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    environment:
+      - TZ=UTC # Установите нужную таймзону, например Europe/Moscow

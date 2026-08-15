@@ -1,0 +1,17 @@
+[flake8]
+max-line-length = 120
+exclude =
+    .git,
+    __pycache__,
+    docs/source/conf.py,
+    old,
+    build,
+    dist,
+    venv,
+    .venv,
+    env
+ignore = 
+    # E501: line too long
+    E501,
+    # W503: line break before binary operator
+    W503
