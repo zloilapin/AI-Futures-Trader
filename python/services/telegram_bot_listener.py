@@ -118,6 +118,11 @@ class TelegramBotListener:
                 )
                 await self._send_reply(reply)
 
+            elif cmd in ["/stats", "/diagnostics"]:
+                from core.diagnostics import tracker
+                reply = tracker.get_summary_text()
+                await self._send_reply(reply)
+
             elif cmd in ["/positions", "/pos"]:
                 positions = getattr(self.trading_service, "active_positions", {})
                 if not positions:
@@ -191,6 +196,7 @@ class TelegramBotListener:
                     f"🔹 `/positions` — Список активных сделок и управление ими\n"
                     f"🔹 `/risk` — Переключение профиля риска\n"
                     f"🔹 `/scan` — Принудительно начать цикл сканирования\n"
+                    f"🔹 `/stats` — Воронка отклоненных сигналов (Diagnostics)\n"
                     f"🔹 `/deposit <сумма>` — Учесть ручное пополнение для точного ROI\n"
                     f"🔹 `/withdraw <сумма>` — Учесть ручной вывод для точного ROI\n"
                     f"🔹 `/reset_ledger` — Сбросить статистику PnL и начальный капитал\n"

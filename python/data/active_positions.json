@@ -1,0 +1,17 @@
+{
+    "ETH": {
+        "id": "31cf2a09",
+        "symbol": "ETH",
+        "direction": "SHORT",
+        "entry_price": 3000.0,
+        "notional_usd": 100.0,
+        "leverage": 1,
+        "margin_usd": 100.0,
+        "size_base": 0.03333333333333333,
+        "tp_price": 2000.0,
+        "sl_price": 4000.0,
+        "breakeven_activated": false,
+        "is_virtual": true,
+        "timestamp": 1786809125.1464877
+    }
+}

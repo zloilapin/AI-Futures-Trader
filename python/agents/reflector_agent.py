@@ -80,8 +80,7 @@ class ReflectorAgent(BaseAgent):
         data_string = json.dumps(payload, indent=2)
         full_prompt = f"{self.system_instruction}\n\nClosed Trade Data:\n{data_string}"
         
-        response_text = await self.llm_client.generate(full_prompt)
-        reflection = self._parse_json(response_text)
+        reflection = await self.generate_json(full_prompt)
         
         if reflection and reflection.get("actionable_rule"):
             self._save_lesson(reflection)

@@ -26,6 +26,7 @@ from agents.news_agent import NewsAgent
 from agents.indicator_agent import IndicatorAgent
 from agents.ceo_agent import CEOAgent
 from agents.risk_manager import RiskManager
+from core.diagnostics import tracker
 from agents.telegram_agent import TelegramAgent
 from agents.memory_manager import MemoryManager
 from agents.reflector_agent import ReflectorAgent
@@ -180,6 +181,7 @@ async def run_single_cycle(
             break
 
         print(f"\n🔍 ПОЛНЫЙ АНАЛИЗ (15m, 1H, 4H) KRAKEN FUTURES: {symbol}")
+        tracker.record_scan()
         
         # СТАДИЯ 2: СБОР ДАННЫХ И ПРОВЕРКА СТАТУСА
         logger.info(f"[Stage 2] Сбор мульти-таймфреймовых данных (15m, 1H, 4H) для {symbol}...")
@@ -188,6 +190,7 @@ async def run_single_cycle(
         except Exception as e:
             print(f"❌ Ошибка загрузки данных для {symbol}: {e}. Пропуск актива.")
             scan_summaries.append({"symbol": symbol, "status": "⛔ ОШИБКА ДАННЫХ", "reason": str(e)})
+            tracker.record_rejection("FETCH_ERROR")
             continue
             
         current_price = market_data.get("price_data", {}).get("current_price", 0)
@@ -202,6 +205,7 @@ async def run_single_cycle(
             print(f"🛑 Scanner Agent пропустил {symbol}. Причина: {scanner_reason}")
             logger.info(f"[System_Core] Пропуск {symbol}. Причина: {scanner_reason}")
             scan_summaries.append({"symbol": symbol, "status": "⛔ СКАН ЗАБЛОКИРОВАН", "reason": scanner_reason})
+            tracker.record_rejection(scan_result.get('status', 'SCANNER_BLOCKED'))
             continue
 
         # СТАДИЯ 3: СИНДИКАТ АНАЛИТИКОВ
@@ -217,6 +221,35 @@ async def run_single_cycle(
             if isinstance(report, dict) and report.get("signal") != "ERROR":
                 report["agent_name"] = agent.name
                 valid_reports.append(report)
+
+        # --- PRE-CEO FILTER ---
+        # Экономим токены Llama 70B: если все базовые агенты нейтральны, пропускаем актив
+        has_directional_signal = False
+        for report in valid_reports:
+            signal = str(report.get("signal", "NEUTRAL")).upper()
+            if signal in ["BULLISH", "BEARISH", "LONG", "SHORT"]:
+                has_directional_signal = True
+                break
+                
+        if not has_directional_signal:
+            msg = f"⏸️ Пропуск {symbol}. Причина: Нет базовых сигналов (Pre-CEO Filter)."
+            print(msg)
+            logger.info(f"[System_Core] {msg}")
+            
+            scanner_status = "⚠️ ЗАБЛОКИРОВАН СКАНЕРОМ" if scanner_blocked else "✅ OK"
+            scan_summaries.append({
+                "symbol": symbol,
+                "decision": "HOLD",
+                "conviction": 0,
+                "scanner_status": scanner_status,
+                "scanner_reason": scanner_reason if scanner_blocked else None,
+                "risk_approved": False,
+                "risk_reason": "Pre-CEO Filter: все базовые аналитики нейтральны",
+                "ceo_reasoning": "Bypassed",
+                "status": "⏸️ НЕТ СИГНАЛА"
+            })
+            tracker.record_rejection("NO_SIGNAL")
+            continue
 
         # СТАДИЯ 4: СИНТЕЗ CEO И МУЛЬТИ-ТАЙМФРЕЙМ ТРЕНД
         logger.info(f"[Stage 4] CEO Agent проверяет согласованность 1H/4H тренда и выносит решение по {symbol}...")
@@ -253,6 +286,16 @@ async def run_single_cycle(
                 "status": "⏸️ НЕТ СИГНАЛА"
             }
             scan_summaries.append(asset_summary)
+            
+            if decision == "HOLD":
+                hold_cat = ceo_verdict.get("hold_category", "CEO_HOLD")
+                tracker.record_rejection(hold_cat)
+            elif conviction < min_conv:
+                tracker.record_rejection("LOW_CONFIDENCE")
+            else:
+                # Если решение не LONG/SHORT и не HOLD (например, LLM выдал "NEUTRAL" или "NO_SIGNAL")
+                tracker.record_rejection("NO_SIGNAL")
+                
             continue
 
         # СТАДИЯ 5: РИСК-МЕНЕДЖМЕНТ
@@ -279,8 +322,13 @@ async def run_single_cycle(
                 logger.error(f"❌ Status: REJECTED BY EXCHANGE ({symbol})")
                 risk_verdict["approved"] = False
                 risk_verdict["reasoning"] = "Биржа отклонила ордер (или ошибка сети/дубликат)."
+                tracker.record_execution_failed()
+            else:
+                tracker.record_trade()
         else:
             logger.error(f"❌ Status: VETOED BY RISK MANAGER ({risk_verdict.get('reasoning')})")
+            veto_cat = risk_verdict.get("veto_category") or "RISK_VETO"
+            tracker.record_rejection(veto_cat)
 
         # СТАДИЯ 6: ТЕЛЕГРАМ
         # Собираем сводку по активу для отчёта ручного /scan
@@ -407,7 +455,11 @@ async def main():
     print("=== INITIALIZING NADO AI TRADING SYSTEM ===")
     
     logger = TradeLogger()
-    llm_client = LLMClient()
+    
+    # 4-Tier Architecture LLMs (ALL via OpenRouter)
+    cheap_llm_client = LLMClient(provider="openrouter", model_name="meta-llama/llama-3.1-8b-instruct")
+    primary_ceo_llm = LLMClient(provider="openrouter", model_name="meta-llama/llama-3.3-70b-instruct")
+    escalation_ceo_llm = LLMClient(provider="openrouter", model_name="moonshotai/kimi-k3")
     fetcher = MarketDataService(exchange_name="Kraken Futures", logger=logger)
     tg_sender = TelegramService()
     print("Инициализация сервисов...")
@@ -434,20 +486,19 @@ async def main():
             except Exception as e:
                 print(f"🚨 [P0.3 Startup Sync] КРИТИЧЕСКАЯ ОШИБКА: {e}")
                 print("🛑 СТАРТОВАЯ СИНХРОНИЗАЦИЯ ПРОВАЛЕНА. ТОРГОВЛЯ ЗАБЛОКИРОВАНА. Повторная попытка через 60 секунд...")
-                import asyncio
                 await asyncio.sleep(60)
     
-    universe_agent = UniverseAgent(logger, llm_client)
-    scanner_agent = ScannerAgent(logger, llm_client)
-    candle_agent = CandleAgent(logger, llm_client)
-    ob_agent = OrderBookAgent(logger, llm_client)
-    oi_agent = OIFundingAgent(logger, llm_client)
-    news_agent = NewsAgent(logger, llm_client)
-    indicator_agent = IndicatorAgent(logger, llm_client)
-    ceo_agent = CEOAgent(logger, llm_client)
-    risk_manager = RiskManager(logger, llm_client)
-    telegram_agent = TelegramAgent(logger, llm_client)
-    reflector_agent = ReflectorAgent(logger, llm_client)
+    universe_agent = UniverseAgent(logger, cheap_llm_client)
+    scanner_agent = ScannerAgent(logger, None)
+    candle_agent = CandleAgent(logger, None)
+    ob_agent = OrderBookAgent(logger, None)
+    oi_agent = OIFundingAgent(logger, None)
+    news_agent = NewsAgent(logger, cheap_llm_client)
+    indicator_agent = IndicatorAgent(logger, None)
+    ceo_agent = CEOAgent(logger, primary_ceo_llm, escalation_ceo_llm)
+    risk_manager = RiskManager(logger, primary_ceo_llm)
+    telegram_agent = TelegramAgent(logger, cheap_llm_client)
+    reflector_agent = ReflectorAgent(logger, cheap_llm_client)
     memory_manager = MemoryManager(logger)
 
     async def trigger_scan():

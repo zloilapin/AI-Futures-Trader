@@ -58,6 +58,7 @@ class RiskManager(BaseAgent):
         
         # Initialized output fields
         approved = None
+        veto_category = None
         risk_amount_usd = 0.0   # Max USD we're willing to lose
         notional_usd = 0.0      # Total exposure (contracts * price)
         margin_usd = 0.0        # Collateral locked (notional / leverage)
@@ -70,6 +71,8 @@ class RiskManager(BaseAgent):
         
         if total_balance <= 0:
             self.logger.warning(f"[{self.name}] ❌ INSUFFICIENT BALANCE: Total balance is {total_balance}. Blocking trade.")
+            approved = False
+            veto_category = "INSUFFICIENT_BALANCE"
         elif decision in ["LONG", "SHORT"] and conviction >= min_conviction:
             # QW #6: Win Rate Gate Check
             win_count = portfolio_data.get("win_count", 0)
@@ -87,6 +90,7 @@ class RiskManager(BaseAgent):
             if conviction < min_conviction:
                 return {
                     "approved": False,
+                    "veto_category": "LOW_CONFIDENCE",
                     "reasoning": f"Conviction {conviction} is below Win Rate Gate threshold {min_conviction}"
                 }
 
@@ -161,6 +165,7 @@ class RiskManager(BaseAgent):
             if spread_pct > config.SPREAD_VETO_THRESHOLD:
                 self.logger.warning(f"[{self.name}] ❌ SPREAD VETO: Spread is {spread_pct}% (Too illiquid). Blocking trade.")
                 approved = False
+                veto_category = "SPREAD"
             elif spread_pct > config.SPREAD_PENALTY_THRESHOLD:
                 notional_usd *= 0.8 # Cut notional by 20%
                 contracts = notional_usd / current_price if current_price > 0 else 0
@@ -183,20 +188,24 @@ class RiskManager(BaseAgent):
             if contracts > 0 and contracts < min_base:
                 self.logger.warning(f"[{self.name}] ❌ MIN SIZE VETO: Safe position size ({contracts:.6f}) is less than exchange minimum ({min_base}). Blocking trade.")
                 approved = False
+                veto_category = "MIN_NOTIONAL"
                 
             if notional_usd > 0 and notional_usd < config.MIN_NOTIONAL:
                 self.logger.warning(f"[{self.name}] ❌ MIN NOTIONAL VETO: Safe notional ${notional_usd:.2f} is below exchange minimum ${config.MIN_NOTIONAL}. Blocking trade to preserve risk profile.")
                 approved = False
+                veto_category = "MIN_NOTIONAL"
                 
             if notional_usd > max_notional_usd:
                 self.logger.warning(f"[{self.name}] ❌ MAX NOTIONAL VETO: Required notional ${notional_usd:.2f} exceeds max allowed ${max_notional_usd:.2f}.")
                 approved = False
+                veto_category = "MAX_MARGIN"
 
             # ═══ 6. Verify Actual Risk ═══
             actual_risk_usd = contracts * distance_to_sl
             if actual_risk_usd > risk_amount_usd and approved is not False:
                 self.logger.warning(f"[{self.name}] ❌ RISK VETO: Actual risk ${actual_risk_usd:.2f} exceeds allowed risk ${risk_amount_usd:.2f}.")
                 approved = False
+                veto_category = "EXCESSIVE_RISK"
             
             # ═══ Derived fields ═══
             # margin_usd = collateral locked by the exchange
@@ -225,6 +234,7 @@ class RiskManager(BaseAgent):
             
         parsed_res = {
             "approved": approved if approved is not None else False,
+            "veto_category": veto_category,
             "reasoning": f"Math calculated based on {profile_name} profile. SL={sl_price}, TP={tp_price}, RR={rr_ratio}",
             # ═══ Canonical fields (unambiguous) ═══
             "risk_amount_usd": risk_amount_usd,     # Max USD willing to lose

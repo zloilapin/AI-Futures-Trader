@@ -22,6 +22,24 @@ class BaseAgent:
         """
         raise NotImplementedError("Дочерний класс должен реализовать метод analyze()")
 
+    async def generate_json(self, prompt: str, max_retries: int = 3) -> Dict[str, Any]:
+        """
+        Generates and parses JSON from the LLM. If parsing fails, retries by appending
+        the error to the prompt.
+        """
+        current_prompt = prompt
+        for attempt in range(max_retries):
+            response_text = await self.llm_client.generate(current_prompt)
+            parsed = self._parse_json(response_text)
+            
+            if parsed.get("signal") != "ERROR" or attempt == max_retries - 1:
+                return parsed
+                
+            self.logger.warning(f"[{self.name}] Попытка {attempt+1} провалилась из-за формата JSON. Повтор...")
+            current_prompt += f"\n\n[SYSTEM ERROR]: Your previous output failed JSON validation: {parsed.get('reasoning')}. Please correct the formatting and output STRICTLY valid JSON."
+            
+        return {"signal": "ERROR", "reasoning": "Failed to generate valid JSON after retries."}
+
     def _parse_json(self, response_text: str) -> Dict[str, Any]:
         """
         Утилита для очистки и парсинга ответа от LLM с защитой от ошибок формата.

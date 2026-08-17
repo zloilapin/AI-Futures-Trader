@@ -9,30 +9,76 @@ class CandleAgent(BaseAgent):
     """
     Specialized agent for Price Action and Japanese Candlestick Pattern analysis on DEX perp markets.
     """
-    def __init__(self, logger: TradeLogger, llm_client: LLMClient):
+    def __init__(self, logger: TradeLogger, llm_client: LLMClient = None):
         super().__init__("Candle_Agent", logger, llm_client)
 
-        import os
-        prompt_path = os.path.join(os.path.dirname(__file__), "..", "prompts", "candle_prompt.txt")
-        with open(prompt_path, "r", encoding="utf-8") as f:
-            self.system_instruction = f.read()
-
     async def analyze(self, market_data: Dict[str, Any]) -> Dict[str, Any]:
-        self.logger.info(f"[{self.name}] Глубокий анализ прайс-экшена и свечных паттернов...")
+        self.logger.info(f"[{self.name}] Детерминированный анализ прайс-экшена и свечей...")
         
         price_data = market_data.get("price_data", {})
         ohlcv = price_data.get("candles_20", [])
         
-        payload = {
-            "symbol": market_data.get("symbol"),
-            "current_price": price_data.get("current_price"),
-            "trend": price_data.get("trend"),
-            "recent_volume": price_data.get("recent_volume"),
-            "recent_15m_candles": ohlcv[-20:] if ohlcv else []
+        if not ohlcv or len(ohlcv) < 2:
+            return {"signal": "NEUTRAL", "confidence": 0, "reasoning": "Not enough candle data for analysis", "pattern_detected": "None"}
+            
+        last_candle = ohlcv[-1]
+        prev_candle = ohlcv[-2]
+        
+        # Unpack, assuming [timestamp, open, high, low, close, volume]
+        try:
+            o1, h1, l1, c1, v1 = last_candle[1:6]
+            o2, h2, l2, c2, v2 = prev_candle[1:6]
+        except Exception as e:
+            return {"signal": "ERROR", "reasoning": f"Invalid OHLCV format: {e}"}
+            
+        # Math checks
+        body1 = abs(c1 - o1)
+        total_range1 = h1 - l1
+        upper_wick1 = h1 - max(c1, o1)
+        lower_wick1 = min(c1, o1) - l1
+        
+        is_bullish1 = c1 > o1
+        is_bearish1 = c1 < o1
+        
+        body2 = abs(c2 - o2)
+        is_bearish2 = c2 < o2
+        is_bullish2 = c2 > o2
+
+        signal = "NEUTRAL"
+        confidence = 50
+        reasoning = "Обычное движение цены, нет четких паттернов ликвидности."
+        pattern = "None"
+        
+        if total_range1 > 0:
+            # 1. Sweep (Pin Bar / Hammer)
+            if lower_wick1 > body1 * 2 and lower_wick1 > upper_wick1 * 2 and is_bullish1:
+                signal = "BULLISH"
+                confidence = 80
+                reasoning = "Длинная нижняя тень. Сбор ликвидности (стопов) снизу и агрессивный откуп."
+                pattern = "Bullish Liquidity Sweep"
+                
+            elif upper_wick1 > body1 * 2 and upper_wick1 > lower_wick1 * 2 and is_bearish1:
+                signal = "BEARISH"
+                confidence = 80
+                reasoning = "Длинная верхняя тень. Сбор ликвидности (стопов) сверху и давление продавцов."
+                pattern = "Bearish Liquidity Sweep"
+                
+            # 2. Engulfing + Displacement
+            elif is_bullish1 and is_bearish2 and c1 > h2 and o1 <= c2:
+                signal = "BULLISH"
+                confidence = 75
+                reasoning = "Бычье поглощение. Сильный импульс (Displacement), перекрывающий предыдущее падение."
+                pattern = "Bullish Engulfing"
+                
+            elif is_bearish1 and is_bullish2 and c1 < l2 and o1 >= c2:
+                signal = "BEARISH"
+                confidence = 75
+                reasoning = "Медвежье поглощение. Сильный дамп (Displacement), перекрывающий предыдущий рост."
+                pattern = "Bearish Engulfing"
+
+        return {
+            "signal": signal,
+            "confidence": confidence,
+            "reasoning": reasoning,
+            "pattern_detected": pattern
         }
-        
-        data_string = json.dumps(payload, indent=2)
-        full_prompt = f"{self.system_instruction}\n\nPrice Action Data:\n{data_string}"
-        
-        response_text = await self.llm_client.generate(full_prompt)
-        return self._parse_json(response_text)

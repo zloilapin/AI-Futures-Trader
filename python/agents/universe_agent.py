@@ -31,8 +31,4 @@ class UniverseAgent(BaseAgent):
         full_prompt = f"{self.system_instruction}\n\nBroad Market Data:\n{data_string}"
         
         # Отправляем в LLM
-        response_text = await self.llm_client.generate(full_prompt)
-        
-        # Ожидаем, что парсер вернет словарь со списком 'selected_pairs'
-        return self._parse_json(response_text)
-        
+        return await self.generate_json(full_prompt)

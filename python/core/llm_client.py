@@ -10,7 +10,7 @@ class LLMClient:
     Unified LLM Client supporting Groq, Gemini, and OpenRouter APIs.
     Acts as the 'brain' interface for all trading agents.
     """
-    def __init__(self, model_name: Optional[str] = None):
+    def __init__(self, provider: Optional[str] = None, model_name: Optional[str] = None):
         self.groq_key = os.getenv("GROQ_API_KEY")
         self.gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
         self.openrouter_key = os.getenv("OPENROUTER_API_KEY")
@@ -21,16 +21,24 @@ class LLMClient:
         
         # Build dynamic fallback queue
         self._available_providers = []
-        if self.openrouter_key and not self.openrouter_key.startswith("your_"):
+        
+        # If an explicit provider is requested, put it first in the queue
+        if provider == "openrouter" and self.openrouter_key and not self.openrouter_key.startswith("your_"):
             self._available_providers.append({"provider": "openrouter", "model": model_name or os.getenv("OPENROUTER_MODEL", "moonshotai/kimi-k3")})
-        if self.groq_key and not self.groq_key.startswith("your_"):
+        elif provider == "groq" and self.groq_key and not self.groq_key.startswith("your_"):
             self._available_providers.append({"provider": "groq", "model": model_name or "llama-3.3-70b-versatile"})
+            
+        # Add remaining fallback providers
+        if provider != "openrouter" and self.openrouter_key and not self.openrouter_key.startswith("your_"):
+            self._available_providers.append({"provider": "openrouter", "model": os.getenv("OPENROUTER_MODEL", "moonshotai/kimi-k3")})
+        if provider != "groq" and self.groq_key and not self.groq_key.startswith("your_"):
+            self._available_providers.append({"provider": "groq", "model": "llama-3.3-70b-versatile"})
         if self.gemini_key and not self.gemini_key.startswith("your_"):
-            self._available_providers.append({"provider": "gemini", "model": model_name or "gemini-2.0-flash"})
+            self._available_providers.append({"provider": "gemini", "model": "gemini-2.0-flash"})
         if self.cerebras_key and not self.cerebras_key.startswith("your_"):
-            self._available_providers.append({"provider": "cerebras", "model": model_name or "gpt-oss-120b"})
+            self._available_providers.append({"provider": "cerebras", "model": "gpt-oss-120b"})
         if self.kie_key and not self.kie_key.startswith("your_"):
-            self._available_providers.append({"provider": "kie", "model": model_name or os.getenv("KIE_MODEL", "DeepSeek-V3")})
+            self._available_providers.append({"provider": "kie", "model": os.getenv("KIE_MODEL", "DeepSeek-V3")})
             
         if self._available_providers:
             self._set_provider(self._available_providers.pop(0))
@@ -166,9 +174,16 @@ class LLMClient:
                     payload = {
                         "model": model_to_try if not is_cerebras else self.model_name,
                         "messages": [{"role": "user", "content": current_prompt}],
-                        "response_format": {"type": "json_object"},
                         "max_tokens": 2500
                     }
+                    
+                    # OpenRouter: Some models (like Moonshot Kimi) fail with 400 if response_format is provided
+                    is_known_no_json = "moonshot" in model_to_try.lower() or "kimi" in model_to_try.lower()
+                    if hasattr(self, "_no_json_format_models") and model_to_try in self._no_json_format_models:
+                        is_known_no_json = True
+                        
+                    if not is_known_no_json:
+                        payload["response_format"] = {"type": "json_object"}
                     try:
                         session = await self._get_session()
                         async with session.post(api_url, headers=headers, json=payload) as resp:
@@ -182,13 +197,19 @@ class LLMClient:
                                 return data["choices"][0]["message"]["content"]
                             else:
                                 err_msg = await resp.text()
-                                if "429" in err_msg or "rate limit" in err_msg.lower() or "500" in err_msg or "503" in err_msg:
+                                if resp.status == 402 or "402" in err_msg or "payment" in err_msg.lower():
+                                    print(f"❌ [LLMClient {self.provider.upper()}] Ошибка 402 (Payment Required). Закончились кредиты. Переключаемся на другого провайдера...")
+                                    break
+                                elif "429" in err_msg or "rate limit" in err_msg.lower() or "500" in err_msg or "503" in err_msg:
                                     wait_time = min(60, (2 ** attempt) + random.uniform(0, 1))
                                     print(f"⚠️ [LLMClient {self.provider.upper()}] Ошибка {resp.status} для {model_to_try}. Повтор через {wait_time:.2f}s...")
                                     await asyncio.sleep(wait_time)
                                 elif "400" in err_msg:
                                     current_prompt += "\n\n[SYSTEM WARNING: Your previous response failed JSON validation. Please strictly output a valid JSON object without markdown formatting.]"
-                                    print(f"⚠️ [LLMClient {self.provider.upper()}] Ошибка 400. Self-Correction промпта...")
+                                    if not hasattr(self, "_no_json_format_models"):
+                                        self._no_json_format_models = set()
+                                    self._no_json_format_models.add(model_to_try)
+                                    print(f"⚠️ [LLMClient {self.provider.upper()}] Ошибка 400 (возможно не поддерживается JSON mode). Self-Correction промпта и отключение json_object...")
                                     await asyncio.sleep(2)
                                 else:
                                     print(f"❌ [LLMClient] {model_to_try} недоступна: {err_msg[:100]}...")
