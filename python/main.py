@@ -264,7 +264,7 @@ async def run_single_cycle(
             print(f"💰 Position Amount: ${risk_verdict.get('notional_size_usd', 0):,.2f} ({risk_verdict.get('position_size_pct', 0)}% of portfolio)")
             print(f"🟢 Take Profit (TP): ${risk_verdict.get('take_profit_price', 0):,.2f} (+{risk_verdict.get('take_profit_pct', 0)}%)")
             # Автоматическая торговля 24/7 (полностью автономный режим)
-            await trading_service.open_position(
+            trade_success = await trading_service.open_position(
                 symbol=symbol,
                 direction=decision,
                 entry_price=current_price,
@@ -273,6 +273,12 @@ async def run_single_cycle(
                 sl_price=risk_verdict.get("stop_loss_price", 0),
                 leverage=config.LEVERAGE
             )
+            
+            if not trade_success:
+                print(f"❌ Ошибка открытия позиции на бирже для {symbol}.")
+                logger.error(f"❌ Status: REJECTED BY EXCHANGE ({symbol})")
+                risk_verdict["approved"] = False
+                risk_verdict["reasoning"] = "Биржа отклонила ордер (или ошибка сети/дубликат)."
         else:
             logger.error(f"❌ Status: VETOED BY RISK MANAGER ({risk_verdict.get('reasoning')})")
 
@@ -420,11 +426,16 @@ async def main():
     # P0.3: Startup sync — rebuild state from Kraken BEFORE any trading logic
     if hasattr(trading_service, "sync_with_exchange"):
         print("🔄 [P0.3 Startup Sync] Синхронизация состояния с биржей при старте...")
-        try:
-            await trading_service.sync_with_exchange()
-            print(f"✅ [P0.3 Startup Sync] Состояние синхронизировано. Активных позиций: {len(trading_service.active_positions)}")
-        except Exception as e:
-            print(f"⚠️ [P0.3 Startup Sync] Ошибка синхронизации при старте: {e}")
+        while True:
+            try:
+                await trading_service.sync_with_exchange()
+                print(f"✅ [P0.3 Startup Sync] Состояние синхронизировано. Активных позиций: {len(trading_service.active_positions)}")
+                break
+            except Exception as e:
+                print(f"🚨 [P0.3 Startup Sync] КРИТИЧЕСКАЯ ОШИБКА: {e}")
+                print("🛑 СТАРТОВАЯ СИНХРОНИЗАЦИЯ ПРОВАЛЕНА. ТОРГОВЛЯ ЗАБЛОКИРОВАНА. Повторная попытка через 60 секунд...")
+                import asyncio
+                await asyncio.sleep(60)
     
     universe_agent = UniverseAgent(logger, llm_client)
     scanner_agent = ScannerAgent(logger, llm_client)

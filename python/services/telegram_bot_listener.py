@@ -59,7 +59,8 @@ class TelegramBotListener:
 
         try:
             if cmd in ["/status", "/info"]:
-                profile = os.getenv("TRADING_PROFILE", "BALANCED")
+                from core.config import config
+                profile = config.TRADING_PROFILE
                 interval = os.getenv("SCAN_INTERVAL_MINUTES", "15")
                 rest_start = os.getenv("REST_START_TIME", "19:00")
                 rest_end = os.getenv("REST_END_TIME", "07:00")
@@ -207,8 +208,8 @@ class TelegramBotListener:
         
         if callback_data.startswith("approve_") or callback_data.startswith("reject_"):
             action, trade_id = callback_data.split("_")
-            if hasattr(self.paper_trading, "pending_trades") and trade_id in self.paper_trading.pending_trades:
-                trade = self.paper_trading.pending_trades.pop(trade_id)
+            if hasattr(self.trading_service, "pending_trades") and trade_id in self.trading_service.pending_trades:
+                trade = self.trading_service.pending_trades.pop(trade_id)
                 
                 # Timeout check (5 minutes = 300 seconds)
                 import time
@@ -224,7 +225,7 @@ class TelegramBotListener:
                     
                     tg_msg = trade.pop("tg_message", None)
                     trade.pop("created_at", None)
-                    await self.paper_trading.open_position(**trade)
+                    await self.trading_service.open_position(**trade)
                     
                     if tg_msg:
                         await tg.broadcast_to_channel(tg_msg)
@@ -241,7 +242,7 @@ class TelegramBotListener:
             symbol = callback_data.split("_")[1]
             await tg.answer_callback_query(callback_id, f"Закрываю {symbol}... ⏳")
             
-            success, result = await self.paper_trading.force_close_position(symbol)
+            success, result = await self.trading_service.force_close_position(symbol)
             if success:
                 mode = "👻 [ВИРТУАЛЬНО]" if result.get('is_virtual') else "⚡ [БОЕВАЯ]"
                 pnl = result.get('pnl_usd', 0)
@@ -256,6 +257,8 @@ class TelegramBotListener:
                 
         elif callback_data.startswith("setrisk_"):
             new_profile = callback_data.split("_")[1]
+            from core.config import config
+            config.TRADING_PROFILE = new_profile
             os.environ["TRADING_PROFILE"] = new_profile
             await tg.answer_callback_query(callback_id, f"Профиль {new_profile} установлен ✅")
             await tg.send_message(f"✅ Профиль риска успешно изменен на `{new_profile}`.")

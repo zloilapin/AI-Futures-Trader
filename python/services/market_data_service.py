@@ -520,6 +520,31 @@ class MarketDataService:
             self._log(f"⚠️ [MarketDataService] Ошибка загрузки OI/Funding: {e}")
             raise Exception(f"Не удалось получить OI/Funding для {symbol}") from e
 
+    async def fetch_margin_requirements(self, symbol: str) -> Dict[str, Any]:
+        """Fetches real maintenance margin parameters from Kraken Futures instruments endpoint."""
+        url = "https://futures.kraken.com/derivatives/api/v3/instruments"
+        try:
+            session = await self._get_session()
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    instruments = data.get("instruments", [])
+                    target_pair = self._normalize_pair(symbol)
+                    
+                    for inst in instruments:
+                        if inst.get("symbol") == target_pair:
+                            margin_levels = inst.get("marginLevels", [])
+                            if margin_levels:
+                                # Get tier 1 maintenance margin
+                                mm = float(margin_levels[0].get("maintenanceMargin", 0.01))
+                                return {"maintenance_margin_pct": mm}
+                            break
+                            
+        except Exception as e:
+            self._log(f"⚠️ [MarketDataService] Ошибка загрузки margin levels: {e}")
+            
+        return {"maintenance_margin_pct": 0.01} # fallback to conservative 1%
+
     async def fetch_all_market_data(self, symbol: str) -> Dict[str, Any]:
         """
         Aggregates all real-time market data asynchronously including Multi-Timeframe Alignment.
@@ -527,14 +552,19 @@ class MarketDataService:
         """
         for attempt in range(3):
             try:
-                mtf, ohlcv, ob, oi, indicators, news = await asyncio.gather(
+                mtf, ohlcv, ob, oi, indicators, news, margin = await asyncio.gather(
                     self.fetch_multi_timeframe(symbol),
                     self.fetch_ohlcv(symbol),
                     self.fetch_order_book(symbol),
                     self.fetch_oi_funding(symbol),
                     self.fetch_indicators(symbol),
-                    self.fetch_news_sentiment(symbol)
+                    self.fetch_news_sentiment(symbol),
+                    self.fetch_margin_requirements(symbol)
                 )
+
+                # Merge margin into derivatives_data
+                if isinstance(oi, dict) and isinstance(margin, dict):
+                    oi.update(margin)
 
                 return {
                     "exchange": self.exchange_name,

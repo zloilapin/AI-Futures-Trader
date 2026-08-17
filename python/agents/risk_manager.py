@@ -126,7 +126,25 @@ class RiskManager(BaseAgent):
                     dynamic_risk_pct = min(risk_pct * 1.4, 0.07) # Boost risk, max 7%
                     self.logger.info(f"[{self.name}] KELLY CRITERION: 2 wins in a row. Risk boosted to {dynamic_risk_pct*100}%.")
             
-            # ═══ Position Sizing (canonical math) ═══
+            # ═══ 1. Liquidation Price Check & Finalize SL ═══
+            derivatives_data = market_data.get("derivatives_data", {})
+            mm_pct = float(derivatives_data.get("maintenance_margin_pct", 0.01))
+            
+            if decision == "LONG":
+                liq_price = current_price * (1 - (1 / leverage) + mm_pct)
+                if sl_price <= liq_price:
+                    self.logger.warning(f"[{self.name}] SL {sl_price:.4f} is below Liquidation {liq_price:.4f}. Adjusting SL.")
+                    sl_price = liq_price * 1.005
+            elif decision == "SHORT":
+                liq_price = current_price * (1 + (1 / leverage) - mm_pct)
+                if sl_price >= liq_price:
+                    self.logger.warning(f"[{self.name}] SL {sl_price:.4f} is above Liquidation {liq_price:.4f}. Adjusting SL.")
+                    sl_price = liq_price * 0.995
+            
+            # Recalculate distance after SL adjustment
+            distance_to_sl = abs(current_price - sl_price)
+
+            # ═══ 2. Position Sizing (canonical math) ═══
             # risk_amount_usd = how much USD we're willing to LOSE
             risk_amount_usd = total_balance * dynamic_risk_pct
             
@@ -139,7 +157,7 @@ class RiskManager(BaseAgent):
                 contracts = 0
                 notional_usd = 0
                 
-            # Apply Slippage Penalty & Veto
+            # ═══ 3. Apply Slippage Penalty & Veto ═══
             if spread_pct > config.SPREAD_VETO_THRESHOLD:
                 self.logger.warning(f"[{self.name}] ❌ SPREAD VETO: Spread is {spread_pct}% (Too illiquid). Blocking trade.")
                 approved = False
@@ -147,52 +165,37 @@ class RiskManager(BaseAgent):
                 notional_usd *= 0.8 # Cut notional by 20%
                 contracts = notional_usd / current_price if current_price > 0 else 0
             
-            # Liquidation Price Check
-            if decision == "LONG":
-                liq_price = current_price * (1 - (1 / leverage) + 0.005)
-                if sl_price <= liq_price:
-                    self.logger.warning(f"[{self.name}] SL {sl_price} is below Liquidation {liq_price}. Adjusting SL.")
-                    sl_price = liq_price * 1.005
-            elif decision == "SHORT":
-                liq_price = current_price * (1 + (1 / leverage) - 0.005)
-                if sl_price >= liq_price:
-                    self.logger.warning(f"[{self.name}] SL {sl_price} is above Liquidation {liq_price}. Adjusting SL.")
-                    sl_price = liq_price * 0.995
-            
-            # Recalculate distance after SL adjustment
-            distance_to_sl = abs(current_price - sl_price)
-            
             # Fee and Funding Impact on RR
             fee_pct = 0.0005 * 2 # Open + Close
             funding_pct = 0.0001
             
-            # ═══ Max Position Size Guard ═══
+            # ═══ 4. Max Position Size Guard ═══
             # max_notional = max_margin_pct * total_balance * leverage
             max_notional_usd = total_balance * max_margin_pct * leverage
             if notional_usd > max_notional_usd:
                 notional_usd = max_notional_usd
                 contracts = notional_usd / current_price if current_price > 0 else 0
                 
-            # Minimum Order Size & Asset Amount Guard
+            # ═══ 5. Minimum Order Size & Asset Amount Guard ═══
             symbol = ceo_decision.get("symbol", "")
             min_base = 0.0001 if "BTC" in symbol else (0.01 if "ETH" in symbol else 1.0)
             
             if contracts > 0 and contracts < min_base:
-                self.logger.info(f"[{self.name}] Bumping contracts from {contracts} to {min_base}.")
-                contracts = min_base
-                notional_usd = contracts * current_price
+                self.logger.warning(f"[{self.name}] ❌ MIN SIZE VETO: Safe position size ({contracts:.6f}) is less than exchange minimum ({min_base}). Blocking trade.")
+                approved = False
                 
             if notional_usd > 0 and notional_usd < config.MIN_NOTIONAL:
-                if total_balance * leverage < config.MIN_NOTIONAL:
-                    self.logger.warning(f"[{self.name}] ❌ MIN ORDER VETO: Required notional ${notional_usd:.2f} is below min ${config.MIN_NOTIONAL} and balance cannot cover it.")
-                    approved = False
-                else:
-                    self.logger.info(f"[{self.name}] Bumping notional from ${notional_usd:.2f} to min ${config.MIN_NOTIONAL}.")
-                    notional_usd = config.MIN_NOTIONAL
-                    contracts = notional_usd / current_price if current_price > 0 else 0
+                self.logger.warning(f"[{self.name}] ❌ MIN NOTIONAL VETO: Safe notional ${notional_usd:.2f} is below exchange minimum ${config.MIN_NOTIONAL}. Blocking trade to preserve risk profile.")
+                approved = False
                 
             if notional_usd > max_notional_usd:
-                self.logger.warning(f"[{self.name}] ❌ MIN ORDER VETO: Required notional ${notional_usd:.2f} exceeds max allowed ${max_notional_usd:.2f}.")
+                self.logger.warning(f"[{self.name}] ❌ MAX NOTIONAL VETO: Required notional ${notional_usd:.2f} exceeds max allowed ${max_notional_usd:.2f}.")
+                approved = False
+
+            # ═══ 6. Verify Actual Risk ═══
+            actual_risk_usd = contracts * distance_to_sl
+            if actual_risk_usd > risk_amount_usd and approved is not False:
+                self.logger.warning(f"[{self.name}] ❌ RISK VETO: Actual risk ${actual_risk_usd:.2f} exceeds allowed risk ${risk_amount_usd:.2f}.")
                 approved = False
             
             # ═══ Derived fields ═══

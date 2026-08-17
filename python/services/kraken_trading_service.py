@@ -299,7 +299,8 @@ class KrakenTradingService:
                             print(f"❌ [P0.1 Duplicate Guard] Позиция {symbol} УЖЕ ОТКРЫТА на бирже (contracts={ex_contracts})! Дубликат заблокирован.")
                             return False
             except Exception as e:
-                print(f"⚠️ [P0.1 Duplicate Guard] Не удалось проверить позиции на бирже: {e}. Продолжаем с осторожностью.")
+                print(f"🚨 [P0.1 Duplicate Guard] НЕ УДАЛОСЬ проверить позиции на бирже: {e}. Открывать позицию ОПАСНО (может быть дубликат). БЛОКИРОВКА СДЕЛКИ.")
+                return False
 
         mode_str = "ВИРТУАЛЬНОЙ" if is_virtual else "БОЕВОЙ"
         print(f"🚀 [KrakenTradingService] ПОДГОТОВКА {mode_str} СДЕЛКИ: {direction} {symbol}")
@@ -310,7 +311,8 @@ class KrakenTradingService:
         # Execute trade
         order_result = True
         if not is_virtual:
-            order_result = await self._execute_market_order(symbol, direction, size_base, leverage, sl_price, tp_price)
+            # We do NOT pass sl_price and tp_price here, to ensure we create them immediately after and verify creation synchronously
+            order_result = await self._execute_market_order(symbol, direction, size_base, leverage, sl_price=None, tp_price=None)
             if isinstance(order_result, dict):
                 # Проверка фактического исполнения и комиссии
                 filled = order_result.get('filled')
@@ -347,51 +349,46 @@ class KrakenTradingService:
                     slippage_diff = fill_price - entry_price
                     if tp_price: tp_price = tp_price + slippage_diff
                     if sl_price: sl_price = sl_price + slippage_diff
-                    print(f"🔄 [KrakenTradingService] Уровни скорректированы. Новый SL: {sl_price}, Новый TP: {tp_price}")
+                    print(f"🔄 [KrakenTradingService] Уровни скорректированы из-за проскальзывания. Новый SL: {sl_price:.4f}, Новый TP: {tp_price:.4f}")
                     entry_price = float(fill_price)
-                    
-                    # Если было проскальзывание, обновляем SL/TP на бирже на новые значения (Hard SL Update)
-                    if sl_price:
-                        print("🔄 [KrakenTradingService] Обновление атомарного стопа из-за проскальзывания...")
-                        asyncio.create_task(self._update_exchange_sl(symbol, direction, sl_price, actual_size))
 
-                # ═══ P0.2: SL Verification — confirm stop order exists on exchange ═══
+                # ═══ P0.2: IMMEDIATELY CREATE REDUCE-ONLY SL ═══
                 if sl_price and sl_price > 0:
-                    await asyncio.sleep(1)  # Give exchange time to register conditional orders
+                    print(f"🛡️ [P0.2 SL] Немедленное создание Hard Stop-Loss: {sl_price}...")
+                    stop_side = 'sell' if direction == 'LONG' else 'buy'
                     try:
                         formatted_symbol = self._format_symbol(symbol)
-                        open_orders = await self.exchange.fetch_open_orders(formatted_symbol)
-                        sl_found = False
-                        for o in open_orders:
-                            o_type = (o.get('type') or '').lower()
-                            if o_type in ('stop', 'stop-loss', 'stopmarket', 'stop_loss_limit'):
-                                sl_found = True
-                                break
-                        
-                        if sl_found:
-                            print(f"✅ [P0.2 SL Verify] Hard Stop-Loss подтверждён на бирже для {symbol}.")
-                        else:
-                            print(f"⚠️ [P0.2 SL Verify] Hard Stop-Loss НЕ НАЙДЕН на бирже! Создаём отдельно...")
-                            stop_side = 'sell' if direction == 'LONG' else 'buy'
-                            try:
-                                await self.exchange.create_order(
-                                    formatted_symbol, 'stop', stop_side, actual_size, None,
-                                    {'stopPrice': sl_price, 'reduceOnly': True}
-                                )
-                                print(f"✅ [P0.2 SL Verify] Резервный Hard Stop-Loss успешно создан: {sl_price}")
-                            except Exception as sl_err:
-                                print(f"🚨 [P0.2 SL Verify] КРИТИЧЕСКАЯ ОШИБКА: не удалось создать SL! Аварийное закрытие позиции...")
-                                print(f"🚨 [P0.2 SL Verify] Ошибка: {sl_err}")
-                                # Emergency close
-                                try:
-                                    close_side = 'sell' if direction == 'LONG' else 'buy'
-                                    await self.exchange.create_market_order(formatted_symbol, close_side, actual_size, params={'reduceOnly': True})
-                                    print(f"🚨 [P0.2 SL Verify] Позиция аварийно закрыта из-за невозможности установить SL!")
-                                    return False
-                                except Exception as close_err:
-                                    print(f"🚨🚨🚨 [P0.2] НЕВОЗМОЖНО ЗАКРЫТЬ ПОЗИЦИЮ БЕЗ SL! ТРЕБУЕТСЯ РУЧНОЕ ВМЕШАТЕЛЬСТВО! Ошибка: {close_err}")
-                    except Exception as e:
-                        print(f"⚠️ [P0.2 SL Verify] Не удалось проверить наличие SL: {e}")
+                        await self.exchange.create_order(
+                            formatted_symbol, 'stop', stop_side, actual_size, None,
+                            {'stopPrice': sl_price, 'reduceOnly': True}
+                        )
+                        print(f"✅ [P0.2 SL] Hard Stop-Loss успешно создан: {sl_price}")
+                    except Exception as sl_err:
+                        print(f"🚨 [P0.2 SL] КРИТИЧЕСКАЯ ОШИБКА: не удалось создать SL! Аварийное закрытие позиции...")
+                        print(f"🚨 [P0.2 SL] Ошибка: {sl_err}")
+                        # Emergency close
+                        try:
+                            close_side = 'sell' if direction == 'LONG' else 'buy'
+                            await self.exchange.create_market_order(formatted_symbol, close_side, actual_size, params={'reduceOnly': True})
+                            print(f"🚨 [P0.2 SL] Позиция аварийно закрыта из-за невозможности установить SL!")
+                            return False
+                        except Exception as close_err:
+                            print(f"🚨🚨🚨 [P0.2] НЕВОЗМОЖНО ЗАКРЫТЬ ПОЗИЦИЮ БЕЗ SL! ТРЕБУЕТСЯ РУЧНОЕ ВМЕШАТЕЛЬСТВО! Ошибка: {close_err}")
+                            return False
+
+                # ═══ P0.2.1: IMMEDIATELY CREATE REDUCE-ONLY TP ═══
+                if tp_price and tp_price > 0:
+                    print(f"🎯 [P0.2 TP] Немедленное создание Hard Take-Profit: {tp_price}...")
+                    tp_side = 'sell' if direction == 'LONG' else 'buy'
+                    try:
+                        formatted_symbol = self._format_symbol(symbol)
+                        await self.exchange.create_order(
+                            formatted_symbol, 'take_profit', tp_side, actual_size, None,
+                            {'stopPrice': tp_price, 'reduceOnly': True}
+                        )
+                        print(f"✅ [P0.2 TP] Hard Take-Profit успешно создан: {tp_price}")
+                    except Exception as tp_err:
+                        print(f"⚠️ [P0.2 TP] Не удалось создать аппаратный TP ({tp_err}). Будет работать только программный Keeper TP.")
 
             else:
                 actual_size = size_base
@@ -596,7 +593,8 @@ class KrakenTradingService:
                 print(f"✅ [State Sync] Восстановлено {restored_count} позиций из Kraken.")
                 
         except Exception as e:
-            print(f"⚠️ [State Sync] Ошибка синхронизации позиций: {e}")
+            print(f"🚨 [State Sync] Ошибка синхронизации позиций: {e}")
+            raise RuntimeError(f"FAIL-OPEN PREVENTED: Синхронизация с Kraken не удалась ({e}). Торговля приостановлена.")
 
     async def check_and_update_positions(self, symbol: str, current_price: float) -> List[Dict[str, Any]]:
         """
