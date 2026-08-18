@@ -38,7 +38,6 @@ class Config:
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     
     # Лимиты риск-менеджера
-    MAX_MARGIN_PCT: float = float(os.getenv("MAX_MARGIN_PCT", "0.5"))
     MAX_CONCURRENT_POSITIONS: int = int(os.getenv("MAX_CONCURRENT_POSITIONS", "2"))
     
     # Расширенные лимиты Risk Manager
