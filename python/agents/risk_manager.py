@@ -126,9 +126,6 @@ class RiskManager(BaseAgent):
                 elif last_three[-2:] == ["LOSS", "LOSS"]:
                     dynamic_risk_pct = risk_pct * 0.5
                     self.logger.warning(f"[{self.name}] DRAWDOWN PROTECTION: 2 losses in a row. Risk cut to {dynamic_risk_pct*100}%.")
-                elif last_three[-2:] == ["WIN", "WIN"]:
-                    dynamic_risk_pct = min(risk_pct * 1.4, 0.07) # Boost risk, max 7%
-                    self.logger.info(f"[{self.name}] KELLY CRITERION: 2 wins in a row. Risk boosted to {dynamic_risk_pct*100}%.")
             
             # ═══ 1. Liquidation Price Check & Finalize SL ═══
             derivatives_data = market_data.get("derivatives_data", {})
@@ -171,8 +168,9 @@ class RiskManager(BaseAgent):
                 contracts = notional_usd / current_price if current_price > 0 else 0
             
             # Fee and Funding Impact on RR
-            fee_pct = 0.0005 * 2 # Open + Close
-            funding_pct = 0.0001
+            derivatives_data = market_data.get("derivatives_data", {})
+            fee_pct = float(derivatives_data.get("taker_fee_pct", 0.0005)) * 2 # Open + Close
+            funding_pct = abs(float(derivatives_data.get("funding_rate", 0.0001)))
             
             # ═══ 4. Max Position Size Guard ═══
             # max_notional = max_margin_pct * total_balance * leverage
