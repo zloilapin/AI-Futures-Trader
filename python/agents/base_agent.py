@@ -36,7 +36,13 @@ class BaseAgent:
                 return parsed
                 
             self.logger.warning(f"[{self.name}] Попытка {attempt+1} провалилась из-за формата JSON. Повтор...")
-            current_prompt += f"\n\n[SYSTEM ERROR]: Your previous output failed JSON validation: {parsed.get('reasoning')}. Please correct the formatting and output STRICTLY valid JSON."
+            error_reason = parsed.get("reasoning", "")
+            
+            # Smart retry: если JSON обрезан по лимиту, просим LLM писать короче
+            if "Expecting" in error_reason or "Unterminated" in error_reason or "line" in error_reason:
+                current_prompt += f"\n\n[SYSTEM ERROR]: Your previous output failed JSON validation because it was truncated ({error_reason}). KEEP YOUR REASONING EXTREMELY CONCISE (max 1-2 sentences) to ensure the JSON object is fully closed."
+            else:
+                current_prompt += f"\n\n[SYSTEM ERROR]: Your previous output failed JSON validation: {error_reason}. Please correct the formatting and output STRICTLY valid JSON."
             
         return {"signal": "ERROR", "reasoning": "Failed to generate valid JSON after retries."}
 
