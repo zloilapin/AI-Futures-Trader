@@ -200,34 +200,29 @@ class RiskManager(BaseAgent):
                 approved = False
                 veto_category = "MAX_MARGIN"
 
-            # ═══ 6. Verify Actual Risk ═══
-            actual_risk_usd = contracts * distance_to_sl
-            if actual_risk_usd > risk_amount_usd and approved is not False:
-                self.logger.warning(f"[{self.name}] ❌ RISK VETO: Actual risk ${actual_risk_usd:.2f} exceeds allowed risk ${risk_amount_usd:.2f}.")
-                approved = False
-                veto_category = "EXCESSIVE_RISK"
+            # ═══ 6. Rounding & Final Math Alignment ═══
+            contracts = round(contracts, 6)
+            notional_usd = round(contracts * current_price, 2)
+            margin_usd = round(notional_usd / leverage if leverage > 0 else notional_usd, 2)
+            margin_pct = round((margin_usd / total_balance) * 100 if total_balance > 0 else 0, 2)
             
-            # ═══ Derived fields ═══
-            # margin_usd = collateral locked by the exchange
-            margin_usd = notional_usd / leverage if leverage > 0 else notional_usd
-            # margin_pct = what % of our balance is locked as margin
-            margin_pct = (margin_usd / total_balance) * 100 if total_balance > 0 else 0
+            risk_amount_usd = round(risk_amount_usd, 2)
+            sl_price = round(sl_price, 6)
+            tp_price = round(tp_price, 6)
+            liq_price = round(liq_price, 6)
             
             # RR adjusted for fees
             effective_tp_dist = distance_to_tp - (current_price * (fee_pct + funding_pct))
             effective_sl_dist = distance_to_sl + (current_price * (fee_pct + funding_pct))
-            rr_ratio = effective_tp_dist / effective_sl_dist if effective_sl_dist > 0 else 0
+            rr_ratio = round(effective_tp_dist / effective_sl_dist if effective_sl_dist > 0 else 0, 2)
             
-            # Round for clean output
-            risk_amount_usd = round(risk_amount_usd, 2)
-            notional_usd = round(notional_usd, 2)
-            margin_usd = round(margin_usd, 2)
-            contracts = round(contracts, 6)
-            margin_pct = round(margin_pct, 2)
-            sl_price = round(sl_price, 6)
-            tp_price = round(tp_price, 6)
-            liq_price = round(liq_price, 6)
-            rr_ratio = round(rr_ratio, 2)
+            # ═══ 7. Verify Actual Risk (using rounded contracts) ═══
+            actual_risk_usd = contracts * distance_to_sl
+            # Add a small 0.01 tolerance for floating point rounding noise
+            if actual_risk_usd > (risk_amount_usd + 0.01) and approved is not False:
+                self.logger.warning(f"[{self.name}] ❌ RISK VETO: Actual risk ${actual_risk_usd:.2f} exceeds allowed risk ${risk_amount_usd:.2f}.")
+                approved = False
+                veto_category = "EXCESSIVE_RISK"
             
             if approved is not False: # If not vetoed earlier
                 approved = True
