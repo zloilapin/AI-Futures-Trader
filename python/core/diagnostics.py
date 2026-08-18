@@ -83,7 +83,8 @@ class DiagnosticTracker:
             "MIN_NOTIONAL",
             "MAX_MARGIN",
             "NO_SIGNAL",
-            "FETCH_ERROR"
+            "FETCH_ERROR",
+            "AGENT_ERROR"
         ]
         
         # Create a unified dictionary of all rejections (expected + any others dynamically added)

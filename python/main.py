@@ -217,10 +217,43 @@ async def run_single_cycle(
         
         # Tag each report with agent_name for the deterministic CEO voting engine
         valid_reports = []
+        has_critical_error = False
+        
         for agent, report in zip(analyst_list, reports):
-            if isinstance(report, dict) and report.get("signal") != "ERROR":
+            if isinstance(report, Exception):
+                logger.error(f"[Stage 3] Критическая ошибка агента {agent.name}: {report}")
+                has_critical_error = True
+                break
+                
+            if isinstance(report, dict):
+                if report.get("signal") == "ERROR":
+                    logger.error(f"[Stage 3] Агент {agent.name} вернул статус ERROR. Данные недоступны.")
+                    has_critical_error = True
+                    break
                 report["agent_name"] = agent.name
                 valid_reports.append(report)
+            else:
+                logger.error(f"[Stage 3] Агент {agent.name} вернул некорректный ответ.")
+                has_critical_error = True
+                break
+                
+        if has_critical_error:
+            msg = f"🛑 Пропуск {symbol}. Причина: Ошибка одного из критических агентов (Strict Fallback)."
+            print(msg)
+            logger.info(f"[System_Core] {msg}")
+            scan_summaries.append({
+                "symbol": symbol,
+                "decision": "HOLD",
+                "conviction": 0,
+                "scanner_status": "✅ OK" if not scanner_blocked else "⚠️ ЗАБЛОКИРОВАН СКАНЕРОМ",
+                "scanner_reason": None if not scanner_blocked else scanner_reason,
+                "risk_approved": False,
+                "risk_reason": "Strict Fallback: критическая ошибка агента",
+                "ceo_reasoning": "Bypassed (Agent Error)",
+                "status": "🛑 ОШИБКА АГЕНТА"
+            })
+            tracker.record_rejection("AGENT_ERROR")
+            continue
 
         # --- PRE-CEO FILTER ---
         # Экономим токены Llama 70B: если все базовые агенты нейтральны, пропускаем актив
