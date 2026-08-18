@@ -358,11 +358,12 @@ class KrakenTradingService:
                     stop_side = 'sell' if direction == 'LONG' else 'buy'
                     try:
                         formatted_symbol = self._format_symbol(symbol)
-                        await self.exchange.create_order(
+                        sl_order = await self.exchange.create_order(
                             formatted_symbol, 'stop', stop_side, actual_size, None,
                             {'stopPrice': sl_price, 'reduceOnly': True}
                         )
-                        print(f"✅ [P0.2 SL] Hard Stop-Loss успешно создан: {sl_price}")
+                        sl_order_id = sl_order.get('id')
+                        print(f"✅ [P0.2 SL] Hard Stop-Loss успешно создан: {sl_price} (ID: {sl_order_id})")
                     except Exception as sl_err:
                         print(f"🚨 [P0.2 SL] КРИТИЧЕСКАЯ ОШИБКА: не удалось создать SL! Аварийное закрытие позиции...")
                         print(f"🚨 [P0.2 SL] Ошибка: {sl_err}")
@@ -382,20 +383,24 @@ class KrakenTradingService:
                     tp_side = 'sell' if direction == 'LONG' else 'buy'
                     try:
                         formatted_symbol = self._format_symbol(symbol)
-                        await self.exchange.create_order(
+                        tp_order = await self.exchange.create_order(
                             formatted_symbol, 'take_profit', tp_side, actual_size, None,
                             {'stopPrice': tp_price, 'reduceOnly': True}
                         )
-                        print(f"✅ [P0.2 TP] Hard Take-Profit успешно создан: {tp_price}")
+                        tp_order_id = tp_order.get('id')
+                        print(f"✅ [P0.2 TP] Hard Take-Profit успешно создан: {tp_price} (ID: {tp_order_id})")
                     except Exception as tp_err:
                         print(f"🚨 [P0.2 TP] КРИТИЧЕСКАЯ ОШИБКА: не удалось создать TP! Аварийное закрытие позиции и отмена SL...")
                         print(f"🚨 [P0.2 TP] Ошибка: {tp_err}")
                         try:
                             # 1. Отменяем созданный SL
-                            open_orders = await self.exchange.fetch_open_orders(formatted_symbol)
-                            for order in open_orders:
-                                if order.get('type') in ('stop', 'stop-loss', 'stopMarket'):
-                                    await self.exchange.cancel_order(order['id'], formatted_symbol)
+                            if sl_order_id:
+                                await self.exchange.cancel_order(sl_order_id, formatted_symbol)
+                            else:
+                                open_orders = await self.exchange.fetch_open_orders(formatted_symbol)
+                                for order in open_orders:
+                                    if order.get('type') in ('stop', 'stop-loss', 'stopMarket'):
+                                        await self.exchange.cancel_order(order['id'], formatted_symbol)
                             
                             # 2. Закрываем саму позицию
                             close_side = 'sell' if direction == 'LONG' else 'buy'
@@ -430,7 +435,8 @@ class KrakenTradingService:
                                     needs_adjustment = True
                                 
                                 if needs_adjustment:
-                                    await self._update_exchange_sl(symbol, direction, sl_price, actual_size)
+                                    new_sl_id = await self._update_exchange_sl(symbol, direction, sl_price, actual_size, current_sl_id=sl_order_id)
+                                    if new_sl_id: sl_order_id = new_sl_id
                             break
                 except Exception as liq_err:
                     print(f"⚠️ [P1 Auth Check] Не удалось проверить реальную цену ликвидации: {liq_err}")
@@ -448,6 +454,8 @@ class KrakenTradingService:
                 "size_base": actual_size,
                 "tp_price": tp_price,
                 "sl_price": sl_price,
+                "tp_order_id": tp_order_id,
+                "sl_order_id": sl_order_id,
                 "breakeven_activated": False,
                 "is_virtual": is_virtual,
                 "timestamp": time.time()
@@ -456,21 +464,43 @@ class KrakenTradingService:
             return True
         return False
 
-    async def _update_exchange_sl(self, symbol: str, direction: str, new_sl: float, size_base: float):
+    async def _update_exchange_sl(self, symbol: str, direction: str, new_sl: float, size_base: float, current_sl_id: str = None):
         try:
             formatted_symbol = self._format_symbol(symbol) if hasattr(self, '_format_symbol') else symbol
-            # Cancel all existing stop orders for this symbol first
-            open_orders = await self.exchange.fetch_open_orders(formatted_symbol)
-            for order in open_orders:
-                if order.get('type') == 'stop' or order.get('type') == 'stop-loss' or order.get('type') == 'stopMarket':
-                    await self.exchange.cancel_order(order['id'], formatted_symbol)
+            
+            # Use provided ID or look up in active_positions
+            sl_id_to_cancel = current_sl_id
+            if not sl_id_to_cancel and symbol in self.active_positions:
+                sl_id_to_cancel = self.active_positions[symbol].get("sl_order_id")
+                
+            if sl_id_to_cancel:
+                try:
+                    await self.exchange.cancel_order(sl_id_to_cancel, formatted_symbol)
+                except Exception as cancel_err:
+                    print(f"⚠️ [KrakenTradingService] Не удалось отменить старый SL {sl_id_to_cancel}: {cancel_err}")
+            else:
+                # Fallback: cancel all stop orders if we don't know the ID
+                open_orders = await self.exchange.fetch_open_orders(formatted_symbol)
+                for order in open_orders:
+                    if order.get('type') in ('stop', 'stop-loss', 'stopMarket'):
+                        await self.exchange.cancel_order(order['id'], formatted_symbol)
                     
             # Create a new stop loss order
             stop_side = 'sell' if direction == 'LONG' else 'buy'
-            await self.exchange.create_order(formatted_symbol, 'stop', stop_side, size_base, None, {'stopPrice': new_sl, 'reduceOnly': True})
-            print(f"✅ [KrakenTradingService] Успешно обновлен Hard Stop-Loss на бирже: {new_sl} для {symbol}")
+            new_order = await self.exchange.create_order(formatted_symbol, 'stop', stop_side, size_base, None, {'stopPrice': new_sl, 'reduceOnly': True})
+            new_sl_id = new_order.get('id')
+            
+            # Update active_positions if we already track it
+            if symbol in self.active_positions:
+                self.active_positions[symbol]["sl_order_id"] = new_sl_id
+                self.active_positions[symbol]["sl_price"] = new_sl
+                self._save_positions()
+                
+            print(f"✅ [KrakenTradingService] Успешно обновлен Hard Stop-Loss на бирже: {new_sl} (ID: {new_sl_id}) для {symbol}")
+            return new_sl_id
         except Exception as e:
             print(f"⚠️ [KrakenTradingService] Ошибка при обновлении Hard Stop-Loss на бирже: {e}")
+            return None
 
     async def sync_with_exchange(self):
         """
@@ -582,6 +612,8 @@ class KrakenTradingService:
                     # Best-effort SL/TP recovery from open conditional orders
                     sl_price = 0.0
                     tp_price = 0.0
+                    sl_order_id = None
+                    tp_order_id = None
                     try:
                         open_orders = await self.exchange.fetch_open_orders(ex_symbol)
                         for order in open_orders:
@@ -592,8 +624,10 @@ class KrakenTradingService:
                             
                             if order_type in ('stop', 'stop-loss', 'stopmarket', 'stop_loss_limit'):
                                 sl_price = trigger
+                                sl_order_id = order.get('id')
                             elif order_type in ('take_profit', 'takeprofit', 'takeprofitmarket', 'take_profit_limit'):
                                 tp_price = trigger
+                                tp_order_id = order.get('id')
                     except Exception as e:
                         print(f"⚠️ [State Sync] Не удалось загрузить ордера для {ex_symbol}: {e}")
                         raise RuntimeError(f"Невозможно проверить наличие SL для {ex_symbol}. Прерывание синхронизации (защита от ложного закрытия).")
@@ -621,6 +655,8 @@ class KrakenTradingService:
                         "size_base": size_base,
                         "tp_price": tp_price,
                         "sl_price": sl_price,
+                        "tp_order_id": tp_order_id,
+                        "sl_order_id": sl_order_id,
                         "breakeven_activated": False,
                         "is_virtual": False,
                         "timestamp": time.time(),
