@@ -264,8 +264,20 @@ class KrakenTradingService:
             print(f"❌ [KrakenTradingService] Ошибка сети при отправке ордера: {e}")
             return None
 
+    def _get_symbol_lock(self, symbol: str) -> asyncio.Lock:
+        if not hasattr(self, '_symbol_locks'):
+            self._symbol_locks = {}
+        if symbol not in self._symbol_locks:
+            self._symbol_locks[symbol] = asyncio.Lock()
+        return self._symbol_locks[symbol]
 
-    async def open_position(self, symbol: str, direction: str, entry_price: float, notional_usd: float, tp_price: float, sl_price: float, leverage: int = 1, is_virtual: bool = False):
+    async def open_position(self, symbol: str, *args, **kwargs):
+        """Wrapper for open_position that ensures strict concurrency isolation per symbol."""
+        lock = self._get_symbol_lock(symbol)
+        async with lock:
+            return await self._open_position_impl(symbol, *args, **kwargs)
+
+    async def _open_position_impl(self, symbol: str, direction: str, entry_price: float, notional_usd: float, tp_price: float, sl_price: float, leverage: int = 1, is_virtual: bool = False):
         """
         Calculates position size in base currency and opens a Market order via Kraken Futures API.
         If is_virtual is True, skips the API call and simulates the trade.
