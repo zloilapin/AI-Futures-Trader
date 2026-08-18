@@ -347,14 +347,34 @@ class KrakenTradingService:
 
                 actual_size = filled if (filled and filled > 0) else (order_result.get('amount') or size_base)
                 
-                # Проверка проскальзывания и обновление entry_price
+                # Проверка проскальзывания и валидация RR
                 fill_price = order_result.get('average') or order_result.get('price') or entry_price
                 if fill_price > 0 and abs(fill_price - entry_price) / entry_price > 0.0001:
                     print(f"⚠️ [KrakenTradingService] Slippage detected! Planned: {entry_price}, Actual: {fill_price}")
-                    slippage_diff = fill_price - entry_price
-                    if tp_price: tp_price = tp_price + slippage_diff
-                    if sl_price: sl_price = sl_price + slippage_diff
-                    print(f"🔄 [KrakenTradingService] Уровни скорректированы из-за проскальзывания. Новый SL: {sl_price:.4f}, Новый TP: {tp_price:.4f}")
+                    
+                    if sl_price and tp_price:
+                        new_dist_sl = abs(fill_price - sl_price)
+                        new_dist_tp = abs(tp_price - fill_price)
+                        old_dist_sl = abs(entry_price - sl_price)
+                        old_dist_tp = abs(tp_price - entry_price)
+                        
+                        is_sl_crossed = (direction == 'LONG' and fill_price <= sl_price) or (direction == 'SHORT' and fill_price >= sl_price)
+                        new_rr = (new_dist_tp / new_dist_sl) if new_dist_sl > 0 else 0
+                        old_rr = (old_dist_tp / old_dist_sl) if old_dist_sl > 0 else 0
+                        
+                        print(f"🔄 [KrakenTradingService] RR degraded from {old_rr:.2f} to {new_rr:.2f} due to slippage.")
+                        
+                        if is_sl_crossed or (old_rr >= 1.0 and new_rr < 1.0):
+                            print(f"🚨 [KrakenTradingService] ФАТАЛЬНОЕ ПРОСКАЛЬЗЫВАНИЕ! RR < 1.0 или пробит SL. Выполняется Emergency Close...")
+                            try:
+                                close_side = 'sell' if direction == 'LONG' else 'buy'
+                                await self.exchange.create_market_order(formatted_symbol, close_side, actual_size, params={'reduceOnly': True})
+                                print(f"🚨 [KrakenTradingService] Позиция ликвидирована. Убыток зафиксирован.")
+                                return False
+                            except Exception as close_err:
+                                print(f"🚨🚨🚨 НЕ УДАЛОСЬ ЗАКРЫТЬ ПОЗИЦИЮ ПРИ ФАТАЛЬНОМ ПРОСКАЛЬЗЫВАНИИ! {close_err}")
+                                return False
+                                
                     entry_price = float(fill_price)
 
                 # ═══ P0.2: IMMEDIATELY CREATE REDUCE-ONLY SL ═══
