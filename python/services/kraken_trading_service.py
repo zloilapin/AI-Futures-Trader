@@ -434,10 +434,7 @@ class KrakenTradingService:
                             if sl_order_id:
                                 await self.exchange.cancel_order(sl_order_id, formatted_symbol)
                             else:
-                                open_orders = await self.exchange.fetch_open_orders(formatted_symbol)
-                                for order in open_orders:
-                                    if order.get('type') in ('stop', 'stop-loss', 'stopMarket'):
-                                        await self.exchange.cancel_order(order['id'], formatted_symbol)
+                                print(f"⚠️ [P0.2 TP] Невозможно отменить SL, так как ID неизвестен. Запускаю рыночное закрытие...")
                             
                             # 2. Закрываем саму позицию
                             close_side = 'sell' if direction == 'LONG' else 'buy'
@@ -517,11 +514,7 @@ class KrakenTradingService:
                 except Exception as cancel_err:
                     print(f"⚠️ [KrakenTradingService] Не удалось отменить старый SL {sl_id_to_cancel}: {cancel_err}")
             else:
-                # Fallback: cancel all stop orders if we don't know the ID
-                open_orders = await self.exchange.fetch_open_orders(formatted_symbol)
-                for order in open_orders:
-                    if order.get('type') in ('stop', 'stop-loss', 'stopMarket'):
-                        await self.exchange.cancel_order(order['id'], formatted_symbol)
+                print(f"⚠️ [KrakenTradingService] SL ID неизвестен для {symbol}. Создаю новый SL без отмены старого...")
                     
             # Create a new stop loss order
             stop_side = 'sell' if direction == 'LONG' else 'buy'
