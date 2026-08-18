@@ -388,7 +388,23 @@ class KrakenTradingService:
                         )
                         print(f"✅ [P0.2 TP] Hard Take-Profit успешно создан: {tp_price}")
                     except Exception as tp_err:
-                        print(f"⚠️ [P0.2 TP] Не удалось создать аппаратный TP ({tp_err}). Будет работать только программный Keeper TP.")
+                        print(f"🚨 [P0.2 TP] КРИТИЧЕСКАЯ ОШИБКА: не удалось создать TP! Аварийное закрытие позиции и отмена SL...")
+                        print(f"🚨 [P0.2 TP] Ошибка: {tp_err}")
+                        try:
+                            # 1. Отменяем созданный SL
+                            open_orders = await self.exchange.fetch_open_orders(formatted_symbol)
+                            for order in open_orders:
+                                if order.get('type') in ('stop', 'stop-loss', 'stopMarket'):
+                                    await self.exchange.cancel_order(order['id'], formatted_symbol)
+                            
+                            # 2. Закрываем саму позицию
+                            close_side = 'sell' if direction == 'LONG' else 'buy'
+                            await self.exchange.create_market_order(formatted_symbol, close_side, actual_size, params={'reduceOnly': True})
+                            print(f"🚨 [P0.2 TP] Позиция аварийно закрыта из-за невозможности установить TP!")
+                            return False
+                        except Exception as close_err:
+                            print(f"🚨🚨🚨 [P0.2] НЕВОЗМОЖНО ЗАКРЫТЬ ПОЗИЦИЮ ПРИ ОШИБКЕ TP! ТРЕБУЕТСЯ РУЧНОЕ ВМЕШАТЕЛЬСТВО! Ошибка: {close_err}")
+                            return False
 
             else:
                 actual_size = size_base
