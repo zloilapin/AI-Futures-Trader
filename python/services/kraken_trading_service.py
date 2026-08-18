@@ -310,6 +310,10 @@ class KrakenTradingService:
         
         # Execute trade
         order_result = True
+        entry_order_id = None
+        sl_order_id = None
+        tp_order_id = None
+        
         if not is_virtual:
             # We do NOT pass sl_price and tp_price here, to ensure we create them immediately after and verify creation synchronously
             order_result = await self._execute_market_order(symbol, direction, size_base, leverage, sl_price=None, tp_price=None)
@@ -319,6 +323,7 @@ class KrakenTradingService:
                 remaining = order_result.get('remaining', 0.0)
                 status = order_result.get('status')
                 fee_info = order_result.get('fee')
+                entry_order_id = order_result.get('id')
                 formatted_symbol = self._format_symbol(symbol)
                 
                 if status == 'open' and remaining > 0:
@@ -454,6 +459,7 @@ class KrakenTradingService:
                 "size_base": actual_size,
                 "tp_price": tp_price,
                 "sl_price": sl_price,
+                "entry_order_id": entry_order_id,
                 "tp_order_id": tp_order_id,
                 "sl_order_id": sl_order_id,
                 "breakeven_activated": False,
@@ -609,6 +615,9 @@ class KrakenTradingService:
                     # Derive short symbol key (e.g. "BTC" from "BTC/USD:USD")
                     short_symbol = ex_symbol.split('/')[0] if '/' in ex_symbol else ex_symbol
                     
+                    # Try to extract entry order id if available in info
+                    entry_order_id = ex_pos.get('info', {}).get('order_id')
+                    
                     # Best-effort SL/TP recovery from open conditional orders
                     sl_price = 0.0
                     tp_price = 0.0
@@ -655,6 +664,7 @@ class KrakenTradingService:
                         "size_base": size_base,
                         "tp_price": tp_price,
                         "sl_price": sl_price,
+                        "entry_order_id": entry_order_id,
                         "tp_order_id": tp_order_id,
                         "sl_order_id": sl_order_id,
                         "breakeven_activated": False,
