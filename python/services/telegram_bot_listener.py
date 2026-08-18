@@ -333,6 +333,9 @@ class TelegramBotListener:
             except asyncio.TimeoutError:
                 # Нормальный таймаут long-polling, просто повторяем
                 continue
+            except aiohttp.ClientError as e:
+                print(f"🔌 [TelegramListener] Ошибка сети (возможно пропал интернет): {e}. Повтор через 15с...")
+                await asyncio.sleep(15)
             except Exception as e:
                 print(f"❌ [TelegramListener] Ошибка в цикле polling: {type(e).__name__}: {e}")
                 traceback.print_exc()

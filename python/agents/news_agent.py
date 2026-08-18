@@ -30,4 +30,4 @@ class NewsAgent(BaseAgent):
         data_string = json.dumps(payload, indent=2)
         full_prompt = f"{self.system_instruction}\n\nMarket Sentiment Data:\n{data_string}"
         
-        return await self.generate_json(full_prompt)
+        return await self.generate_json(full_prompt, required_keys=["signal", "confidence", "reasoning"])

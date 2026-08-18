@@ -46,12 +46,14 @@ class CEOAgent(BaseAgent):
         
         llm_response = {}
         try:
-            llm_response = await self.generate_json(full_prompt)
+            llm_response = await self.generate_json(full_prompt, required_keys=["decision", "conviction", "reasoning_en"])
         except Exception as e:
             self.logger.warning(f"[{self.name}] Primary LLM failed: {e}")
-            return {"decision": "HOLD", "conviction": 0, "hold_category": "LLM_ERROR", "reasoning_en": f"Primary LLM failed: {e}"}
+            return {"decision": "ERROR", "conviction": 0, "hold_category": "LLM_ERROR", "reasoning_en": f"Primary LLM failed: {e}"}
 
-        decision = str(llm_response.get("decision", "NO_SIGNAL")).upper()
+        decision = str(llm_response.get("decision", "ERROR")).upper()
+        if decision == "ERROR":
+            return {"decision": "ERROR", "conviction": 0, "hold_category": "LLM_ERROR", "reasoning_en": llm_response.get("reasoning", "LLM Error")}
         
         try:
             conviction = int(llm_response.get("conviction", 0))
@@ -93,10 +95,13 @@ SCHEMA:
                     # Temporary swap of llm_client for generate_json retry wrapper
                     original_llm = self.llm_client
                     self.llm_client = self.escalation_llm
-                    k3_response = await self.generate_json(escalation_prompt)
+                    k3_response = await self.generate_json(escalation_prompt, required_keys=["decision", "conviction", "reasoning_en"])
                     self.llm_client = original_llm
                     
-                    decision = str(k3_response.get("decision", "NO_SIGNAL")).upper()
+                    decision = str(k3_response.get("decision", "ERROR")).upper()
+                    if decision == "ERROR":
+                        raise ValueError("K3 returned ERROR")
+                        
                     try:
                         conviction = int(k3_response.get("conviction", 0))
                     except (ValueError, TypeError):
@@ -109,9 +114,9 @@ SCHEMA:
                     print(f"🧠 [Kimi K3] Вердикт: {decision} ({conviction}%)")
                 except Exception as e:
                     self.logger.error(f"[{self.name}] Escalation LLM failed: {e}")
-                    decision = "HOLD"
+                    decision = "ERROR"
                     conviction = 0
-                    reasoning += f"\n\n[ESCALATION FAILED: {e}. Defaulting to HOLD.]"
+                    reasoning += f"\n\n[ESCALATION FAILED: {e}. Strict Fallback triggered.]"
             else:
                 self.logger.info(f"[{self.name}] Low conviction ({conviction}% < 55%). Forcing HOLD.")
                 print(f"🛑 [CEO] Слишком низкая уверенность ({conviction}%). Отмена сделки (HOLD).")

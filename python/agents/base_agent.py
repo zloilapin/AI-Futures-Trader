@@ -1,15 +1,15 @@
 import json
-import re
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 # Импорты ядра
 from core.logger import TradeLogger
 from core.llm_client import LLMClient
+from core.llm_parser import LLMStructuredOutputParser
 
 class BaseAgent:
     """
     Базовый класс для всех ИИ-агентов системы.
-    Предоставляет общие зависимости и надежную утилиту для парсинга JSON.
+    Предоставляет общие зависимости и надежную утилиту для генерации и валидации JSON.
     """
     def __init__(self, name: str, logger: TradeLogger, llm_client: LLMClient):
         self.name = name
@@ -22,67 +22,30 @@ class BaseAgent:
         """
         raise NotImplementedError("Дочерний класс должен реализовать метод analyze()")
 
-    async def generate_json(self, prompt: str, max_retries: int = 3) -> Dict[str, Any]:
+    async def generate_json(self, prompt: str, required_keys: List[str] = None, max_retries: int = 3) -> Dict[str, Any]:
         """
         Generates and parses JSON from the LLM. If parsing fails, retries by appending
-        the error to the prompt.
+        the specific error to the prompt.
         """
         current_prompt = prompt
+        if required_keys:
+            current_prompt += f"\n\n[SCHEMA REQUIRED]: You MUST return a JSON object with EXACTLY these keys: {', '.join(required_keys)}"
+            
         for attempt in range(max_retries):
             response_text = await self.llm_client.generate(current_prompt)
-            parsed = self._parse_json(response_text)
-            
-            if parsed.get("signal") != "ERROR" or attempt == max_retries - 1:
+            try:
+                parsed = LLMStructuredOutputParser.parse_and_validate(response_text, required_keys)
                 return parsed
+            except ValueError as e:
+                self.logger.warning(f"[{self.name}] Попытка {attempt+1}/{max_retries} провалилась из-за формата JSON: {e}")
+                error_msg = str(e)
                 
-            self.logger.warning(f"[{self.name}] Попытка {attempt+1} провалилась из-за формата JSON. Повтор...")
-            error_reason = parsed.get("reasoning", "")
-            
-            # Smart retry: если JSON обрезан по лимиту, просим LLM писать короче
-            if "Expecting" in error_reason or "Unterminated" in error_reason or "line" in error_reason:
-                current_prompt += f"\n\n[SYSTEM ERROR]: Your previous output failed JSON validation because it was truncated ({error_reason}). KEEP YOUR REASONING EXTREMELY CONCISE (max 1-2 sentences) to ensure the JSON object is fully closed."
-            else:
-                current_prompt += f"\n\n[SYSTEM ERROR]: Your previous output failed JSON validation: {error_reason}. Please correct the formatting and output STRICTLY valid JSON."
-            
-        return {"signal": "ERROR", "reasoning": "Failed to generate valid JSON after retries."}
-
-    def _parse_json(self, response_text: str) -> Dict[str, Any]:
-        """
-        Утилита для очистки и парсинга ответа от LLM с защитой от ошибок формата.
-        """
-        if not response_text:
-            self.logger.error(f"[{self.name}] Получен пустой ответ от LLM.")
-            return {"signal": "ERROR", "reasoning": "Empty response from LLM"}
-
-        try:
-            clean_text = response_text.strip()
-            
-            # 1. Поиск блока JSON внутри markdown ограждений
-            matches = re.findall(r"```(?:json)?(.*?)```", clean_text, re.DOTALL | re.IGNORECASE)
-            if matches:
-                clean_text = matches[-1].strip()
-            else:
-                # 2. Если ограждений нет, ищем от первой { до последней }
-                start_idx = clean_text.find('{')
-                end_idx = clean_text.rfind('}')
-                if start_idx != -1 and end_idx != -1:
-                    clean_text = clean_text[start_idx:end_idx+1]
-
-            parsed = json.loads(clean_text)
-            if isinstance(parsed, list):
-                if len(parsed) > 0 and isinstance(parsed[0], dict):
-                    parsed = parsed[0]
+                # Smart retry logic
+                if "Expecting" in error_msg or "Unterminated" in error_msg:
+                    current_prompt += f"\n\n[SYSTEM ERROR]: Output truncated. {error_msg}. KEEP REASONING EXTREMELY CONCISE. RETURN VALID CLOSED JSON."
                 else:
-                    return {"signal": "ERROR", "reasoning": "LLM returned a list instead of JSON object"}
-            elif not isinstance(parsed, dict):
-                return {"signal": "ERROR", "reasoning": f"LLM returned non-dict: {type(parsed).__name__}"}
-            return parsed
-            
-        except json.JSONDecodeError as e:
-            self.logger.error(f"[{self.name}] Ошибка парсинга JSON: {e}. Сырой текст: {response_text}")
-            return {
-                "signal": "ERROR", 
-                "reasoning": f"Failed to parse JSON response: {e}",
-                "raw_response": response_text
-            }
+                    current_prompt += f"\n\n[SYSTEM ERROR]: Schema/JSON error: {error_msg}. OUTPUT VALID JSON ONLY."
+        
+        self.logger.error(f"[{self.name}] Фатальная ошибка: Не удалось сгенерировать валидный JSON после {max_retries} попыток.")
+        return {"signal": "ERROR", "decision": "ERROR", "reasoning": "LLM failed to produce valid JSON after retries."}
             

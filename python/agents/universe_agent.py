@@ -24,6 +24,7 @@ class UniverseAgent(BaseAgent):
         """
         self.logger.info(f"[{self.name}] Сканирование широкого рынка для отбора активов...")
         
+
         # Данные по всему рынку (топ объемов, лидеры роста/падения)
         data_string = json.dumps(broad_market_data, indent=2)
         
@@ -31,4 +32,4 @@ class UniverseAgent(BaseAgent):
         full_prompt = f"{self.system_instruction}\n\nBroad Market Data:\n{data_string}"
         
         # Отправляем в LLM
-        return await self.generate_json(full_prompt)
+        return await self.generate_json(full_prompt, required_keys=["selected_symbols", "reasoning"])

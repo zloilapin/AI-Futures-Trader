@@ -80,7 +80,10 @@ class ReflectorAgent(BaseAgent):
         data_string = json.dumps(payload, indent=2)
         full_prompt = f"{self.system_instruction}\n\nClosed Trade Data:\n{data_string}"
         
-        reflection = await self.generate_json(full_prompt)
+        reflection = await self.generate_json(
+            full_prompt, 
+            required_keys=["symbol", "reasoning", "root_cause", "actionable_rule", "trade_outcome"]
+        )
         
         if reflection and reflection.get("actionable_rule"):
             self._save_lesson(reflection)
