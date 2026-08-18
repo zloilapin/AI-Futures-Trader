@@ -46,7 +46,7 @@ class CEOAgent(BaseAgent):
         
         llm_response = {}
         try:
-            llm_response = await self.generate_json(full_prompt, required_keys=["decision", "conviction", "reasoning_en"])
+            llm_response = await self.generate_json(full_prompt, required_keys=["decision", "conviction", "reasoning_en", "hold_category"])
         except Exception as e:
             self.logger.warning(f"[{self.name}] Primary LLM failed: {e}")
             return {"decision": "ERROR", "conviction": 0, "hold_category": "LLM_ERROR", "reasoning_en": f"Primary LLM failed: {e}"}
@@ -64,6 +64,8 @@ class CEOAgent(BaseAgent):
         
         self.logger.info(f"[{self.name}] Primary CEO Llama 70B Decision: {decision} (Conf: {conviction}%)")
         print(f"👔 [CEO Llama 70B] {decision} ({conviction}%)")
+        
+        final_hold_category = llm_response.get("hold_category", "NONE")
         
         # ESCALATION MODEL LOGIC
         if decision in ["LONG", "SHORT"]:
@@ -88,19 +90,23 @@ SCHEMA:
 {{
   "decision": "LONG" | "SHORT" | "HOLD",
   "conviction": <int 1-100>,
-  "reasoning_en": "<your detailed escalation review reasoning>"
+  "reasoning_en": "<your detailed escalation review reasoning>",
+  "hold_category": "CEO_HOLD_MTF_CONFLICT" | "CEO_HOLD_LOW_EDGE" | "CEO_HOLD_ANALYST_DISAGREEMENT" | "CEO_HOLD_RR" | "CEO_HOLD_WEAK_SIGNAL" | "CEO_HOLD_NEWS_RISK" | "NONE"
 }}
 """
                 try:
                     # Temporary swap of llm_client for generate_json retry wrapper
                     original_llm = self.llm_client
                     self.llm_client = self.escalation_llm
-                    k3_response = await self.generate_json(escalation_prompt, required_keys=["decision", "conviction", "reasoning_en"])
+                    k3_response = await self.generate_json(escalation_prompt, required_keys=["decision", "conviction", "reasoning_en", "hold_category"])
                     self.llm_client = original_llm
                     
                     decision = str(k3_response.get("decision", "ERROR")).upper()
                     if decision == "ERROR":
                         raise ValueError("K3 returned ERROR")
+                        
+                    if decision == "HOLD":
+                        final_hold_category = k3_response.get("hold_category", "ESCALATION_VETO")
                         
                     try:
                         conviction = int(k3_response.get("conviction", 0))
@@ -121,6 +127,7 @@ SCHEMA:
                 self.logger.info(f"[{self.name}] Low conviction ({conviction}% < 55%). Forcing HOLD.")
                 print(f"🛑 [CEO] Слишком низкая уверенность ({conviction}%). Отмена сделки (HOLD).")
                 decision = "HOLD"
+                final_hold_category = "CEO_HOLD_WEAK_SIGNAL"
 
         return {
             "decision": decision,
@@ -129,5 +136,5 @@ SCHEMA:
             "reasoning_ru": llm_response.get("reasoning_ru", ""),
             "consensus_summary": llm_response.get("consensus_summary", ""),
             "mtf_validation": llm_response.get("mtf_validation", ""),
-            "hold_category": "ESCALATION_VETO" if decision == "HOLD" and llm_response.get("decision") != "HOLD" else "CEO_HOLD"
+            "hold_category": final_hold_category if decision == "HOLD" else "NONE"
         }
