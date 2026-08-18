@@ -408,6 +408,32 @@ class KrakenTradingService:
 
             else:
                 actual_size = size_base
+                
+            # ═══ P1: Authoritative Liquidation Check ═══
+            if not is_virtual and sl_price and sl_price > 0:
+                try:
+                    formatted_symbol = self._format_symbol(symbol)
+                    ex_positions = await self.exchange.fetch_positions()
+                    for p in ex_positions:
+                        ex_sym = p.get('symbol', '')
+                        if ex_sym == formatted_symbol or ex_sym.replace(':', '') == formatted_symbol.replace(':', ''):
+                            actual_liq = p.get('liquidationPrice')
+                            if actual_liq and actual_liq > 0:
+                                needs_adjustment = False
+                                if direction == 'LONG' and sl_price <= actual_liq:
+                                    print(f"⚠️ [P1 Auth Check] Изначальный SL ({sl_price}) ниже или равен реальной ликвидации ({actual_liq})! Двигаем SL...")
+                                    sl_price = actual_liq * 1.005
+                                    needs_adjustment = True
+                                elif direction == 'SHORT' and sl_price >= actual_liq:
+                                    print(f"⚠️ [P1 Auth Check] Изначальный SL ({sl_price}) выше или равен реальной ликвидации ({actual_liq})! Двигаем SL...")
+                                    sl_price = actual_liq * 0.995
+                                    needs_adjustment = True
+                                
+                                if needs_adjustment:
+                                    await self._update_exchange_sl(symbol, direction, sl_price, actual_size)
+                            break
+                except Exception as liq_err:
+                    print(f"⚠️ [P1 Auth Check] Не удалось проверить реальную цену ликвидации: {liq_err}")
         
         if order_result:
             pos_id = str(uuid.uuid4())[:8]
