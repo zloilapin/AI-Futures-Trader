@@ -596,6 +596,17 @@ class KrakenTradingService:
                                 tp_price = trigger
                     except Exception as e:
                         print(f"⚠️ [State Sync] Не удалось загрузить ордера для {ex_symbol}: {e}")
+                        raise RuntimeError(f"Невозможно проверить наличие SL для {ex_symbol}. Прерывание синхронизации (защита от ложного закрытия).")
+                        
+                    if sl_price == 0.0:
+                        print(f"🚨 [State Sync] КРИТИЧНО: Найдена позиция {short_symbol} БЕЗ Hard Stop-Loss! Выполняется Emergency Close...")
+                        close_side = 'sell' if direction == 'LONG' else 'buy'
+                        try:
+                            await self.exchange.create_market_order(ex_symbol, close_side, size_base, params={'reduceOnly': True})
+                            print(f"🚨 [State Sync] Голая позиция {short_symbol} успешно ликвидирована.")
+                        except Exception as close_err:
+                            print(f"🚨🚨🚨 [State Sync] НЕ УДАЛОСЬ ЗАКРЫТЬ ГОЛУЮ ПОЗИЦИЮ {short_symbol}: {close_err}")
+                        continue # Пропускаем восстановление, так как позиция (должна быть) закрыта
                     
                     # Build position record
                     pos_id = str(uuid.uuid4())[:8]
