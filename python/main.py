@@ -221,24 +221,24 @@ async def run_single_cycle(
         
         for agent, report in zip(analyst_list, reports):
             if isinstance(report, Exception):
-                logger.error(f"[Stage 3] Критическая ошибка агента {agent.name}: {report}")
-                has_critical_error = True
-                break
+                logger.error(f"[Stage 3] Ошибка агента {agent.name}: {report}")
+                continue
                 
             if isinstance(report, dict):
                 if report.get("signal") == "ERROR":
                     logger.error(f"[Stage 3] Агент {agent.name} вернул статус ERROR. Данные недоступны.")
-                    has_critical_error = True
-                    break
+                    continue
                 report["agent_name"] = agent.name
                 valid_reports.append(report)
             else:
                 logger.error(f"[Stage 3] Агент {agent.name} вернул некорректный ответ.")
-                has_critical_error = True
-                break
+                continue
                 
+        if len(valid_reports) < 3:
+            has_critical_error = True
+
         if has_critical_error:
-            msg = f"🛑 Пропуск {symbol}. Причина: Ошибка одного из критических агентов (Strict Fallback)."
+            msg = f"🛑 Пропуск {symbol}. Причина: Слишком много ошибок агентов (успешно только {len(valid_reports)}/5)."
             print(msg)
             logger.info(f"[System_Core] {msg}")
             scan_summaries.append({
@@ -248,9 +248,9 @@ async def run_single_cycle(
                 "scanner_status": "✅ OK" if not scanner_blocked else "⚠️ ЗАБЛОКИРОВАН СКАНЕРОМ",
                 "scanner_reason": None if not scanner_blocked else scanner_reason,
                 "risk_approved": False,
-                "risk_reason": "Strict Fallback: критическая ошибка агента",
-                "ceo_reasoning": "Bypassed (Agent Error)",
-                "status": "🛑 ОШИБКА АГЕНТА"
+                "risk_reason": f"Fallback: недостаточно успешных аналитиков ({len(valid_reports)}/5)",
+                "ceo_reasoning": "Bypassed (Too many agent errors)",
+                "status": "🛑 ОШИБКА АГЕНТОВ"
             })
             tracker.record_rejection("AGENT_ERROR")
             continue
@@ -289,7 +289,7 @@ async def run_single_cycle(
         historical_context = memory_manager.get_recent_context(limit=3)
         ceo_payload = {
             "symbol": symbol,
-            "multi_timeframe": market_data.get("multi_timeframe", {}),
+            "multi_timeframe_context": market_data.get("multi_timeframe", {}),
             "raw_market_data": {k: v for k, v in market_data.items() if k not in ["multi_timeframe", "price_data"]},
             "analyst_reports": valid_reports,
             "historical_context": historical_context,
@@ -610,9 +610,10 @@ async def main():
             except (KeyboardInterrupt, asyncio.CancelledError):
                 print("\n🛑 Автономный торговый бот остановлен.")
     finally:
-        if 'llm_client' in locals() and hasattr(llm_client, "close"):
-            await llm_client.close()
-            
+        for client_name in ['cheap_llm_client', 'primary_ceo_llm', 'escalation_ceo_llm']:
+            if client_name in locals() and hasattr(locals()[client_name], "close"):
+                await locals()[client_name].close()
+                
         if 'fetcher' in locals() and hasattr(fetcher, "close"):
             await fetcher.close()
             

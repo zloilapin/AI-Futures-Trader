@@ -1,0 +1,12 @@
+{
+    "initial_balance": 60.0,
+    "initial_deposit": 60.0,
+    "net_transfers": 0.0,
+    "current_balance": 60.0,
+    "active_positions": [],
+    "closed_trades": [],
+    "total_pnl_usd": 0.0,
+    "total_pnl_pct": 0.0,
+    "win_count": 0,
+    "loss_count": 0
+}

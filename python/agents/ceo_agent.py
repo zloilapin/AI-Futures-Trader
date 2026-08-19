@@ -46,7 +46,7 @@ class CEOAgent(BaseAgent):
         
         llm_response = {}
         try:
-            llm_response = await self.generate_json(full_prompt, required_keys=["decision", "conviction", "reasoning_en", "hold_category"])
+            llm_response = await self.generate_json(full_prompt, required_keys=["decision", "score_breakdown", "reasoning_en"])
         except Exception as e:
             self.logger.warning(f"[{self.name}] Primary LLM failed: {e}")
             return {"decision": "ERROR", "conviction": 0, "hold_category": "LLM_ERROR", "reasoning_en": f"Primary LLM failed: {e}"}
@@ -55,29 +55,28 @@ class CEOAgent(BaseAgent):
         if decision == "ERROR":
             return {"decision": "ERROR", "conviction": 0, "hold_category": "LLM_ERROR", "reasoning_en": llm_response.get("reasoning", "LLM Error")}
         
-        try:
-            conviction = int(llm_response.get("conviction", 0))
-        except (ValueError, TypeError):
-            conviction = 0
-            
+        breakdown = llm_response.get("score_breakdown", {})
+        decision, conviction = self._validate_and_compute_score(decision, breakdown)
+        
         reasoning = llm_response.get("reasoning_en", "")
         
         self.logger.info(f"[{self.name}] Primary CEO Llama 70B Decision: {decision} (Conf: {conviction}%)")
         print(f"👔 [CEO Llama 70B] {decision} ({conviction}%)")
         
-        final_hold_category = llm_response.get("hold_category", "NONE")
+        final_hold_category = "NONE"
         
         # ESCALATION MODEL LOGIC
-        if decision in ["LONG", "SHORT"]:
-            if conviction >= 80:
-                self.logger.info(f"[{self.name}] High conviction ({conviction}% >= 80%). Bypassing escalation.")
-            elif 55 <= conviction < 80:
-                self.logger.info(f"[{self.name}] Medium conviction ({conviction}%). Escalating to Kimi K3...")
-                print(f"⚠️ [Escalation] Спорная ситуация ({conviction}%). Передача дела в Kimi K3 для второго мнения...")
-                
-                escalation_prompt = f"""You are the Supreme Escalation AI (Kimi K3) for an elite crypto prop-trading firm.
-The Primary CEO (Llama 70B) has proposed a {decision} on {symbol} with a mediocre conviction of {conviction}%.
+        if conviction >= 80:
+            self.logger.info(f"[{self.name}] High conviction {decision} ({conviction}% >= 80%). Bypassing escalation.")
+        else:
+            self.logger.info(f"[{self.name}] Conviction < 80% ({decision} {conviction}%). Escalating to Kimi K3...")
+            print(f"⚠️ [Escalation] Недостаточная уверенность ({decision} {conviction}%). Передача дела в Kimi K3 для поиска возможностей...")
+            
+            escalation_prompt = f"""You are the Supreme Escalation AI (Kimi K3) for an elite crypto prop-trading firm.
+The Primary CEO (Llama 70B) has proposed a {decision} on {symbol} with a conviction of {conviction}%.
 Your job is to review the exact same data and provide a FINAL decisive verdict.
+If the primary CEO missed a strong setup and defaulted to HOLD, you must OVERRIDE and find the LONG/SHORT opportunity.
+If the setup is truly weak, confirm the HOLD.
 
 Primary CEO Reasoning:
 {reasoning}
@@ -88,46 +87,49 @@ Here is the raw data:
 Provide a JSON with your final decision. You can confirm the trade with high confidence, or VETO it with a HOLD.
 SCHEMA:
 {{
-  "decision": "LONG" | "SHORT" | "HOLD",
-  "conviction": <int 1-100>,
-  "reasoning_en": "<your detailed escalation review reasoning>",
-  "hold_category": "CEO_HOLD_MTF_CONFLICT" | "CEO_HOLD_LOW_EDGE" | "CEO_HOLD_ANALYST_DISAGREEMENT" | "CEO_HOLD_RR" | "CEO_HOLD_WEAK_SIGNAL" | "CEO_HOLD_NEWS_RISK" | "NONE"
+  "decision": "LONG",
+  "score_breakdown": {{
+    "candle": 16,
+    "orderbook": 12,
+    "derivatives": 18,
+    "indicators": 13,
+    "news": -2,
+    "mtf": 17
+  }},
+  "reasoning_en": "Your detailed escalation review reasoning"
 }}
 """
+            try:
+                original_llm = self.llm_client
+                self.llm_client = self.escalation_llm
                 try:
-                    # Temporary swap of llm_client for generate_json retry wrapper
-                    original_llm = self.llm_client
-                    self.llm_client = self.escalation_llm
-                    k3_response = await self.generate_json(escalation_prompt, required_keys=["decision", "conviction", "reasoning_en", "hold_category"])
+                    k3_response = await self.generate_json(escalation_prompt, required_keys=["decision", "score_breakdown", "reasoning_en"])
+                finally:
                     self.llm_client = original_llm
+                
+                decision = str(k3_response.get("decision", "ERROR")).upper()
+                if decision == "ERROR":
+                    raise ValueError("K3 returned ERROR")
                     
-                    decision = str(k3_response.get("decision", "ERROR")).upper()
-                    if decision == "ERROR":
-                        raise ValueError("K3 returned ERROR")
-                        
-                    if decision == "HOLD":
-                        final_hold_category = k3_response.get("hold_category", "ESCALATION_VETO")
-                        
-                    try:
-                        conviction = int(k3_response.get("conviction", 0))
-                    except (ValueError, TypeError):
-                        conviction = 0
-                        
-                    k3_reasoning = k3_response.get("reasoning_en", "")
-                    
-                    reasoning = f"[Primary CEO: {reasoning}]\n\n[ESCALATION K3 VERDICT: {k3_reasoning}]"
-                    self.logger.info(f"[{self.name}] Escalation K3 Final Decision: {decision} ({conviction}%)")
-                    print(f"🧠 [Kimi K3] Вердикт: {decision} ({conviction}%)")
-                except Exception as e:
-                    self.logger.error(f"[{self.name}] Escalation LLM failed: {e}")
-                    decision = "ERROR"
-                    conviction = 0
-                    reasoning += f"\n\n[ESCALATION FAILED: {e}. Strict Fallback triggered.]"
-            else:
-                self.logger.info(f"[{self.name}] Low conviction ({conviction}% < 55%). Forcing HOLD.")
-                print(f"🛑 [CEO] Слишком низкая уверенность ({conviction}%). Отмена сделки (HOLD).")
-                decision = "HOLD"
-                final_hold_category = "CEO_HOLD_WEAK_SIGNAL"
+                k3_breakdown = k3_response.get("score_breakdown", {})
+                decision, conviction = self._validate_and_compute_score(decision, k3_breakdown)
+                
+                k3_reasoning = k3_response.get("reasoning_en", "")
+                
+                reasoning = f"[Primary CEO: {reasoning}]\n\n[ESCALATION K3 VERDICT: {k3_reasoning}]"
+                self.logger.info(f"[{self.name}] Escalation K3 Final Decision: {decision} ({conviction}%)")
+                print(f"🧠 [Kimi K3] Вердикт: {decision} ({conviction}%)")
+            except Exception as e:
+                self.logger.error(f"[{self.name}] Escalation LLM failed: {e}")
+                decision = "ERROR"
+                conviction = 0
+                reasoning += f"\n\n[ESCALATION FAILED: {e}. Strict Fallback triggered.]"
+
+        # Deterministic Decision Engine for HOLD Category
+        if decision == "HOLD":
+            final_hold_category = self._determine_hold_category(analyst_reports, conviction)
+        else:
+            final_hold_category = "NONE"
 
         return {
             "decision": decision,
@@ -138,3 +140,66 @@ SCHEMA:
             "mtf_validation": llm_response.get("mtf_validation", ""),
             "hold_category": final_hold_category if decision == "HOLD" else "NONE"
         }
+
+    def _determine_hold_category(self, analyst_reports: list, conviction: int) -> str:
+        if conviction < 80 and conviction > 0:
+            return "LOW_CONFIDENCE"
+            
+        signals = [r.get("signal", "NEUTRAL").upper() for r in analyst_reports if isinstance(r, dict)]
+        bullish = signals.count("BULLISH") + signals.count("LONG")
+        bearish = signals.count("BEARISH") + signals.count("SHORT")
+        
+        if bullish > 0 and bearish > 0:
+            return "ANALYST_DISAGREEMENT"
+            
+        news = next((r for r in analyst_reports if isinstance(r, dict) and r.get("agent_name") == "News_Agent"), None)
+        if news and news.get("signal", "NEUTRAL").upper() in ["BEARISH", "SHORT"] and bullish > 0:
+            return "NEWS_RISK"
+            
+        return "LOW_EDGE"
+
+    def _validate_and_compute_score(self, decision: str, breakdown: dict) -> tuple[str, int]:
+        if decision == "ERROR":
+            return "ERROR", 0
+            
+        max_weights = {
+            "candle": 20,
+            "orderbook": 15,
+            "derivatives": 20,
+            "indicators": 15,
+            "news": 10,
+            "mtf": 20
+        }
+        
+        net_score = 0
+        if isinstance(breakdown, dict):
+            for k, v in breakdown.items():
+                try:
+                    val = float(v)
+                    key = k.lower().replace(" ", "").replace("_", "")
+                    
+                    limit = 0
+                    if "candle" in key: limit = max_weights["candle"]
+                    elif "orderbook" in key or "ob" in key: limit = max_weights["orderbook"]
+                    elif "deriv" in key or "oi" in key or "funding" in key: limit = max_weights["derivatives"]
+                    elif "indicator" in key: limit = max_weights["indicators"]
+                    elif "news" in key or "sentiment" in key: limit = max_weights["news"]
+                    elif "mtf" in key or "timeframe" in key: limit = max_weights["mtf"]
+                    else: limit = 20
+                    
+                    val = max(-limit, min(limit, val))
+                    net_score += val
+                except (ValueError, TypeError):
+                    continue
+                    
+        conviction = min(100, int(abs(net_score)))
+        
+        # Prevent math hallucinations
+        if decision == "LONG" and net_score < 0:
+            self.logger.warning(f"[{self.name}] Math hallucination: Decision is LONG but net_score is {net_score}. Overriding to HOLD.")
+            decision = "HOLD"
+        elif decision == "SHORT" and net_score > 0:
+            self.logger.warning(f"[{self.name}] Math hallucination: Decision is SHORT but net_score is {net_score}. Overriding to HOLD.")
+            decision = "HOLD"
+            
+        return decision, conviction

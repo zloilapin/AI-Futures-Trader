@@ -1,0 +1,13 @@
+{
+    "total_scans": 60,
+    "trades_executed": 0,
+    "execution_failed": 0,
+    "rejections": {
+        "AGENT_ERROR": 9,
+        "CEO_HOLD_ANALYST_DISAGREEMENT": 25,
+        "MARKET_CHOPPY": 8,
+        "CEO_HOLD_LOW_EDGE": 16,
+        "CEO HOLD ANALYST DISAGREEMENT": 1,
+        "FETCH_ERROR": 1
+    }
+}

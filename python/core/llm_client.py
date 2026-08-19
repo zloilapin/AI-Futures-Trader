@@ -26,13 +26,13 @@ class LLMClient:
         if provider == "openrouter" and self.openrouter_key and not self.openrouter_key.startswith("your_"):
             self._available_providers.append({"provider": "openrouter", "model": model_name or os.getenv("OPENROUTER_MODEL", "moonshotai/kimi-k3")})
         elif provider == "groq" and self.groq_key and not self.groq_key.startswith("your_"):
-            self._available_providers.append({"provider": "groq", "model": model_name or "llama-3.3-70b-versatile"})
+            self._available_providers.append({"provider": "groq", "model": model_name or "llama-3.1-70b-versatile"})
             
         # Add remaining fallback providers
         if provider != "openrouter" and self.openrouter_key and not self.openrouter_key.startswith("your_"):
             self._available_providers.append({"provider": "openrouter", "model": os.getenv("OPENROUTER_MODEL", "moonshotai/kimi-k3")})
         if provider != "groq" and self.groq_key and not self.groq_key.startswith("your_"):
-            self._available_providers.append({"provider": "groq", "model": "llama-3.3-70b-versatile"})
+            self._available_providers.append({"provider": "groq", "model": "llama-3.1-70b-versatile"})
         if self.gemini_key and not self.gemini_key.startswith("your_"):
             self._available_providers.append({"provider": "gemini", "model": "gemini-2.0-flash"})
         if self.cerebras_key and not self.cerebras_key.startswith("your_"):
@@ -185,8 +185,9 @@ class LLMClient:
                     if not is_known_no_json:
                         payload["response_format"] = {"type": "json_object"}
                     try:
+                        import aiohttp
                         session = await self._get_session()
-                        async with session.post(api_url, headers=headers, json=payload) as resp:
+                        async with session.post(api_url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=60)) as resp:
                             if resp.status == 200:
                                 data = await resp.json()
                                 if self.model_name != model_to_try and not is_kie:
@@ -215,8 +216,10 @@ class LLMClient:
                                     print(f"❌ [LLMClient] {model_to_try} недоступна: {err_msg[:100]}...")
                                     break 
                     except Exception as e:
-                        print(f"❌ [LLMClient {self.provider.upper()}] Ошибка сети: {e}")
-                        break 
+                        err_str = str(e) or "Таймаут соединения"
+                        wait_time = min(60, (2 ** attempt) + random.uniform(0, 1))
+                        print(f"⚠️ [LLMClient {self.provider.upper()}] Ошибка сети ({err_str}). Повтор через {wait_time:.2f}s...")
+                        await asyncio.sleep(wait_time)
                         
             if self._switch_provider():
                 return await self.generate(prompt, max_retries)

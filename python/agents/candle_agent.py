@@ -25,21 +25,17 @@ class CandleAgent(BaseAgent):
         prev_candle = ohlcv[-2]
         
         try:
-            if isinstance(last_candle, dict):
-                o1 = float(last_candle.get("open", 0))
-                h1 = float(last_candle.get("high", 0))
-                l1 = float(last_candle.get("low", 0))
-                c1 = float(last_candle.get("close", 0))
-                v1 = float(last_candle.get("volume", 0))
-                
-                o2 = float(prev_candle.get("open", 0))
-                h2 = float(prev_candle.get("high", 0))
-                l2 = float(prev_candle.get("low", 0))
-                c2 = float(prev_candle.get("close", 0))
-                v2 = float(prev_candle.get("volume", 0))
-            else:
-                o1, h1, l1, c1, v1 = last_candle[1:6]
-                o2, h2, l2, c2, v2 = prev_candle[1:6]
+            o1 = float(last_candle.get("open", 0))
+            h1 = float(last_candle.get("high", 0))
+            l1 = float(last_candle.get("low", 0))
+            c1 = float(last_candle.get("close", 0))
+            v1 = float(last_candle.get("volume", 0))
+            
+            o2 = float(prev_candle.get("open", 0))
+            h2 = float(prev_candle.get("high", 0))
+            l2 = float(prev_candle.get("low", 0))
+            c2 = float(prev_candle.get("close", 0))
+            v2 = float(prev_candle.get("volume", 0))
         except Exception as e:
             return {"signal": "ERROR", "reasoning": f"Invalid OHLCV format: {e}"}
             

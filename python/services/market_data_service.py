@@ -107,6 +107,29 @@ class MarketDataService:
             
         return f"PF_{s}USD"
 
+    def _normalize_candles(self, raw_candles: List[Any]) -> List[Dict[str, float]]:
+        """Unified normalizer that accepts both dict and list API formats and returns a standard dict."""
+        normalized = []
+        for c in raw_candles:
+            if isinstance(c, dict):
+                normalized.append({
+                    "open": float(c.get("open", 0)),
+                    "high": float(c.get("high", 0)),
+                    "low": float(c.get("low", 0)),
+                    "close": float(c.get("close", 0)),
+                    "volume": float(c.get("volume", 0))
+                })
+            elif isinstance(c, (list, tuple)) and len(c) >= 6:
+                # Format: [timestamp, open, high, low, close, volume]
+                normalized.append({
+                    "open": float(c[1]),
+                    "high": float(c[2]),
+                    "low": float(c[3]),
+                    "close": float(c[4]),
+                    "volume": float(c[5])
+                })
+        return normalized
+
     async def _fetch_ohlc_interval(self, symbol: str, interval_min: int) -> Dict[str, Any]:
         pair = self._normalize_pair(symbol)
         
@@ -121,7 +144,7 @@ class MarketDataService:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        candles = data.get("candles", [])
+                        candles = self._normalize_candles(data.get("candles", []))
                         if candles:
                             closes = [float(c["close"]) for c in candles[-20:]]
                             current_price = closes[-1]
@@ -238,7 +261,7 @@ class MarketDataService:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        candles = data.get("candles", [])
+                        candles = self._normalize_candles(data.get("candles", []))
                         if candles:
                             closes = [float(c["close"]) for c in candles[-200:]]
                             highs = [float(c["high"]) for c in candles[-200:]]
