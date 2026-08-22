@@ -55,8 +55,8 @@ def get_msk_status() -> tuple[bool, str]:
     end_mins = int(end_parts[0]) * 60 + int(end_parts[1])
     cur_mins = now_msk.hour * 60 + now_msk.minute
     
-    is_rest = cur_mins >= start_mins or cur_mins < end_mins
-    return is_rest, now_msk.strftime("%H:%M:%S МСК")
+    is_rest = False # DISABLED: cur_mins >= start_mins or cur_mins < end_mins
+    return is_rest, now_msk.strftime("%H:%M:%S") + " МСК"
 
 
 def _escape_md(text: str) -> str:
@@ -84,11 +84,11 @@ async def run_single_cycle(
     telegram_agent: TelegramAgent,
     reflector_agent: ReflectorAgent,
     memory_manager: MemoryManager,
+    exchange_name: str,
     force_scan: bool = False
 ):
     is_rest, time_str = get_msk_status()
     profile = config.TRADING_PROFILE
-    exchange_name = "Kraken Futures"
     
     print(f"\n" + "="*65)
     print(f"🚀 ТОРГОВЫЙ ЦИКЛ №{cycle_number} ({exchange_name}) [{time_str}]")
@@ -492,7 +492,7 @@ async def main():
     # 4-Tier Architecture LLMs (ALL via OpenRouter)
     cheap_llm_client = LLMClient(provider="openrouter", model_name="meta-llama/llama-3.1-8b-instruct")
     primary_ceo_llm = LLMClient(provider="openrouter", model_name="meta-llama/llama-3.3-70b-instruct")
-    escalation_ceo_llm = LLMClient(provider="openrouter", model_name="moonshotai/kimi-k3")
+    escalation_ceo_llm = LLMClient(provider="openrouter", model_name="google/gemini-3.7-flash")
     fetcher = MarketDataService(exchange_name="Kraken Futures", logger=logger)
     tg_sender = TelegramService()
     print("Инициализация сервисов...")
@@ -503,6 +503,10 @@ async def main():
         from services.paper_trading_service import PaperTradingService
         trading_service = PaperTradingService(logger=logger)
         exchange_name = "Paper Trading"
+    elif config.NADO_LIVE_TRADING_ENABLED or trading_engine == "NADO":
+        from services.nado_trading_service import NadoTradingService
+        trading_service = NadoTradingService()
+        exchange_name = "Nado DEX"
     else:
         from services.kraken_trading_service import KrakenTradingService
         trading_service = KrakenTradingService()
@@ -572,7 +576,7 @@ async def main():
                 cycle_number, logger, fetcher, tg_sender, trading_service,
                 universe_agent, scanner_agent, candle_agent, ob_agent,
                 oi_agent, news_agent, indicator_agent, ceo_agent,
-                risk_manager, telegram_agent, reflector_agent, memory_manager
+                risk_manager, telegram_agent, reflector_agent, memory_manager, exchange_name
             )
         else:
             is_rest, time_str = get_msk_status()
@@ -581,7 +585,8 @@ async def main():
             print(f"🔄 Интервал сканирования: Круглосуточно каждые {scan_interval_min} мин.")
             print(f"⚙️ Профиль риска: {profile} | 📐 Multi-Timeframe (15m + 1H + 4H) ON")
             print("💡 Для остановки нажмите Ctrl+C в любой момент.\n")
-            
+            if hasattr(trading_service, "start_background_watcher"):
+                asyncio.create_task(trading_service.start_background_watcher(tg_sender))
             asyncio.create_task(bot_listener.start_listening())
 
             try:
@@ -591,7 +596,7 @@ async def main():
                             cycle_number, logger, fetcher, tg_sender, trading_service,
                             universe_agent, scanner_agent, candle_agent, ob_agent,
                             oi_agent, news_agent, indicator_agent, ceo_agent,
-                            risk_manager, telegram_agent, reflector_agent, memory_manager
+                            risk_manager, telegram_agent, reflector_agent, memory_manager, exchange_name
                         )
                     except Exception as e:
                         import traceback

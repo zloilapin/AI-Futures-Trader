@@ -67,7 +67,7 @@ class TelegramBotListener:
                 
                 summary = await self.trading_service.get_portfolio_summary()
                 reply = (
-                    f"🤖 *AI TRADER STATUS | KRAKEN FUTURES*\n\n"
+                    f"🤖 *AI TRADER STATUS | NADO DEX*\n\n"
                     f"🟢 *Статус системы:* Активна 24/7\n"
                     f"⏱️ *Интервал сканирования:* каждые {interval} мин\n"
                     f"⚙️ *Профиль риска:* `{profile}`\n"

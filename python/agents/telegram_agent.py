@@ -21,6 +21,14 @@ class TelegramAgent(BaseAgent):
             text = text.replace(char, f"\\{char}")
         return text
 
+    def _format_price(self, price: float) -> str:
+        if price < 0.1:
+            return f"{price:.6f}".rstrip('0').rstrip('.')
+        elif price < 10:
+            return f"{price:.4f}".rstrip('0').rstrip('.')
+        else:
+            return f"{price:,.2f}"
+
     def format_signal(self, final_trade_data: Dict[str, Any]) -> str:
         symbol = final_trade_data.get("symbol", "UNKNOWN")
         ceo = final_trade_data.get("ceo_verdict", {})
@@ -56,9 +64,9 @@ class TelegramAgent(BaseAgent):
             f"📊 *Direction / Направление:* {dir_emoji}\n"
             f"🔥 *AI Conviction / Уверенность:* `{conviction}%` \n"
             f"💰 *Position / Сумма сделки:* `${notional_usd:,.2f}` ({pos_pct}%)\n"
-            f"🎯 *Entry / Цена входа:* `${entry_price:,.2f}`\n\n"
-            f"🟢 *Take Profit (TP):* `${tp_price:,.2f}` (+{tp_pct}%)\n"
-            f"🔴 *Stop Loss (SL):* `${sl_price:,.2f}` (-{sl_pct}%)\n"
+            f"🎯 *Entry / Цена входа:* `${self._format_price(entry_price)}`\n\n"
+            f"🟢 *Take Profit (TP):* `${self._format_price(tp_price)}` (+{tp_pct}%)\n"
+            f"🔴 *Stop Loss (SL):* `${self._format_price(sl_price)}` (-{sl_pct}%)\n"
             f"⚖️ *Risk/Reward:* `{rr_ratio}`\n\n"
             f"📝 *Analysis / Аналитика:*\n{reasoning}"
         )

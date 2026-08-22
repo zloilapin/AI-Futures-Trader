@@ -19,6 +19,8 @@ class PaperTradingService(BaseTradingService):
         self.data_file = data_file
         self.logger = logger
         self.state = self._load_state()
+        self.watcher_running = False
+        self._watcher_task = None
 
     def _log(self, msg: str, level: str = "info"):
         if self.logger:
@@ -61,24 +63,37 @@ class PaperTradingService(BaseTradingService):
             json.dump(data, f, indent=4, ensure_ascii=False)
 
     async def _fetch_current_price(self, symbol: str) -> float:
+        prices = await self._fetch_prices_batch([symbol])
+        return prices.get(symbol, 0.0)
+
+    async def _fetch_prices_batch(self, symbols: List[str]) -> Dict[str, float]:
         import aiohttp
+        results = {sym: 0.0 for sym in symbols}
+        if not symbols:
+            return results
+            
+        url = "https://futures.kraken.com/derivatives/api/v3/tickers"
         try:
-            base = symbol
-            if symbol == "BTC": base = "XBT"
-            elif symbol == "DOGE": base = "XDG"
-            elif symbol == "LUNA": base = "LUNA2"
-            pair = f"PI_{base}USD"
-            url = "https://futures.kraken.com/derivatives/api/v3/tickers"
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        for t in data.get("tickers", []):
-                            if t.get("symbol") == pair:
-                                return float(t.get("last", 0))
+                        tickers = data.get("tickers", [])
+                        
+                        for sym in symbols:
+                            base = sym.split('/')[0].replace(':USD', '').upper()
+                            if base == "BTC": base = "XBT"
+                            suffix = f"_{base}USD".upper()
+                            
+                            for t in tickers:
+                                s = t.get("symbol", "").upper()
+                                if s.endswith(suffix):
+                                    results[sym] = float(t.get("last", 0))
+                                    break
         except Exception as e:
-            self._log(f"⚠️ [PaperTrading] Ошибка загрузки цены {symbol}: {e}")
-        return 0.0
+            self._log(f"⚠️ [PaperTrading] Ошибка загрузки цен (batch): {e}")
+            
+        return results
 
     async def get_portfolio_summary(self) -> Dict[str, Any]:
         """Returns current balance, PnL, active positions count, win rate, and recent streak."""
@@ -95,10 +110,12 @@ class PaperTradingService(BaseTradingService):
         
         unrealized_pnl = 0.0
         import asyncio
+        import asyncio
         if self.state["active_positions"]:
-            tasks = [self._fetch_current_price(pos["symbol"]) for pos in self.state["active_positions"]]
-            prices = await asyncio.gather(*tasks)
-            for pos, price in zip(self.state["active_positions"], prices):
+            symbols = list(set([pos["symbol"] for pos in self.state["active_positions"]]))
+            prices_dict = await self._fetch_prices_batch(symbols)
+            for pos in self.state["active_positions"]:
+                price = prices_dict.get(pos["symbol"], 0.0)
                 if price > 0:
                     entry = pos["entry_price"]
                     notional_usd = pos["notional_usd"]
@@ -106,13 +123,19 @@ class PaperTradingService(BaseTradingService):
                         unrealized_pnl += (price - entry) / entry * notional_usd
                     else:
                         unrealized_pnl += (entry - price) / entry * notional_usd
+                        
+        used_margin = sum(pos.get("margin_usd", 0) for pos in self.state["active_positions"])
+        available_margin = self.state["current_balance"] - used_margin
             
         return {
             "initial_balance": base_capital,
-            "current_balance": round(self.state["current_balance"], 2),
+            "current_balance": round(self.state["current_balance"] + unrealized_pnl, 2), # Equity
             "total_pnl_usd": round(self.state["total_pnl_usd"], 2),
             "total_pnl_pct": round(account_roi_pct, 2),
             "unrealized_pnl_usd": round(unrealized_pnl, 2),
+            "unrealized_pnl": round(unrealized_pnl, 2),
+            "available_margin": round(available_margin, 2),
+            "used_margin": round(used_margin, 2),
             "active_positions_count": len(self.state["active_positions"]),
             "win_rate_pct": round(win_rate, 2),
             "win_count": self.state["win_count"],
@@ -131,6 +154,56 @@ class PaperTradingService(BaseTradingService):
         
     async def sync_with_exchange(self) -> None:
         pass
+
+    async def start_background_watcher(self, tg_sender=None):
+        """Starts a background loop to check positions every 15 seconds."""
+        if self.watcher_running:
+            return
+            
+        self.watcher_running = True
+        self._log("👀 [PaperTrading] Фоновый реал-тайм мониторинг позиций запущен (интервал: 15 сек).")
+        
+        import asyncio
+        while self.watcher_running:
+            try:
+                if self.state.get("active_positions"):
+                    symbols = list(set([pos["symbol"] for pos in self.state["active_positions"]]))
+                    symbols = list(set([pos["symbol"] for pos in self.state["active_positions"]]))
+                    
+                    prices_dict = await self._fetch_prices_batch(symbols)
+                    
+                    for sym in symbols:
+                        price = prices_dict.get(sym, 0.0)
+                        if price > 0:
+                            closed_reports = await self.check_and_update_positions(sym, price)
+                            
+                            if closed_reports and tg_sender:
+                                for closed in closed_reports:
+                                    pnl_emoji = "🎉" if closed["pnl_usd"] >= 0 else "🔻"
+                                    closed_msg = (
+                                        f"{pnl_emoji} *TRADE CLOSED / СДЕЛКА ЗАКРЫТА ({closed['triggered_by']})*\n\n"
+                                        f"🪙 *Asset / Монета:* `{closed['symbol']}`\n"
+                                        f"📊 *Direction / Направление:* `{closed['direction']}`\n"
+                                        f"🎯 *Entry / Вход:* `${closed['entry_price']:,.2f}` ➔ *Exit / Выход:* `${closed['exit_price']:,.2f}`\n"
+                                        f"💰 *PnL:* `${closed['pnl_usd']:,.2f}` (ROI: {closed.get('roi_pct', 0):+.2f}%)\n"
+                                    )
+                                    print(f"\n--- [ФОНОВЫЙ МОНИТОРИНГ] ЗАКРЫТИЕ ПОЗИЦИИ В TELEGRAM [{sym}] ---")
+                                    print(closed_msg)
+                                    print("--------------------------------------------")
+                                    await tg_sender.send_message(closed_msg)
+                                    await tg_sender.broadcast_to_channel(closed_msg)
+                                    
+                                    # We don't have reflector_agent here, but memory is saved locally anyway.
+                await asyncio.sleep(15)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self._log(f"❌ [PaperTrading] Ошибка в фоновом мониторинге: {e}")
+                await asyncio.sleep(15)
+
+    async def _close_exchange_async(self):
+        """Cleanup method called by main.py upon exit."""
+        self.watcher_running = False
 
     async def open_position(self, symbol: str, direction: str, entry_price: float, notional_usd: float, tp_price: float, sl_price: float, leverage: int = 1) -> Optional[Dict[str, Any]]:
         """Opens a virtual position if balance is sufficient."""

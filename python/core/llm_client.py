@@ -24,13 +24,13 @@ class LLMClient:
         
         # If an explicit provider is requested, put it first in the queue
         if provider == "openrouter" and self.openrouter_key and not self.openrouter_key.startswith("your_"):
-            self._available_providers.append({"provider": "openrouter", "model": model_name or os.getenv("OPENROUTER_MODEL", "moonshotai/kimi-k3")})
+            self._available_providers.append({"provider": "openrouter", "model": model_name or os.getenv("OPENROUTER_MODEL", "google/gemini-3.7-flash")})
         elif provider == "groq" and self.groq_key and not self.groq_key.startswith("your_"):
             self._available_providers.append({"provider": "groq", "model": model_name or "llama-3.1-70b-versatile"})
             
         # Add remaining fallback providers
         if provider != "openrouter" and self.openrouter_key and not self.openrouter_key.startswith("your_"):
-            self._available_providers.append({"provider": "openrouter", "model": os.getenv("OPENROUTER_MODEL", "moonshotai/kimi-k3")})
+            self._available_providers.append({"provider": "openrouter", "model": os.getenv("OPENROUTER_MODEL", "google/gemini-3.7-flash")})
         if provider != "groq" and self.groq_key and not self.groq_key.startswith("your_"):
             self._available_providers.append({"provider": "groq", "model": "llama-3.1-70b-versatile"})
         if self.gemini_key and not self.gemini_key.startswith("your_"):

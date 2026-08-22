@@ -17,6 +17,7 @@ class Config:
     KRAKEN_API_SECRET: str = os.getenv("KRAKEN_API_SECRET", "")
     NADO_DEX_URL: str = os.getenv("NADO_DEX_URL", "https://app.nado.xyz/perpetuals")
     LIVE_TRADING_ENABLED: bool = os.getenv("LIVE_TRADING_ENABLED", "False").lower() == "true"
+    NADO_LIVE_TRADING_ENABLED: bool = os.getenv("NADO_LIVE_TRADING_ENABLED", "False").lower() == "true"
     
     # Телеграм
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -31,8 +32,8 @@ class Config:
     
     # Настройки времени сна
     TIMEZONE_OFFSET: int = int(os.getenv("TIMEZONE_OFFSET", "3"))
-    REST_START_TIME: str = os.getenv("REST_START_TIME", "19:00")
-    REST_END_TIME: str = os.getenv("REST_END_TIME", "07:00")
+    REST_START_TIME: str = os.getenv("REST_START_TIME", "24:00")
+    REST_END_TIME: str = os.getenv("REST_END_TIME", "00:00")
     
     # Настройки логирования
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
@@ -41,9 +42,8 @@ class Config:
     MAX_CONCURRENT_POSITIONS: int = int(os.getenv("MAX_CONCURRENT_POSITIONS", "2"))
     
     # Расширенные лимиты Risk Manager
-    MIN_SL_PCT: float = 0.012
-    MIN_TP_PCT: float = 0.036
-    MIN_NOTIONAL: float = 15.0
+    MIN_SL_PCT: float = 0.025  # Increased from 1.2% to 2.5% to avoid 15m market noise
+    MIN_TP_PCT: float = 0.075  # Increased from 3.6% to 7.5% for better RR on 1H/4H trends
     SPREAD_PENALTY_THRESHOLD: float = 0.4
     SPREAD_VETO_THRESHOLD: float = 1.0
 

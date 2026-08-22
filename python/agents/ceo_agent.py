@@ -10,7 +10,7 @@ class CEOAgent(BaseAgent):
     """
     The Chief Investment Officer (CIO / CEO) of the trading syndicate.
     
-    Uses Llama 70B as the Primary CEO, and Kimi K3 as the Escalation Model 
+    Uses Llama 70B as the Primary CEO, and Gemini 3.7 Flash as the Escalation Model 
     for medium-confidence trades.
     """
     
@@ -69,10 +69,10 @@ class CEOAgent(BaseAgent):
         if conviction >= 80:
             self.logger.info(f"[{self.name}] High conviction {decision} ({conviction}% >= 80%). Bypassing escalation.")
         else:
-            self.logger.info(f"[{self.name}] Conviction < 80% ({decision} {conviction}%). Escalating to Kimi K3...")
-            print(f"⚠️ [Escalation] Недостаточная уверенность ({decision} {conviction}%). Передача дела в Kimi K3 для поиска возможностей...")
+            self.logger.info(f"[{self.name}] Conviction < 80% ({decision} {conviction}%). Escalating to Gemini...")
+            print(f"⚠️ [Escalation] Недостаточная уверенность ({decision} {conviction}%). Передача дела в Gemini 3.7 Flash для поиска возможностей...")
             
-            escalation_prompt = f"""You are the Supreme Escalation AI (Kimi K3) for an elite crypto prop-trading firm.
+            escalation_prompt = f"""You are the Supreme Escalation AI (Gemini 3.7 Flash) for an elite crypto prop-trading firm.
 The Primary CEO (Llama 70B) has proposed a {decision} on {symbol} with a conviction of {conviction}%.
 Your job is to review the exact same data and provide a FINAL decisive verdict.
 If the primary CEO missed a strong setup and defaulted to HOLD, you must OVERRIDE and find the LONG/SHORT opportunity.
@@ -109,16 +109,16 @@ SCHEMA:
                 
                 decision = str(k3_response.get("decision", "ERROR")).upper()
                 if decision == "ERROR":
-                    raise ValueError("K3 returned ERROR")
+                    raise ValueError("Gemini returned ERROR")
                     
                 k3_breakdown = k3_response.get("score_breakdown", {})
                 decision, conviction = self._validate_and_compute_score(decision, k3_breakdown)
                 
                 k3_reasoning = k3_response.get("reasoning_en", "")
                 
-                reasoning = f"[Primary CEO: {reasoning}]\n\n[ESCALATION K3 VERDICT: {k3_reasoning}]"
-                self.logger.info(f"[{self.name}] Escalation K3 Final Decision: {decision} ({conviction}%)")
-                print(f"🧠 [Kimi K3] Вердикт: {decision} ({conviction}%)")
+                reasoning = f"[Primary CEO: {reasoning}]\n\n[ESCALATION GEMINI VERDICT: {k3_reasoning}]"
+                self.logger.info(f"[{self.name}] Escalation Gemini Final Decision: {decision} ({conviction}%)")
+                print(f"🧠 [Gemini 3.7 Flash] Вердикт: {decision} ({conviction}%)")
             except Exception as e:
                 self.logger.error(f"[{self.name}] Escalation LLM failed: {e}")
                 decision = "ERROR"

@@ -59,6 +59,7 @@ class RiskManager(BaseAgent):
         # Initialized output fields
         approved = None
         veto_category = None
+        veto_reason = ""
         risk_amount_usd = 0.0   # Max USD we're willing to lose
         notional_usd = 0.0      # Total exposure (contracts * price)
         margin_usd = 0.0        # Collateral locked (notional / leverage)
@@ -128,7 +129,7 @@ class RiskManager(BaseAgent):
                     self.logger.warning(f"[{self.name}] DRAWDOWN PROTECTION: 2 losses in a row. Risk cut to {dynamic_risk_pct*100}%.")
             
             # ═══ 1. Liquidation Price Check & Finalize SL ═══
-            derivatives_data = market_data.get("derivatives_data", {})
+            derivatives_data = market_data.get("derivatives_data") or {}
             mm_pct = float(derivatives_data.get("maintenance_margin_pct", 0.01))
             
             if decision == "LONG":
@@ -160,9 +161,11 @@ class RiskManager(BaseAgent):
                 
             # ═══ 3. Apply Slippage Penalty & Veto ═══
             if spread_pct > config.SPREAD_VETO_THRESHOLD:
-                self.logger.warning(f"[{self.name}] ❌ SPREAD VETO: Spread is {spread_pct}% (Too illiquid). Blocking trade.")
+                msg = f"Spread is {spread_pct}% (Too illiquid). Blocking trade."
+                self.logger.warning(f"[{self.name}] ❌ SPREAD VETO: {msg}")
                 approved = False
                 veto_category = "SPREAD"
+                veto_reason = msg
             elif spread_pct > config.SPREAD_PENALTY_THRESHOLD:
                 notional_usd *= 0.8 # Cut notional by 20%
                 contracts = notional_usd / current_price if current_price > 0 else 0
@@ -181,25 +184,25 @@ class RiskManager(BaseAgent):
                 
             # ═══ 5. Minimum Order Size & Asset Amount Guard ═══
             symbol = ceo_decision.get("symbol", "")
-            min_base = 0.0001 if "BTC" in symbol else (0.01 if "ETH" in symbol else 1.0)
+            precision = int(derivatives_data.get("contract_precision", 4 if "BTC" in symbol else 2))
+            min_base = 10 ** -precision
             
             if contracts > 0 and contracts < min_base:
-                self.logger.warning(f"[{self.name}] ❌ MIN SIZE VETO: Safe position size ({contracts:.6f}) is less than exchange minimum ({min_base}). Blocking trade.")
+                msg = f"Safe position size ({contracts:.6f}) is less than exchange minimum ({min_base})."
+                self.logger.warning(f"[{self.name}] ❌ MIN SIZE VETO: {msg}")
                 approved = False
                 veto_category = "MIN_NOTIONAL"
-                
-            if notional_usd > 0 and notional_usd < config.MIN_NOTIONAL:
-                self.logger.warning(f"[{self.name}] ❌ MIN NOTIONAL VETO: Safe notional ${notional_usd:.2f} is below exchange minimum ${config.MIN_NOTIONAL}. Blocking trade to preserve risk profile.")
-                approved = False
-                veto_category = "MIN_NOTIONAL"
+                veto_reason = msg
                 
             if notional_usd > max_notional_usd:
-                self.logger.warning(f"[{self.name}] ❌ MAX NOTIONAL VETO: Required notional ${notional_usd:.2f} exceeds max allowed ${max_notional_usd:.2f}.")
+                msg = f"Required notional ${notional_usd:.2f} exceeds max allowed ${max_notional_usd:.2f}."
+                self.logger.warning(f"[{self.name}] ❌ MAX NOTIONAL VETO: {msg}")
                 approved = False
                 veto_category = "MAX_MARGIN"
+                veto_reason = msg
 
             # ═══ 6. Rounding & Final Math Alignment ═══
-            contracts = round(contracts, 6)
+            contracts = round(contracts, precision)
             notional_usd = round(contracts * current_price, 2)
             margin_usd = round(notional_usd / leverage if leverage > 0 else notional_usd, 2)
             margin_pct = round((margin_usd / total_balance) * 100 if total_balance > 0 else 0, 2)
@@ -216,19 +219,26 @@ class RiskManager(BaseAgent):
             
             # ═══ 7. Verify Actual Risk (using rounded contracts) ═══
             actual_risk_usd = contracts * distance_to_sl
-            # Add a small 0.01 tolerance for floating point rounding noise
-            if actual_risk_usd > (risk_amount_usd + 0.01) and approved is not False:
-                self.logger.warning(f"[{self.name}] ❌ RISK VETO: Actual risk ${actual_risk_usd:.2f} exceeds allowed risk ${risk_amount_usd:.2f}.")
+            # Add a 5% tolerance for floating point and contract precision rounding noise
+            if actual_risk_usd > (risk_amount_usd * 1.05) and approved is not False:
+                msg = f"Actual risk ${actual_risk_usd:.2f} exceeds allowed risk ${risk_amount_usd:.2f}."
+                self.logger.warning(f"[{self.name}] ❌ RISK VETO: {msg}")
                 approved = False
                 veto_category = "EXCESSIVE_RISK"
+                veto_reason = msg
             
             if approved is not False: # If not vetoed earlier
                 approved = True
             
+            
+        final_reasoning = f"Math calculated based on {profile_name} profile. SL={sl_price}, TP={tp_price}, RR={rr_ratio}"
+        if not approved and veto_reason:
+            final_reasoning = f"❌ ОТКЛОНЕНО ({veto_category}): {veto_reason} | {final_reasoning}"
+            
         parsed_res = {
             "approved": approved if approved is not None else False,
             "veto_category": veto_category,
-            "reasoning": f"Math calculated based on {profile_name} profile. SL={sl_price}, TP={tp_price}, RR={rr_ratio}",
+            "reasoning": final_reasoning,
             # ═══ Canonical fields (unambiguous) ═══
             "risk_amount_usd": risk_amount_usd,     # Max USD willing to lose
             "notional_size_usd": notional_usd,       # Total exposure (contracts * price)
@@ -239,7 +249,9 @@ class RiskManager(BaseAgent):
             # ═══ Levels ═══
             "entry_price": current_price,
             "take_profit_price": tp_price,
+            "take_profit_pct": round(abs(tp_price - current_price) / current_price * 100, 2) if current_price > 0 else 0,
             "stop_loss_price": sl_price,
+            "stop_loss_pct": round(abs(sl_price - current_price) / current_price * 100, 2) if current_price > 0 else 0,
             "risk_reward_ratio": rr_ratio,
             "liquidation_price": liq_price,
             # ═══ Legacy aliases (for backward compatibility) ═══
