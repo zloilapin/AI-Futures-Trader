@@ -120,6 +120,17 @@ class NadoTradingService(BaseTradingService):
         try:
             # Reverse map for product_id -> symbol
             id_to_symbol = {v: k for k, v in self.product_map.items()}
+            
+            # Fetch fresh market cache for accurate PnL pricing
+            try:
+                markets_data = await asyncio.to_thread(self.client.market.get_all_engine_markets)
+                if not getattr(self, "_market_cache", None):
+                    self._market_cache = {}
+                for m in markets_data.perp_products:
+                    self._market_cache[m.product_id] = m
+            except Exception as e:
+                logger.warning(f"[NadoTradingService] ⚠️ Failed to refresh market cache: {e}")
+                
             address = self.wallet.get_address()
             
             # Fetch all subaccounts for this address
