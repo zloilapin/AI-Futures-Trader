@@ -55,8 +55,8 @@ def get_msk_status() -> tuple[bool, str]:
     end_mins = int(end_parts[0]) * 60 + int(end_parts[1])
     cur_mins = now_msk.hour * 60 + now_msk.minute
     
-    is_rest = False # DISABLED: cur_mins >= start_mins or cur_mins < end_mins
-    return is_rest, now_msk.strftime("%H:%M:%S") + " МСК"
+    is_rest = cur_mins >= start_mins or cur_mins < end_mins
+    return is_rest, now_msk.strftime("%H:%M:%S") + " MSK"
 
 
 def _escape_md(text: str) -> str:

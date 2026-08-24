@@ -422,6 +422,10 @@ class NadoTradingService(BaseTradingService):
                     if "initial_balance" in state:
                         self._initial_balance = float(state["initial_balance"])
                         logger.info(f"[NadoTradingService] 💾 Loaded initial balance: {self._initial_balance}")
+                    if "win_count" in state:
+                        self.win_count = int(state["win_count"])
+                    if "loss_count" in state:
+                        self.loss_count = int(state["loss_count"])
             except Exception as e:
                 logger.error(f"[NadoTradingService] ⚠️ Failed to load state: {e}")
 
@@ -431,7 +435,11 @@ class NadoTradingService(BaseTradingService):
         os.makedirs(os.path.dirname(state_file), exist_ok=True)
         try:
             with open(state_file, "w") as f:
-                json.dump({"initial_balance": self._initial_balance}, f)
+                json.dump({
+                    "initial_balance": self._initial_balance,
+                    "win_count": self.win_count,
+                    "loss_count": self.loss_count
+                }, f)
         except Exception as e:
             logger.error(f"[NadoTradingService] ⚠️ Failed to save state: {e}")
 
@@ -475,6 +483,7 @@ class NadoTradingService(BaseTradingService):
                     self.win_count += 1
                 else:
                     self.loss_count += 1
+                self._save_state()
                     
                 closed_reports.append({
                     "symbol": symbol,
@@ -533,6 +542,7 @@ class NadoTradingService(BaseTradingService):
                 self.win_count += 1
             else:
                 self.loss_count += 1
+            self._save_state()
                 
             return True, target_pos["pnl"]
         except Exception as e:
