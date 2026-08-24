@@ -50,10 +50,10 @@ class NadoTradingService(BaseTradingService):
             
             # Fetch product map dynamically
             import asyncio
-            markets_data = await asyncio.to_thread(self.client.market.get_all_engine_markets)
-            for m in markets_data.perp_products:
-                base_symbol = m.symbol.split('-')[0].upper()
-                self.product_map[base_symbol] = m.product_id
+            products = await asyncio.to_thread(self.client.market.get_all_product_symbols)
+            for p in products:
+                base_symbol = p.symbol.split('-')[0].upper()
+                self.product_map[base_symbol] = p.product_id
                 
             from nado_protocol.utils.subaccount import subaccount_to_hex
             self.default_subaccount_id = subaccount_to_hex(self.wallet.get_address(), "default")
