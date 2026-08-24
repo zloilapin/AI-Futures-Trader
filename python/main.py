@@ -525,7 +525,6 @@ async def main():
             )
         except Exception as e:
             logger.error(f"[Init] Failed to create global Nado Client: {e}")
-            import sys
             sys.exit(1)
             
         trading_service = NadoTradingService()
