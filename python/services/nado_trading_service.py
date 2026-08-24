@@ -221,7 +221,14 @@ class NadoTradingService(BaseTradingService):
                 
             amount_base = notional_usd / entry_price
             amount_x18 = int(amount_base * 10**18)
-            price_x18 = int(entry_price * 10**18)
+            # Apply slippage for market-like execution (IOC)
+            if direction.upper() == "LONG":
+                limit_price = entry_price * 1.05  # Pay up to 5% more
+            else:
+                limit_price = entry_price * 0.95  # Sell for up to 5% less
+                amount_x18 = -amount_x18
+                
+            price_x18 = int(limit_price * 10**18)
             
             # Align to size and price increments
             size_increment = params_dict["size_increment_x18"]
@@ -230,15 +237,16 @@ class NadoTradingService(BaseTradingService):
             amount_x18 = (amount_x18 // size_increment) * size_increment
             price_x18 = (price_x18 // price_increment) * price_increment
             
-            if amount_x18 <= 0:
+            if amount_x18 == 0:
                 logger.error(f"[NadoTradingService] ❌ Order amount is zero after step size alignment.")
                 return False
-            
-            if direction.upper() == "SHORT":
-                amount_x18 = -amount_x18
                 
-            # Expiration 1 hour from now
-            expiration = int(time.time()) + 3600
+            # Expiration for IOC
+            try:
+                from nado_protocol.utils.expiration import OrderType, get_expiration_timestamp
+                expiration = get_expiration_timestamp(OrderType.IOC, int(time.time()) + 60)
+            except ImportError:
+                expiration = int(time.time()) + 60
             
             from nado_protocol.utils.subaccount import subaccount_to_hex
             from nado_protocol.utils.math import gen_order_nonce
