@@ -79,7 +79,15 @@ class NadoTradingService(BaseTradingService):
                 free_margin = float(health.health) / 1e18
             else:
                 balance = margin_used = free_margin = 0.0
-            
+                
+            # Fallback to sum of spot USDC if health says 0
+            if balance == 0.0 and hasattr(summary, "spot_balances"):
+                for spot in summary.spot_balances:
+                    if spot.product_id == 0:
+                        balance = float(spot.balance.amount) / 1e18
+                        free_margin = balance
+                        break
+                        
             if self._initial_balance is None and balance > 0:
                 self._initial_balance = balance
                 self._save_state()
