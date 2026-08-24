@@ -316,13 +316,14 @@ class NadoTradingService(BaseTradingService):
                 sl_type = "oracle_price_above"
                 tp_type = "oracle_price_below"
                 
+            sl_digest = None
             # Place Native Stop Loss
             if sl_price > 0:
                 exec_price = sl_price * 0.9 if direction.upper() == "LONG" else sl_price * 1.1
                 exec_price = (exec_price // price_increment) * price_increment
                 trigger_price = (sl_price // price_increment) * price_increment
                 try:
-                    await asyncio.to_thread(
+                    sl_res = await asyncio.to_thread(
                         self.client.market.place_price_trigger_order,
                         product_id=product_id,
                         price_x18=str(int(exec_price * 10**18)),
@@ -331,9 +332,12 @@ class NadoTradingService(BaseTradingService):
                         trigger_type=sl_type,
                         reduce_only=True
                     )
+                    sl_digest = sl_res.data.digest if sl_res and sl_res.data else None
                     logger.info(f"[NadoTradingService] 🛡️ Native Stop Loss placed at {sl_price}")
                 except Exception as e:
-                    logger.error(f"[NadoTradingService] ⚠️ Failed to place Native SL: {e}")
+                    logger.error(f"[NadoTradingService] ❌ Failed to place Native SL: {e}. ABORTING POSITION!")
+                    await self.force_close_position(symbol)
+                    return False
 
             # Place Native Take Profit
             if tp_price > 0:
@@ -352,7 +356,15 @@ class NadoTradingService(BaseTradingService):
                     )
                     logger.info(f"[NadoTradingService] 🎯 Native Take Profit placed at {tp_price}")
                 except Exception as e:
-                    logger.error(f"[NadoTradingService] ⚠️ Failed to place Native TP: {e}")
+                    logger.error(f"[NadoTradingService] ❌ Failed to place Native TP: {e}. ABORTING POSITION!")
+                    if sl_digest:
+                        try:
+                            from nado_protocol.engine_client.types.execute import CancelOrdersParams, CancelOrderParams
+                            await asyncio.to_thread(self.client.market.cancel_orders, CancelOrdersParams(txs=[CancelOrderParams(product_id=product_id, digest=sl_digest, sender=sender)]))
+                        except Exception:
+                            pass
+                    await self.force_close_position(symbol)
+                    return False
             
             # Store position state to prevent duplicate orders and track PnL
             self.active_positions[symbol] = {
