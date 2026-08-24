@@ -182,14 +182,22 @@ class RiskManager(BaseAgent):
                 notional_usd = max_notional_usd
                 contracts = notional_usd / current_price if current_price > 0 else 0
                 
-            # ═══ 5. Minimum Order Size & Asset Amount Guard ═══
+            # ═══ 5. Rounding & Final Math Alignment ═══
+            size_increment = float(derivatives_data.get("size_increment", 0.001))
+            if size_increment > 0:
+                # Nado correctly floors the amount to size_increment, we should do the same
+                contracts = (contracts // size_increment) * size_increment
+            notional_usd = round(contracts * current_price, 2)
+            margin_usd = round(notional_usd / leverage if leverage > 0 else notional_usd, 2)
+            margin_pct = round((margin_usd / total_balance) * 100 if total_balance > 0 else 0, 2)
+
+            # 💡 6. Minimum Order Size (Notional USD) Guard 💡
             symbol = ceo_decision.get("symbol", "")
-            precision = int(derivatives_data.get("contract_precision", 4 if "BTC" in symbol else 2))
-            min_base = 10 ** -precision
+            min_notional_usd = float(derivatives_data.get("min_size_usd", 20.0))
             
-            if contracts > 0 and contracts < min_base:
-                msg = f"Safe position size ({contracts:.6f}) is less than exchange minimum ({min_base})."
-                self.logger.warning(f"[{self.name}] ❌ MIN SIZE VETO: {msg}")
+            if notional_usd > 0 and notional_usd < min_notional_usd:
+                msg = f"Safe position size (${notional_usd:.2f}) is less than exchange minimum (${min_notional_usd:.2f})."
+                self.logger.warning(f"[{self.name}] ⚠️ MIN SIZE VETO: {msg}")
                 approved = False
                 veto_category = "MIN_NOTIONAL"
                 veto_reason = msg
@@ -200,12 +208,6 @@ class RiskManager(BaseAgent):
                 approved = False
                 veto_category = "MAX_MARGIN"
                 veto_reason = msg
-
-            # ═══ 6. Rounding & Final Math Alignment ═══
-            contracts = round(contracts, precision)
-            notional_usd = round(contracts * current_price, 2)
-            margin_usd = round(notional_usd / leverage if leverage > 0 else notional_usd, 2)
-            margin_pct = round((margin_usd / total_balance) * 100 if total_balance > 0 else 0, 2)
             
             risk_amount_usd = round(risk_amount_usd, 2)
             sl_price = round(sl_price, 6)

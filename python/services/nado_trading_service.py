@@ -12,7 +12,7 @@ class NadoTradingService(BaseTradingService):
     Uses the official nado-protocol Python SDK (requires Python 3.12+).
     """
     
-    def __init__(self):
+    def __init__(self, nado_client=None):
         self.wallet = Web3Wallet()
         self.client = None
         self.is_connected = False
@@ -23,9 +23,10 @@ class NadoTradingService(BaseTradingService):
         # Stats tracking
         self.win_count = 0
         self.loss_count = 0
-        self._init_sdk()
+        self._initial_balance = None
+        self._init_sdk(nado_client=nado_client)
 
-    def _init_sdk(self):
+    def _init_sdk(self, nado_client=None):
         if not self.wallet.is_configured():
             logger.error("[NadoTradingService] ❌ Wallet not configured. Nado execution disabled.")
             return
@@ -35,36 +36,28 @@ class NadoTradingService(BaseTradingService):
             # if the SDK isn't installed yet.
             from nado_protocol.client import create_nado_client, NadoClientMode, NadoClient
             
-            # Initialize NadoClient with the private key
-            self.client = create_nado_client(
-                mode=NadoClientMode.MAINNET,
-                signer=self.wallet.get_private_key()
-            )
+            if nado_client:
+                self.client = nado_client
+            else:
+                # Initialize NadoClient with the private key (Fallback)
+                self.client = create_nado_client(
+                    mode=NadoClientMode.MAINNET,
+                    signer=self.wallet.get_private_key()
+                )
             self.is_connected = True
             
             # Fetch product map dynamically
-            try:
-                products = self.client.market.get_all_product_symbols()
-                for p in products:
-                    base_symbol = p.symbol.split('-')[0].upper()
-                    self.product_map[base_symbol] = p.product_id
+            import asyncio
+            markets_data = asyncio.run(asyncio.to_thread(self.client.market.get_all_engine_markets))
+            for m in markets_data.perp_products:
+                self.product_map[m.symbol] = m.product_id
                 
-                # Fetch subaccounts to find the default one
-                self.default_subaccount_id = None
-                address = self.wallet.get_address()
-                if address:
-                    res = self.client.subaccount.get_subaccounts(address)
-                    if res and res.subaccounts:
-                        for sa in res.subaccounts:
-                            if sa.subaccount_name == 'default':
-                                self.default_subaccount_id = sa.subaccount
-                                break
+            from nado_protocol.utils.subaccount import subaccount_to_hex
+            self.default_subaccount_id = subaccount_to_hex(self.wallet.get_address(), "default")
                 
-                logger.info(f"[NadoTradingService] ✅ Connected to Nado SDK. Loaded {len(self.product_map)} products. Default SA: {self.default_subaccount_id}")
-            except Exception as e:
-                logger.error(f"[NadoTradingService] ⚠️ Failed to load Nado initial state: {e}")
-        except ImportError:
-            logger.error("[NadoTradingService] ❌ 'nado-protocol' SDK not found! Please run 'pip install nado-protocol'")
+            logger.info(f"[NadoTradingService] ✅ Successfully connected. Products loaded: {len(self.product_map)}")
+        except Exception as e:
+            logger.error(f"[NadoTradingService] ❌ Failed to init Nado SDK: {e}")
             self.is_connected = False
 
     async def get_portfolio_summary(self) -> Dict[str, Any]:
@@ -84,6 +77,11 @@ class NadoTradingService(BaseTradingService):
             else:
                 balance = margin_used = free_margin = 0.0
             
+            if self._initial_balance is None and balance > 0:
+                self._initial_balance = balance
+                
+            initial = self._initial_balance or balance
+            
             pnl = 0.0
             active_count = len(await self.get_active_positions())
             
@@ -91,13 +89,13 @@ class NadoTradingService(BaseTradingService):
             win_rate = round((self.win_count / total_trades) * 100, 1) if total_trades > 0 else 0.0
             
             return {
-                "initial_balance": 39.11,
+                "initial_balance": round(initial, 2),
                 "current_balance": round(balance, 2),
-                "total_pnl_usd": round(balance - 39.11, 2),
-                "total_pnl_pct": round(((balance - 39.11) / 39.11) * 100, 2) if balance else 0.0,
+                "total_pnl_usd": round(balance - initial, 2),
+                "total_pnl_pct": round(((balance - initial) / initial) * 100, 2) if initial > 0 else 0.0,
                 "unrealized_pnl_usd": pnl,
                 "unrealized_pnl": pnl,
-                "roi_pct": round(((balance - 39.11) / 39.11) * 100, 2) if balance else 0.0,
+                "roi_pct": round(((balance - initial) / initial) * 100, 2) if initial > 0 else 0.0,
                 "available_margin": round(free_margin, 2),
                 "used_margin": round(margin_used, 2),
                 "active_positions_count": active_count,
@@ -126,24 +124,40 @@ class NadoTradingService(BaseTradingService):
                 return []
                 
             for sa in res.subaccounts:
-                pos_data = await asyncio.to_thread(self.client.market.get_isolated_positions, sa.subaccount)
-                if not hasattr(pos_data, "isolated_positions") or not pos_data.isolated_positions:
+                summary = await asyncio.to_thread(self.client.subaccount.get_engine_subaccount_summary, sa.subaccount)
+                if not hasattr(summary, "perp_balances") or not summary.perp_balances:
                     continue
                     
-                for pos in pos_data.isolated_positions:
-                    base_amount = float(pos.base_balance.balance.amount) / 1e18
+                for pos in summary.perp_balances:
+                    base_amount = float(pos.balance.amount) / 1e18
                     if abs(base_amount) < 1e-6:
                         continue # Ignore zero or dust positions
                         
-                    product_id = pos.base_product.product_id
+                    product_id = pos.product_id
                     symbol = id_to_symbol.get(product_id, f"UNKNOWN-{product_id}")
-                    current_price = float(pos.base_product.oracle_price_x18) / 1e18
-                    size_usd = abs(base_amount) * current_price
+                    # Usually oracle_price_x18 is in perp_product or we can fall back to local_pos
+                    # but if we don't have oracle price readily available in perp_balances, we can use a fallback
+                    # In Vertex/Nado, perp_balances doesn't include oracle_price directly unless we fetch markets
+                    # We'll just rely on the real_entry or local cache for now
+                    current_price = 0.0  # Will be fetched later or isn't needed for raw size
+                    
+                    # Try to find current price from market cache
+                    market_info = self._market_cache.get(product_id) if getattr(self, "_market_cache", None) else None
+                    if market_info and hasattr(market_info, "product") and hasattr(market_info.product, "oracle_price_x18"):
+                        current_price = float(market_info.product.oracle_price_x18) / 1e18
+                        
+                    size_usd = abs(base_amount) * current_price if current_price > 0 else 0.0
                     direction = "LONG" if base_amount > 0 else "SHORT"
                     
                     # Merge with local cache for TP/SL and Entry
                     local_pos = self.active_positions.get(symbol, {})
-                    entry_price = local_pos.get("entry_price", current_price)
+                    try:
+                        v_quote = float(pos.balance.v_quote_balance) / 1e18
+                        real_entry = abs(v_quote) / abs(base_amount) if abs(base_amount) > 0 else current_price
+                    except Exception:
+                        real_entry = current_price
+                        
+                    entry_price = local_pos.get("entry_price", real_entry)
                     
                     # Calculate PnL
                     if direction == "LONG":
@@ -218,8 +232,9 @@ class NadoTradingService(BaseTradingService):
             # Expiration 1 hour from now
             expiration = int(time.time()) + 3600
             
-            from nado_protocol.utils.subaccount import SubaccountParams
-            sender = SubaccountParams(subaccount_name="default", subaccount_owner=self.wallet.get_address())
+            from nado_protocol.utils.subaccount import subaccount_to_hex
+            from nado_protocol.utils.math import gen_order_nonce
+            sender = subaccount_to_hex(self.wallet.get_address(), "default")
             
             # Order version must be 1 (appendix)
             order = OrderParams(
@@ -227,6 +242,7 @@ class NadoTradingService(BaseTradingService):
                 amount=amount_x18,
                 priceX18=price_x18,
                 expiration=expiration,
+                nonce=gen_order_nonce(),
                 appendix=1
             )
             
@@ -236,13 +252,83 @@ class NadoTradingService(BaseTradingService):
             )
             
             res = self.client.market.place_order(params)
-            logger.info(f"[NadoTradingService] ✅ Order placed successfully: {res}")
+            digest = res.data.digest if res.data else None
+            logger.info(f"[NadoTradingService] ✅ Order Accepted by Sequencer. Digest: {digest}")
             
-            # Store mock position state to prevent duplicate orders
+            if digest:
+                logger.info(f"[NadoTradingService] ⏳ Waiting for sequencer fill confirmation...")
+                filled = False
+                for _ in range(5):
+                    await asyncio.sleep(2)
+                    try:
+                        historical_data = await asyncio.to_thread(self.client.market.get_historical_orders_by_digest, [digest])
+                        if historical_data and historical_data.orders:
+                            order_info = historical_data.orders[0]
+                            if abs(int(order_info.base_filled)) > 0:
+                                filled = True
+                                logger.info(f"[NadoTradingService] ✅ Order {digest} FILLED successfully!")
+                                break
+                    except Exception as poll_e:
+                        logger.warning(f"[NadoTradingService] ⚠️ Error polling order {digest}: {poll_e}")
+                        
+                if not filled:
+                    logger.error(f"[NadoTradingService] ❌ Order {digest} was accepted but NOT filled within 10s. Position NOT tracked.")
+                    return False
+            
+            # --- Native Trigger Orders (TP/SL) ---
+            trigger_amount_base = -amount_base
+            trigger_amount_x18 = str(int(trigger_amount_base * 10**18))
+            
+            if direction.upper() == "LONG":
+                sl_type = "oracle_price_below"
+                tp_type = "oracle_price_above"
+            else:
+                sl_type = "oracle_price_above"
+                tp_type = "oracle_price_below"
+                
+            # Place Native Stop Loss
+            if sl_price > 0:
+                exec_price = sl_price * 0.9 if direction.upper() == "LONG" else sl_price * 1.1
+                exec_price = (exec_price // price_increment) * price_increment
+                trigger_price = (sl_price // price_increment) * price_increment
+                try:
+                    await asyncio.to_thread(
+                        self.client.market.place_price_trigger_order,
+                        product_id=product_id,
+                        price_x18=str(int(exec_price * 10**18)),
+                        amount_x18=trigger_amount_x18,
+                        trigger_price_x18=str(int(trigger_price * 10**18)),
+                        trigger_type=sl_type,
+                        reduce_only=True
+                    )
+                    logger.info(f"[NadoTradingService] 🛡️ Native Stop Loss placed at {sl_price}")
+                except Exception as e:
+                    logger.error(f"[NadoTradingService] ⚠️ Failed to place Native SL: {e}")
+
+            # Place Native Take Profit
+            if tp_price > 0:
+                exec_price = tp_price * 0.9 if direction.upper() == "LONG" else tp_price * 1.1
+                exec_price = (exec_price // price_increment) * price_increment
+                trigger_price = (tp_price // price_increment) * price_increment
+                try:
+                    await asyncio.to_thread(
+                        self.client.market.place_price_trigger_order,
+                        product_id=product_id,
+                        price_x18=str(int(exec_price * 10**18)),
+                        amount_x18=trigger_amount_x18,
+                        trigger_price_x18=str(int(trigger_price * 10**18)),
+                        trigger_type=tp_type,
+                        reduce_only=True
+                    )
+                    logger.info(f"[NadoTradingService] 🎯 Native Take Profit placed at {tp_price}")
+                except Exception as e:
+                    logger.error(f"[NadoTradingService] ⚠️ Failed to place Native TP: {e}")
+            
+            # Store position state to prevent duplicate orders and track PnL
             self.active_positions[symbol] = {
                 "direction": direction.upper(),
                 "entry_price": entry_price,
-                "size_usd": size_usd,
+                "size_usd": notional_usd,
                 "tp_price": tp_price,
                 "sl_price": sl_price,
                 "leverage": leverage
@@ -253,40 +339,59 @@ class NadoTradingService(BaseTradingService):
             return False
 
     async def check_and_update_positions(self, symbol: str, current_price: float) -> List[Dict[str, Any]]:
-        """Checks if TP/SL was hit."""
+        """Checks if a position was closed natively by Nado (TP/SL trigger)."""
         closed_reports = []
         if symbol not in self.active_positions:
             return closed_reports
             
-        pos = self.active_positions[symbol]
-        direction = pos.get("direction")
-        tp_price = pos.get("tp_price", 0.0)
-        sl_price = pos.get("sl_price", 0.0)
-        
-        triggered = None
-        
-        if direction == "LONG":
-            if tp_price and current_price >= tp_price:
-                triggered = "TAKE_PROFIT"
-            elif sl_price and current_price <= sl_price:
-                triggered = "STOP_LOSS"
-        elif direction == "SHORT":
-            if tp_price and current_price <= tp_price:
-                triggered = "TAKE_PROFIT"
-            elif sl_price and current_price >= sl_price:
-                triggered = "STOP_LOSS"
-                
-        if triggered:
-            logger.info(f"[NadoTradingService] ⚠️ {triggered} triggered for {symbol} at {current_price}!")
-            import asyncio
-            # Trigger asynchronous close so we don't block the loop
-            asyncio.create_task(self.force_close_position(symbol))
+        try:
+            # Poll actual blockchain state instead of doing virtual price math
+            positions = await self.get_active_positions()
             
-            closed_reports.append({
-                "symbol": symbol,
-                "reason": triggered,
-                "exit_price": current_price
-            })
+            # If the position is no longer in the active list, it was closed natively!
+            base_symbol = symbol.split('-')[0].upper()
+            still_open = False
+            target_pnl = 0.0
+            
+            for p in positions:
+                if p["symbol"] == base_symbol:
+                    still_open = True
+                    break
+                    
+            if not still_open:
+                # Position is gone, meaning Nado native Trigger Order (SL/TP) executed!
+                logger.info(f"[NadoTradingService] ⚡ Native TP/SL Trigger executed for {symbol}! Position closed on-chain.")
+                
+                # We can't perfectly know if it was TP or SL without querying historical orders,
+                # but we can guess based on current_price vs entry
+                pos = self.active_positions[symbol]
+                direction = pos["direction"]
+                entry_price = pos["entry_price"]
+                size_usd = pos["size_usd"]
+                
+                if direction == "LONG":
+                    target_pnl = (current_price - entry_price) / entry_price * size_usd
+                else:
+                    target_pnl = (entry_price - current_price) / entry_price * size_usd
+                    
+                del self.active_positions[symbol]
+                
+                if target_pnl > 0:
+                    self.win_count += 1
+                else:
+                    self.loss_count += 1
+                    
+                closed_reports.append({
+                    "symbol": symbol,
+                    "direction": direction,
+                    "triggered_by": "TAKE_PROFIT" if target_pnl > 0 else "STOP_LOSS",
+                    "entry_price": entry_price,
+                    "exit_price": current_price,
+                    "pnl_usd": target_pnl,
+                    "roi_pct": (target_pnl / pos.get("margin_used", size_usd) * 100) if size_usd > 0 else 0
+                })
+        except Exception as e:
+            logger.error(f"[NadoTradingService] ❌ Failed to check native position state: {e}")
             
         return closed_reports
 
@@ -306,14 +411,18 @@ class NadoTradingService(BaseTradingService):
                     break
                     
             if not target_pos:
-                logger.error(f"[NadoTradingService] ⚠️ No active position found on Nado for {symbol} to close.")
                 return False, 0.0
                 
-            from nado_protocol.engine_client.types.execute import PlaceOrderParams, OrderParams
-            import time
-            
-            subaccount = target_pos["_subaccount"]
-            product_id = target_pos["_product_id"]
+            # Fetch real info
+            product_id = self.product_map.get(base_symbol)
+            if not product_id:
+                return False, 0.0
+                
+            address = self.wallet.get_address()
+            res = await asyncio.to_thread(self.client.subaccount.get_subaccounts, address)
+            if not res or not res.subaccounts:
+                return False, 0.0
+            subaccount = res.subaccounts[0].subaccount
             
             # Fire close_position via SDK
             res = await asyncio.to_thread(self.client.market.close_position, subaccount, product_id)
@@ -328,11 +437,63 @@ class NadoTradingService(BaseTradingService):
             else:
                 self.loss_count += 1
                 
-            return True, {"pnl_usd": target_pos["pnl"]}
+            return True, target_pos["pnl"]
         except Exception as e:
             logger.error(f"[NadoTradingService] ❌ Failed to force close {symbol}: {e}")
-            return False, {}
+            return False, 0.0
+
+    async def get_market_limits(self, symbol: str) -> dict:
+        """Returns the minimum notional size (in USD) and size increment required for an order."""
+        limits = {"min_size_usd": 20.0, "size_increment": 0.0001}
+        try:
+            base_symbol = symbol.split('-')[0].upper()
+            product_id = self.product_map.get(base_symbol)
+            if not product_id:
+                return limits
+                
+            if not getattr(self, "_market_cache", None):
+                self._market_cache = {}
+                markets_data = await asyncio.to_thread(self.client.market.get_all_engine_markets)
+                for m in markets_data.perp_products:
+                    self._market_cache[m.product_id] = m
+                    
+            market_info = self._market_cache.get(product_id)
+            if market_info and hasattr(market_info, "book_info"):
+                limits["min_size_usd"] = float(market_info.book_info.min_size) / 1e18
+                limits["size_increment"] = float(market_info.book_info.size_increment) / 1e18
+        except Exception as e:
+            logger.warning(f"[NadoTradingService] ⚠️ Could not fetch limits for {symbol}: {e}")
+        return limits
 
     async def sync_with_exchange(self) -> None:
-        """Syncs local state with Nado state."""
-        pass
+        """Syncs local state with active positions on Nado."""
+        if not self.is_connected:
+            return
+            
+        try:
+            positions = await self.get_active_positions()
+            restored = 0
+            for pos in positions:
+                symbol = pos["symbol"]
+                if symbol not in self.active_positions:
+                    logger.info(f"[NadoTradingService] ♻️ Restored active position on {symbol} after restart.")
+                    
+                    entry = pos["entry_price"]
+                    direction = pos["direction"]
+                    # Add safety fallback TP/SL (e.g. 10% SL, 20% TP) to restored positions
+                    tp_mult = 1.2 if direction == "LONG" else 0.8
+                    sl_mult = 0.9 if direction == "LONG" else 1.1
+                    
+                    self.active_positions[symbol] = {
+                        "direction": direction,
+                        "entry_price": entry,
+                        "size_usd": pos.get("size_usd", 0.0),
+                        "tp_price": entry * tp_mult,
+                        "sl_price": entry * sl_mult,
+                        "leverage": 1 
+                    }
+                    restored += 1
+            if restored > 0:
+                logger.info(f"[NadoTradingService] ♻️ Successfully synced {restored} positions from Nado.")
+        except Exception as e:
+            logger.error(f"[NadoTradingService] ❌ Failed to sync with Nado: {e}")

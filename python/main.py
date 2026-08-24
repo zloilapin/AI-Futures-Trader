@@ -187,9 +187,17 @@ async def run_single_cycle(
         logger.info(f"[Stage 2] Сбор мульти-таймфреймовых данных (15m, 1H, 4H) для {symbol}...")
         try:
             market_data = await fetcher.fetch_all_market_data(symbol)
+            
+            # Inject Nado native market limits
+            limits = await trading_service.get_market_limits(symbol)
+            if "derivatives_data" not in market_data:
+                market_data["derivatives_data"] = {}
+            market_data["derivatives_data"]["min_size_usd"] = limits["min_size_usd"]
+            market_data["derivatives_data"]["size_increment"] = limits["size_increment"]
+            
         except Exception as e:
-            print(f"❌ Ошибка загрузки данных для {symbol}: {e}. Пропуск актива.")
-            scan_summaries.append({"symbol": symbol, "status": "⛔ ОШИБКА ДАННЫХ", "reason": str(e)})
+            print(f"❌ Ошибка загрузки данных для {symbol}: {e}. Пропускаем.")
+            scan_summaries.append({"symbol": symbol, "status": "⏭ Пропуск", "reason": str(e)})
             tracker.record_rejection("FETCH_ERROR")
             continue
             
@@ -493,24 +501,39 @@ async def main():
     cheap_llm_client = LLMClient(provider="openrouter", model_name="meta-llama/llama-3.1-8b-instruct")
     primary_ceo_llm = LLMClient(provider="openrouter", model_name="meta-llama/llama-3.3-70b-instruct")
     escalation_ceo_llm = LLMClient(provider="openrouter", model_name="google/gemini-3.7-flash")
-    fetcher = MarketDataService(exchange_name="Kraken Futures", logger=logger)
     tg_sender = TelegramService()
     print("Инициализация сервисов...")
     
     trading_engine = config.TRADING_ENGINE
     
+    # Global shared Nado Client if applicable
+    global_nado_client = None
+    
     if trading_engine == "PAPER" and not config.LIVE_TRADING_ENABLED:
         from services.paper_trading_service import PaperTradingService
         trading_service = PaperTradingService(logger=logger)
         exchange_name = "Paper Trading"
+        fetcher = MarketDataService(exchange_name="Kraken Futures", logger=logger)
     elif config.NADO_LIVE_TRADING_ENABLED or trading_engine == "NADO":
         from services.nado_trading_service import NadoTradingService
-        trading_service = NadoTradingService()
+        import os
+        try:
+            from nado_protocol.client import create_nado_client, NadoClientMode
+            global_nado_client = create_nado_client(
+                mode=NadoClientMode.MAINNET,
+                signer=os.getenv("INK_PRIVATE_KEY")
+            )
+        except Exception as e:
+            logger.error(f"[Init] Failed to create global Nado Client: {e}")
+            
+        trading_service = NadoTradingService(nado_client=global_nado_client)
         exchange_name = "Nado DEX"
+        fetcher = MarketDataService(exchange_name="Nado DEX", logger=logger, nado_client=global_nado_client)
     else:
         from services.kraken_trading_service import KrakenTradingService
         trading_service = KrakenTradingService()
         exchange_name = "Kraken Futures"
+        fetcher = MarketDataService(exchange_name="Kraken Futures", logger=logger)
     
     # P0.3: Startup sync — rebuild state from Kraken BEFORE any trading logic
     if hasattr(trading_service, "sync_with_exchange"):

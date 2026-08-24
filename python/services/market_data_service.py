@@ -8,7 +8,7 @@ class MarketDataService:
     Retrieves live price tickers, multi-timeframe candlesticks (15m, 1H, 4H), order book depth,
     technical indicators (RSI, EMA, MACD), and sentiment (Crypto Fear & Greed Index).
     """
-    def __init__(self, exchange_name: str = "Nado_DEX (Ink L2)", logger=None):
+    def __init__(self, exchange_name: str = "Nado_DEX (Ink L2)", logger=None, nado_client=None):
         self.exchange_name = exchange_name
         self.logger = logger
         self.session = None
@@ -18,19 +18,24 @@ class MarketDataService:
 
         from core.config import config
         self.is_nado = config.NADO_LIVE_TRADING_ENABLED or config.TRADING_ENGINE == "NADO"
-        self.nado_client = None
+        self.nado_client = nado_client
         self.product_map = {}
         if self.is_nado:
-            try:
-                from nado_protocol.client import create_nado_client, NadoClientMode
-                private_key = os.getenv("INK_PRIVATE_KEY")
-                self.nado_client = create_nado_client(
-                    mode=NadoClientMode.MAINNET,
-                    signer=private_key
-                )
+            if self.nado_client:
+                # Use the provided global Nado Client
                 self._load_nado_product_map()
-            except Exception as e:
-                self._log(f"⚠️ [MarketDataService] Failed to init Nado Client: {e}")
+            else:
+                # Fallback to instantiating if none was provided
+                try:
+                    from nado_protocol.client import create_nado_client, NadoClientMode
+                    private_key = os.getenv("INK_PRIVATE_KEY")
+                    self.nado_client = create_nado_client(
+                        mode=NadoClientMode.MAINNET,
+                        signer=private_key
+                    )
+                    self._load_nado_product_map()
+                except Exception as e:
+                    self._log(f"⚠️ [MarketDataService] Failed to init Nado Client: {e}")
 
     def _load_nado_product_map(self):
         try:
@@ -241,7 +246,9 @@ class MarketDataService:
                     "volume": round(vol * current_price, 2),
                     "candles_20": candles
                 }
-            self._log(f"⚠️ [MarketDataService] Nado candles empty for {symbol}. Falling back to Kraken.")
+            self._log(f"⚠️ [MarketDataService] Nado candles empty for {symbol}. NO FALLBACK ALLOWED.")
+            raise ValueError(f"Nado OHLCV data unavailable for {symbol}")
+
         url = f"https://futures.kraken.com/api/charts/v1/trade/{pair}/{interval_str}"
         try:
             session = await self._get_session()
@@ -360,9 +367,10 @@ class MarketDataService:
                             "best_ask": best_ask
                         }
             except Exception as e:
-                self._log(f"⚠️ [MarketDataService] Failed to fetch Nado order book for {symbol}: {e}. Falling back to Kraken.")
+                self._log(f"⚠️ [MarketDataService] Failed to fetch Nado order book for {symbol}: {e}. NO FALLBACK ALLOWED.")
+                raise ValueError(f"Nado OrderBook data unavailable for {symbol}")
                 
-        # 2. Fallback to Kraken Futures
+        # 2. Fallback to Kraken Futures (Only for Kraken mode)
         url = f"https://futures.kraken.com/derivatives/api/v3/orderbook?symbol={pair}"
         try:
             session = await self._get_session()
