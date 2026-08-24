@@ -55,7 +55,7 @@ class NadoTradingService(BaseTradingService):
                 base_symbol = p.symbol.split('-')[0].upper()
                 self.product_map[base_symbol] = p.product_id
                 
-            from nado_protocol.utils.subaccount import subaccount_to_hex
+            from nado_protocol.utils.bytes32 import subaccount_to_hex
             self.default_subaccount_id = subaccount_to_hex(self.wallet.get_address(), "default")
                 
             logger.info(f"[NadoTradingService] ✅ Successfully connected. Products loaded: {len(self.product_map)}")
@@ -267,7 +267,7 @@ class NadoTradingService(BaseTradingService):
             except ImportError:
                 expiration = int(time.time()) + 60
             
-            from nado_protocol.utils.subaccount import subaccount_to_hex
+            from nado_protocol.utils.bytes32 import subaccount_to_hex
             from nado_protocol.utils.math import gen_order_nonce
             sender = subaccount_to_hex(self.wallet.get_address(), "default")
             
