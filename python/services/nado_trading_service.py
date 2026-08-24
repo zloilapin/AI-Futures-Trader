@@ -357,7 +357,7 @@ class NadoTradingService(BaseTradingService):
                     logger.info(f"[NadoTradingService] 🛡️ Native Stop Loss placed at {sl_price}")
                 except Exception as e:
                     logger.error(f"[NadoTradingService] ❌ Failed to place Native SL: {e}. ABORTING POSITION!")
-                    await self.force_close_position(symbol)
+                    await self.force_close_position(symbol, bypass_check=True)
                     return False
 
             # Place Native Take Profit
@@ -384,7 +384,7 @@ class NadoTradingService(BaseTradingService):
                             await asyncio.to_thread(self.client.market.cancel_orders, CancelOrdersParams(txs=[CancelOrderParams(product_id=product_id, digest=sl_digest, sender=sender)]))
                         except Exception:
                             pass
-                    await self.force_close_position(symbol)
+                    await self.force_close_position(symbol, bypass_check=True)
                     return False
             
             # Store position state to prevent duplicate orders and track PnL
@@ -479,23 +479,25 @@ class NadoTradingService(BaseTradingService):
             
         return closed_reports
 
-    async def force_close_position(self, symbol: str) -> tuple:
+    async def force_close_position(self, symbol: str, bypass_check: bool = False) -> tuple:
         """Manually closes a position on Nado by firing a close_position market order."""
         if not self.is_connected:
             return False, 0.0
             
         try:
-            positions = await self.get_active_positions()
             base_symbol = symbol.split('-')[0].upper()
-            
             target_pos = None
-            for p in positions:
-                if p["symbol"] == base_symbol:
-                    target_pos = p
-                    break
-                    
-            if not target_pos:
-                return False, 0.0
+            
+            if not bypass_check:
+                positions = await self.get_active_positions()
+                
+                for p in positions:
+                    if p["symbol"] == base_symbol:
+                        target_pos = p
+                        break
+                        
+                if not target_pos:
+                    return False, 0.0
                 
             # Fetch real info
             product_id = self.product_map.get(base_symbol)
