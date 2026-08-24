@@ -24,9 +24,10 @@ class NadoTradingService(BaseTradingService):
         self.win_count = 0
         self.loss_count = 0
         self._initial_balance = None
-        self._init_sdk(nado_client=nado_client)
+        
+        # NOTE: self.initialize(nado_client) MUST be awaited explicitly after instantiation.
 
-    def _init_sdk(self, nado_client=None):
+    async def initialize(self, nado_client=None):
         if not self.wallet.is_configured():
             logger.error("[NadoTradingService] ❌ Wallet not configured. Nado execution disabled.")
             return
@@ -48,9 +49,10 @@ class NadoTradingService(BaseTradingService):
             
             # Fetch product map dynamically
             import asyncio
-            markets_data = asyncio.run(asyncio.to_thread(self.client.market.get_all_engine_markets))
+            markets_data = await asyncio.to_thread(self.client.market.get_all_engine_markets)
             for m in markets_data.perp_products:
-                self.product_map[m.symbol] = m.product_id
+                base_symbol = m.symbol.split('-')[0].upper()
+                self.product_map[base_symbol] = m.product_id
                 
             from nado_protocol.utils.subaccount import subaccount_to_hex
             self.default_subaccount_id = subaccount_to_hex(self.wallet.get_address(), "default")
@@ -272,8 +274,36 @@ class NadoTradingService(BaseTradingService):
                         logger.warning(f"[NadoTradingService] ⚠️ Error polling order {digest}: {poll_e}")
                         
                 if not filled:
-                    logger.error(f"[NadoTradingService] ❌ Order {digest} was accepted but NOT filled within 10s. Position NOT tracked.")
-                    return False
+                    # ONE MORE CHECK + RECONCILIATION
+                    try:
+                        final_data = await asyncio.to_thread(self.client.market.get_historical_orders_by_digest, [digest])
+                        if final_data and final_data.orders:
+                            final_order = final_data.orders[0]
+                            if abs(int(final_order.base_filled)) > 0:
+                                filled = True
+                                logger.info(f"[NadoTradingService] ✅ Order {digest} FILLED on final check!")
+                    except Exception as e:
+                        logger.warning(f"[NadoTradingService] ⚠️ Final order status check failed for {digest}: {e}")
+                        
+                    if not filled:
+                        logger.error(f"[NadoTradingService] ❌ Order {digest} was accepted but NOT filled within 10s. Cancelling to prevent race condition...")
+                        try:
+                            from nado_protocol.engine_client.types.execute import CancelOrdersParams, CancelOrderParams
+                            cancel_params = CancelOrdersParams(
+                                txs=[
+                                    CancelOrderParams(
+                                        product_id=product_id,
+                                        digest=digest,
+                                        sender=sender
+                                    )
+                                ]
+                            )
+                            await asyncio.to_thread(self.client.market.cancel_orders, cancel_params)
+                            logger.info(f"[NadoTradingService] 🗑️ Order {digest} cancelled successfully.")
+                        except Exception as cancel_e:
+                            logger.error(f"[NadoTradingService] ❌ Failed to cancel timed out order {digest}: {cancel_e}")
+                        
+                        return False
             
             # --- Native Trigger Orders (TP/SL) ---
             trigger_amount_base = -amount_base

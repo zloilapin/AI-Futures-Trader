@@ -526,7 +526,8 @@ async def main():
         except Exception as e:
             logger.error(f"[Init] Failed to create global Nado Client: {e}")
             
-        trading_service = NadoTradingService(nado_client=global_nado_client)
+        trading_service = NadoTradingService()
+        await trading_service.initialize(nado_client=global_nado_client)
         exchange_name = "Nado DEX"
         fetcher = MarketDataService(exchange_name="Nado DEX", logger=logger, nado_client=global_nado_client)
     else:
