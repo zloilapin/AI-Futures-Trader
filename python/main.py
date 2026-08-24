@@ -525,6 +525,8 @@ async def main():
             )
         except Exception as e:
             logger.error(f"[Init] Failed to create global Nado Client: {e}")
+            import sys
+            sys.exit(1)
             
         trading_service = NadoTradingService()
         await trading_service.initialize(nado_client=global_nado_client)
@@ -536,7 +538,7 @@ async def main():
         exchange_name = "Kraken Futures"
         fetcher = MarketDataService(exchange_name="Kraken Futures", logger=logger)
     
-    # P0.3: Startup sync — rebuild state from Kraken BEFORE any trading logic
+    # P0.3: Startup sync — rebuild state from Exchange BEFORE any trading logic
     if hasattr(trading_service, "sync_with_exchange"):
         print("🔄 [P0.3 Startup Sync] Синхронизация состояния с биржей при старте...")
         while True:
