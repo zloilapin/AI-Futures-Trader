@@ -522,17 +522,53 @@ class NadoTradingService(BaseTradingService):
                     
                     entry = pos["entry_price"]
                     direction = pos["direction"]
-                    # Add safety fallback TP/SL (e.g. 10% SL, 20% TP) to restored positions
-                    tp_mult = 1.2 if direction == "LONG" else 0.8
-                    sl_mult = 0.9 if direction == "LONG" else 1.1
+                    base_symbol = symbol.split('-')[0].upper()
+                    product_id = self.product_map.get(base_symbol)
+                    
+                    tp_price = 0.0
+                    sl_price = 0.0
+                    
+                    try:
+                        # In Nado/Vertex, trigger orders are fetched via indexer
+                        res = await asyncio.to_thread(self.client.indexer.get_trigger_orders, {"subaccount": self.default_subaccount_id, "product_id": product_id, "pending": True})
+                        if res and hasattr(res, 'orders'):
+                            for o in res.orders:
+                                # Safely extract trigger price
+                                t_price = 0.0
+                                if hasattr(o, 'order') and hasattr(o.order, 'trigger_price_x18'):
+                                    t_price = float(o.order.trigger_price_x18) / 1e18
+                                elif hasattr(o, 'trigger_price_x18'):
+                                    t_price = float(o.trigger_price_x18) / 1e18
+                                    
+                                if t_price > 0:
+                                    if direction == "LONG":
+                                        if t_price > entry:
+                                            tp_price = t_price
+                                        else:
+                                            sl_price = t_price
+                                    else:
+                                        if t_price < entry:
+                                            tp_price = t_price
+                                        else:
+                                            sl_price = t_price
+                        
+                        if tp_price == 0.0 or sl_price == 0.0:
+                            logger.error(f"[NadoTradingService] ❌ Missing real TP/SL for restored position {symbol}. Emergency close triggered!")
+                            await self.force_close_position(symbol)
+                            continue
+                            
+                    except Exception as e:
+                        logger.error(f"[NadoTradingService] ❌ Failed to fetch real trigger orders for {symbol} ({e}). Emergency close triggered!")
+                        await self.force_close_position(symbol)
+                        continue
                     
                     self.active_positions[symbol] = {
                         "direction": direction,
                         "entry_price": entry,
                         "size_usd": pos.get("size_usd", 0.0),
-                        "tp_price": entry * tp_mult,
-                        "sl_price": entry * sl_mult,
-                        "leverage": 1 
+                        "tp_price": tp_price,
+                        "sl_price": sl_price,
+                        "leverage": pos.get("leverage", 1)
                     }
                     restored += 1
             if restored > 0:
