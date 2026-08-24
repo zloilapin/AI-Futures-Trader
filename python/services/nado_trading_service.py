@@ -145,8 +145,11 @@ class NadoTradingService(BaseTradingService):
                     
                     # Try to find current price from market cache
                     market_info = self._market_cache.get(product_id) if getattr(self, "_market_cache", None) else None
-                    if market_info and hasattr(market_info, "product") and hasattr(market_info.product, "oracle_price_x18"):
-                        current_price = float(market_info.product.oracle_price_x18) / 1e18
+                    if market_info:
+                        if hasattr(market_info, "oracle_price_x18"):
+                            current_price = float(market_info.oracle_price_x18) / 1e18
+                        elif hasattr(market_info, "product") and hasattr(market_info.product, "oracle_price_x18"):
+                            current_price = float(market_info.product.oracle_price_x18) / 1e18
                         
                     size_usd = abs(base_amount) * current_price if current_price > 0 else 0.0
                     direction = "LONG" if base_amount > 0 else "SHORT"
@@ -209,17 +212,18 @@ class NadoTradingService(BaseTradingService):
                 logger.error(f"[NadoTradingService] ❌ Unknown symbol {symbol} - not found in Nado product map!")
                 return False
                 
-            market_info = self._market_cache.get(product_id)
-            if not market_info:
-                logger.error(f"[NadoTradingService] ❌ Market info not found for product_id {product_id}")
+            params_dict = self._get_market_parameters(product_id)
+            if params_dict["size_increment_x18"] == 0:
+                logger.error(f"[NadoTradingService] ❌ Market params not found for product_id {product_id}")
                 return False
+                
             amount_base = notional_usd / entry_price
             amount_x18 = int(amount_base * 10**18)
             price_x18 = int(entry_price * 10**18)
             
             # Align to size and price increments
-            size_increment = int(market_info.book_info.size_increment)
-            price_increment = int(market_info.book_info.price_increment_x18)
+            size_increment = params_dict["size_increment_x18"]
+            price_increment = params_dict["price_increment_x18"]
             
             amount_x18 = (amount_x18 // size_increment) * size_increment
             price_x18 = (price_x18 // price_increment) * price_increment
@@ -484,9 +488,33 @@ class NadoTradingService(BaseTradingService):
             logger.error(f"[NadoTradingService] ❌ Failed to force close {symbol}: {e}")
             return False, 0.0
 
+    def _get_market_parameters(self, product_id: int) -> dict:
+        params = {
+            "min_size_usd": 0.0,
+            "size_increment_base": 0.0,
+            "size_increment_x18": 0,
+            "price_increment_x18": 0
+        }
+        if not getattr(self, "_market_cache", None):
+            return params
+            
+        market_info = self._market_cache.get(product_id)
+        if market_info and hasattr(market_info, "book_info"):
+            try:
+                params["min_size_usd"] = float(market_info.book_info.min_size) / 1e18
+                params["size_increment_base"] = float(market_info.book_info.size_increment) / 1e18
+                params["size_increment_x18"] = int(market_info.book_info.size_increment)
+                params["price_increment_x18"] = int(market_info.book_info.price_increment_x18)
+            except Exception:
+                pass
+        return params
+
     async def get_market_limits(self, symbol: str) -> dict:
-        """Returns the minimum notional size (in USD) and size increment required for an order."""
-        limits = {"min_size_usd": 20.0, "size_increment": 0.0001}
+        """Fetch min_size and size_increment for the given product"""
+        limits = {"min_size_usd": 0.0, "size_increment": 0.0}
+        if not self.is_connected:
+            return limits
+            
         try:
             base_symbol = symbol.split('-')[0].upper()
             product_id = self.product_map.get(base_symbol)
@@ -499,10 +527,10 @@ class NadoTradingService(BaseTradingService):
                 for m in markets_data.perp_products:
                     self._market_cache[m.product_id] = m
                     
-            market_info = self._market_cache.get(product_id)
-            if market_info and hasattr(market_info, "book_info"):
-                limits["min_size_usd"] = float(market_info.book_info.min_size) / 1e18
-                limits["size_increment"] = float(market_info.book_info.size_increment) / 1e18
+            params = self._get_market_parameters(product_id)
+            if params["min_size_usd"] > 0:
+                limits["min_size_usd"] = params["min_size_usd"]
+                limits["size_increment"] = params["size_increment_base"]
         except Exception as e:
             logger.warning(f"[NadoTradingService] ⚠️ Could not fetch limits for {symbol}: {e}")
         return limits
