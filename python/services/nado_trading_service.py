@@ -66,7 +66,7 @@ class NadoTradingService(BaseTradingService):
     async def get_portfolio_summary(self) -> Dict[str, Any]:
         """Returns the current portfolio balance from Nado."""
         if not self.is_connected or not self.default_subaccount_id:
-            return {"balance": 0.0, "margin_used": 0.0, "free_margin": 0.0, "pnl": 0.0}
+            return {"total_usd": 0.0, "current_balance": 0.0, "balance": 0.0, "margin_used": 0.0, "free_margin": 0.0, "pnl": 0.0}
         
         try:
             summary = await asyncio.to_thread(self.client.subaccount.get_engine_subaccount_summary, self.default_subaccount_id)
@@ -117,7 +117,7 @@ class NadoTradingService(BaseTradingService):
             }
         except Exception as e:
             logger.error(f"[NadoTradingService] ⚠️ Failed to get portfolio summary: {e}")
-            return {"balance": 0.0, "margin_used": 0.0, "free_margin": 0.0, "pnl": 0.0}
+            return {"total_usd": 0.0, "current_balance": 0.0, "balance": 0.0, "margin_used": 0.0, "free_margin": 0.0, "pnl": 0.0}
 
     async def get_active_positions(self) -> List[Dict[str, Any]]:
         """Returns active open positions from Nado."""
