@@ -24,6 +24,7 @@ class NadoTradingService(BaseTradingService):
         self.win_count = 0
         self.loss_count = 0
         self._initial_balance = None
+        self._load_state()
         
         # NOTE: self.initialize(nado_client) MUST be awaited explicitly after instantiation.
 
@@ -81,6 +82,7 @@ class NadoTradingService(BaseTradingService):
             
             if self._initial_balance is None and balance > 0:
                 self._initial_balance = balance
+                self._save_state()
                 
             initial = self._initial_balance or balance
             
@@ -384,6 +386,29 @@ class NadoTradingService(BaseTradingService):
             logger.error(f"[NadoTradingService] ❌ Failed to place order: {e}")
             return False
 
+    def _load_state(self):
+        import os, json
+        state_file = "data/memory/nado_state.json"
+        if os.path.exists(state_file):
+            try:
+                with open(state_file, "r") as f:
+                    state = json.load(f)
+                    if "initial_balance" in state:
+                        self._initial_balance = float(state["initial_balance"])
+                        logger.info(f"[NadoTradingService] 💾 Loaded initial balance: {self._initial_balance}")
+            except Exception as e:
+                logger.error(f"[NadoTradingService] ⚠️ Failed to load state: {e}")
+
+    def _save_state(self):
+        import os, json
+        state_file = "data/memory/nado_state.json"
+        os.makedirs(os.path.dirname(state_file), exist_ok=True)
+        try:
+            with open(state_file, "w") as f:
+                json.dump({"initial_balance": self._initial_balance}, f)
+        except Exception as e:
+            logger.error(f"[NadoTradingService] ⚠️ Failed to save state: {e}")
+
     async def check_and_update_positions(self, symbol: str, current_price: float) -> List[Dict[str, Any]]:
         """Checks if a position was closed natively by Nado (TP/SL trigger)."""
         closed_reports = []
@@ -406,10 +431,8 @@ class NadoTradingService(BaseTradingService):
                     
             if not still_open:
                 # Position is gone, meaning Nado native Trigger Order (SL/TP) executed!
-                logger.info(f"[NadoTradingService] ⚡ Native TP/SL Trigger executed for {symbol}! Position closed on-chain.")
+                logger.info(f"[NadoTradingService] ⚡ Native Trigger executed for {symbol}! Position closed on-chain.")
                 
-                # We can't perfectly know if it was TP or SL without querying historical orders,
-                # but we can guess based on current_price vs entry
                 pos = self.active_positions[symbol]
                 direction = pos["direction"]
                 entry_price = pos["entry_price"]
@@ -430,7 +453,7 @@ class NadoTradingService(BaseTradingService):
                 closed_reports.append({
                     "symbol": symbol,
                     "direction": direction,
-                    "triggered_by": "TAKE_PROFIT" if target_pnl > 0 else "STOP_LOSS",
+                    "triggered_by": "CLOSED_ON_CHAIN",  # Avoiding false TP/SL attribution without indexer proof
                     "entry_price": entry_price,
                     "exit_price": current_price,
                     "pnl_usd": target_pnl,
