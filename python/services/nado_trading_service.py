@@ -74,41 +74,47 @@ class NadoTradingService(BaseTradingService):
             # SubaccountInfoData has a healths array. index 0 is Initial Margin health
             if hasattr(summary, "healths") and len(summary.healths) > 0:
                 health = summary.healths[0]
-                balance = float(health.assets) / 1e18
                 margin_used = float(health.liabilities) / 1e18
                 free_margin = float(health.health) / 1e18
             else:
-                balance = margin_used = free_margin = 0.0
+                margin_used = free_margin = 0.0
                 
-            # Fallback to sum of spot USDC if health says 0
-            if balance == 0.0 and hasattr(summary, "spot_balances"):
+            # Calculate true equity: Spot USDC + Unrealized PnL
+            spot_usdc = 0.0
+            if hasattr(summary, "spot_balances"):
                 for spot in summary.spot_balances:
                     if spot.product_id == 0:
-                        balance = float(spot.balance.amount) / 1e18
-                        free_margin = balance
+                        spot_usdc = float(spot.balance.amount) / 1e18
                         break
+            
+            # If spot_usdc is 0 but we have health.assets, fallback to assets just in case
+            if spot_usdc == 0.0 and hasattr(summary, "healths") and len(summary.healths) > 0:
+                spot_usdc = float(summary.healths[0].assets) / 1e18
+                
+            positions = await self.get_active_positions()
+            active_count = len(positions)
+            pnl = sum(p.get("pnl", 0.0) for p in positions)
+            
+            equity = spot_usdc + pnl
                         
-            if self._initial_balance is None and balance > 0:
-                self._initial_balance = balance
+            if self._initial_balance is None and equity > 0:
+                self._initial_balance = equity
                 self._save_state()
                 
-            initial = self._initial_balance or balance
-            
-            pnl = 0.0
-            active_count = len(await self.get_active_positions())
+            initial = self._initial_balance or equity
             
             total_trades = self.win_count + self.loss_count
             win_rate = round((self.win_count / total_trades) * 100, 1) if total_trades > 0 else 0.0
             
             return {
                 "initial_balance": round(initial, 2),
-                "current_balance": round(balance, 2),
-                "total_usd": round(balance, 2),
-                "total_pnl_usd": round(balance - initial, 2),
-                "total_pnl_pct": round(((balance - initial) / initial) * 100, 2) if initial > 0 else 0.0,
+                "current_balance": round(equity, 2),
+                "total_usd": round(equity, 2),
+                "total_pnl_usd": round(equity - initial, 2),
+                "total_pnl_pct": round(((equity - initial) / initial) * 100, 2) if initial > 0 else 0.0,
                 "unrealized_pnl_usd": pnl,
                 "unrealized_pnl": pnl,
-                "roi_pct": round(((balance - initial) / initial) * 100, 2) if initial > 0 else 0.0,
+                "roi_pct": round(((equity - initial) / initial) * 100, 2) if initial > 0 else 0.0,
                 "available_margin": round(free_margin, 2),
                 "used_margin": round(margin_used, 2),
                 "active_positions_count": active_count,
