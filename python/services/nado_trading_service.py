@@ -609,7 +609,6 @@ class NadoTradingService(BaseTradingService):
 
     def _get_market_parameters(self, product_id: int) -> dict:
         params = {
-            "min_size_usd": 0.0,
             "size_increment_base": 0.0,
             "size_increment_x18": 0,
             "price_increment_x18": 0
@@ -620,7 +619,6 @@ class NadoTradingService(BaseTradingService):
         market_info = self._market_cache.get(product_id)
         if market_info and hasattr(market_info, "book_info"):
             try:
-                params["min_size_usd"] = float(market_info.book_info.min_size) / 1e18
                 params["size_increment_base"] = float(market_info.book_info.size_increment) / 1e18
                 params["size_increment_x18"] = int(market_info.book_info.size_increment)
                 params["price_increment_x18"] = int(market_info.book_info.price_increment_x18)
@@ -630,7 +628,7 @@ class NadoTradingService(BaseTradingService):
 
     async def get_market_limits(self, symbol: str) -> dict:
         """Fetch min_size and size_increment for the given product"""
-        limits = {"min_size_usd": 0.0, "size_increment": 0.0}
+        limits = {"size_increment": 0.0}
         if not self.is_connected:
             return limits
             
@@ -647,9 +645,7 @@ class NadoTradingService(BaseTradingService):
                     self._market_cache[m.product_id] = m
                     
             params = self._get_market_parameters(product_id)
-            if params["min_size_usd"] > 0:
-                limits["min_size_usd"] = params["min_size_usd"]
-                limits["size_increment"] = params["size_increment_base"]
+            limits["size_increment"] = params["size_increment_base"]
         except Exception as e:
             logger.warning(f"[NadoTradingService] ⚠️ Could not fetch limits for {symbol}: {e}")
         return limits

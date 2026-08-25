@@ -192,8 +192,8 @@ async def run_single_cycle(
             limits = await trading_service.get_market_limits(symbol)
             if "derivatives_data" not in market_data:
                 market_data["derivatives_data"] = {}
-            market_data["derivatives_data"]["min_size_usd"] = limits["min_size_usd"]
-            market_data["derivatives_data"]["size_increment"] = limits["size_increment"]
+            if "size_increment" in limits:
+                market_data["derivatives_data"]["size_increment"] = limits["size_increment"]
             
         except Exception as e:
             print(f"❌ Ошибка загрузки данных для {symbol}: {e}. Пропускаем.")
