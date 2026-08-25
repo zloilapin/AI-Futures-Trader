@@ -413,6 +413,9 @@ class NadoTradingService(BaseTradingService):
                     await self.force_close_position(symbol, bypass_check=True)
                     return False
             
+            # Recalculate notional_usd to reflect actual fill (Option A: allow partial fills)
+            notional_usd = abs(actual_filled_x18 / 1e18) * entry_price
+            
             # Store position state to prevent duplicate orders and track PnL
             self.active_positions[symbol] = {
                 "direction": direction.upper(),
