@@ -9,7 +9,7 @@ from core.config import config
 
 class RiskManager(BaseAgent):
     """
-    Gatekeeper agent responsible for capital preservation, risk profiles, and position sizing on Kraken Futures.
+    Gatekeeper agent responsible for capital preservation, risk profiles, and position sizing.
     Calculates exact Take Profit (TP), Stop Loss (SL), position amount (USD / %), and risk/reward ratio.
     """
     def __init__(self, logger: TradeLogger, llm_client: LLMClient):

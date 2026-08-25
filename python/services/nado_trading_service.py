@@ -523,8 +523,9 @@ class NadoTradingService(BaseTradingService):
             
         return closed_reports
 
-    async def force_close_position(self, symbol: str, bypass_check: bool = False) -> tuple:
-        """Manually closes a position on Nado by firing a close_position market order."""
+    async def force_close_position(self, symbol: str, bypass_check: bool = False, max_retries: int = 3) -> tuple:
+        """Manually closes a position on Nado by firing a close_position market order.
+        Includes retry logic and backoff to handle Indexer lag immediately after entry."""
         if not self.is_connected:
             return False, 0.0
             
@@ -532,17 +533,6 @@ class NadoTradingService(BaseTradingService):
             base_symbol = symbol.split('-')[0].upper()
             target_pos = None
             
-            if not bypass_check:
-                positions = await self.get_active_positions()
-                
-                for p in positions:
-                    if p["symbol"] == base_symbol:
-                        target_pos = p
-                        break
-                        
-                if not target_pos:
-                    return False, 0.0
-                
             # Fetch real info
             product_id = self.product_map.get(base_symbol)
             if not product_id:
@@ -553,22 +543,45 @@ class NadoTradingService(BaseTradingService):
             if not res or not res.subaccounts:
                 return False, 0.0
             subaccount = res.subaccounts[0].subaccount
-            
-            # Fire close_position via SDK
-            res = await asyncio.to_thread(self.client.market.close_position, subaccount, product_id)
-            logger.info(f"[NadoTradingService] ✅ Successfully forced closed {symbol}. TX: {res}")
-            
-            # Clean up local cache and update stats
-            if base_symbol in self.active_positions:
-                del self.active_positions[base_symbol]
-                
-            if target_pos["pnl"] > 0:
-                self.win_count += 1
-            else:
-                self.loss_count += 1
-            self._save_state()
-                
-            return True, target_pos["pnl"]
+
+            for attempt in range(max_retries):
+                if not bypass_check:
+                    positions = await self.get_active_positions()
+                    target_pos = next((p for p in positions if p["symbol"] == base_symbol), None)
+                            
+                    if not target_pos:
+                        if attempt < max_retries - 1:
+                            logger.warning(f"[NadoTradingService] Position {symbol} invisible to Indexer. Retrying ({attempt+1}/{max_retries})...")
+                            await asyncio.sleep(1.5)
+                            continue
+                        else:
+                            return False, 0.0
+                            
+                # Fire close_position via SDK
+                try:
+                    res = await asyncio.to_thread(self.client.market.close_position, subaccount, product_id)
+                    logger.info(f"[NadoTradingService] 🧹 Successfully forced closed {symbol}. TX: {res}")
+                    
+                    # Clean up local cache and update stats
+                    if base_symbol in self.active_positions:
+                        del self.active_positions[base_symbol]
+                        
+                    pnl = target_pos["pnl"] if target_pos else 0.0
+                    if pnl > 0:
+                        self.win_count += 1
+                    elif pnl < 0:
+                        self.loss_count += 1
+                    self._save_state()
+                        
+                    return True, pnl
+                except Exception as close_e:
+                    logger.warning(f"[NadoTradingService] ⚠️ Retryable close error for {symbol}: {close_e}")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(1.5)
+                    else:
+                        raise close_e
+                        
+            return False, 0.0
         except Exception as e:
             logger.error(f"[NadoTradingService] ❌ Failed to force close {symbol}: {e}")
             return False, 0.0
