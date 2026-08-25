@@ -103,6 +103,7 @@ class NadoTradingService(BaseTradingService):
             return {
                 "initial_balance": round(initial, 2),
                 "current_balance": round(balance, 2),
+                "total_usd": round(balance, 2),
                 "total_pnl_usd": round(balance - initial, 2),
                 "total_pnl_pct": round(((balance - initial) / initial) * 100, 2) if initial > 0 else 0.0,
                 "unrealized_pnl_usd": pnl,
