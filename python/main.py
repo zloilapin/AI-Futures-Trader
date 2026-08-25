@@ -571,7 +571,7 @@ async def main():
                 universe_agent, scanner_agent, candle_agent, ob_agent,
                 oi_agent, news_agent, indicator_agent, ceo_agent,
                 risk_manager, telegram_agent, reflector_agent, memory_manager,
-                force_scan=True
+                exchange_name, force_scan=True
             )
             print("✅ [TriggerScan] Ручное сканирование завершено успешно.")
         except Exception as e:
