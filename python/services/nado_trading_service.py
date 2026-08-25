@@ -247,11 +247,17 @@ class NadoTradingService(BaseTradingService):
                 
             amount_base = notional_usd / entry_price
             amount_x18 = int(amount_base * 10**18)
-            # Apply slippage for market-like execution (IOC)
-            if direction.upper() == "LONG":
-                limit_price = entry_price * 1.05  # Pay up to 5% more
+            # Apply dynamic slippage for market-like execution (IOC)
+            base_asset = symbol.split('-')[0].upper()
+            if base_asset in ["BTC", "ETH"]:
+                slippage_pct = 0.005 # 0.5%
             else:
-                limit_price = entry_price * 0.95  # Sell for up to 5% less
+                slippage_pct = 0.01  # 1.0%
+                
+            if direction.upper() == "LONG":
+                limit_price = entry_price * (1 + slippage_pct)
+            else:
+                limit_price = entry_price * (1 - slippage_pct)
                 amount_x18 = -amount_x18
                 
             price_x18 = int(limit_price * 10**18)
