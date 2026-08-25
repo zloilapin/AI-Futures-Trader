@@ -23,6 +23,7 @@ class NadoTradingService(BaseTradingService):
         # Stats tracking
         self.win_count = 0
         self.loss_count = 0
+        self.recent_streak = []
         self._initial_balance = None
         self._load_state()
         
@@ -120,7 +121,8 @@ class NadoTradingService(BaseTradingService):
                 "active_positions_count": active_count,
                 "win_count": self.win_count,
                 "loss_count": self.loss_count,
-                "win_rate_pct": win_rate
+                "win_rate_pct": win_rate,
+                "recent_streak": self.recent_streak
             }
         except Exception as e:
             logger.error(f"[NadoTradingService] ⚠️ Failed to get portfolio summary: {e}")
@@ -460,6 +462,8 @@ class NadoTradingService(BaseTradingService):
                         self.win_count = int(state["win_count"])
                     if "loss_count" in state:
                         self.loss_count = int(state["loss_count"])
+                    if "recent_streak" in state:
+                        self.recent_streak = state["recent_streak"]
             except Exception as e:
                 logger.error(f"[NadoTradingService] ⚠️ Failed to load state: {e}")
 
@@ -472,7 +476,8 @@ class NadoTradingService(BaseTradingService):
                 json.dump({
                     "initial_balance": self._initial_balance,
                     "win_count": self.win_count,
-                    "loss_count": self.loss_count
+                    "loss_count": self.loss_count,
+                    "recent_streak": self.recent_streak
                 }, f)
         except Exception as e:
             logger.error(f"[NadoTradingService] ⚠️ Failed to save state: {e}")
@@ -515,8 +520,11 @@ class NadoTradingService(BaseTradingService):
                 
                 if target_pnl > 0:
                     self.win_count += 1
+                    self.recent_streak.append("WIN")
                 else:
                     self.loss_count += 1
+                    self.recent_streak.append("LOSS")
+                self.recent_streak = self.recent_streak[-10:]
                 self._save_state()
                     
                 closed_reports.append({
@@ -579,8 +587,11 @@ class NadoTradingService(BaseTradingService):
                     pnl = target_pos["pnl"] if target_pos else 0.0
                     if pnl > 0:
                         self.win_count += 1
+                        self.recent_streak.append("WIN")
                     elif pnl < 0:
                         self.loss_count += 1
+                        self.recent_streak.append("LOSS")
+                    self.recent_streak = self.recent_streak[-10:]
                     self._save_state()
                         
                     return True, pnl
