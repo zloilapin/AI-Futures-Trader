@@ -182,23 +182,38 @@ class RiskManager(BaseAgent):
             margin_usd = round(notional_usd / leverage if leverage > 0 else notional_usd, 2)
             margin_pct = round((margin_usd / total_balance) * 100 if total_balance > 0 else 0, 2)
 
-            # 💡 6. Minimum Order Size (Notional USD) Guard 💡
+            # --- 6. Minimum Order Size (Notional USD) Guard ---
             symbol = ceo_decision.get("symbol", "")
             min_notional_usd = float(derivatives_data.get("min_size_usd", 20.0))
             
             if notional_usd > 0 and notional_usd < min_notional_usd:
-                msg = f"Safe position size (${notional_usd:.2f}) is less than exchange minimum (${min_notional_usd:.2f})."
-                self.logger.warning(f"[{self.name}] ⚠️ MIN SIZE VETO: {msg}")
-                approved = False
-                veto_category = "MIN_NOTIONAL"
-                veto_reason = msg
+                # Bump up position size to meet exchange minimum if we can afford it
+                self.logger.warning(f"[{self.name}] ⚠️ Bumping notional from ${notional_usd:.2f} to exchange minimum ${min_notional_usd:.2f}.")
+                notional_usd = min_notional_usd
+                contracts = notional_usd / current_price if current_price > 0 else 0
                 
-            if notional_usd > max_notional_usd:
-                msg = f"Required notional ${notional_usd:.2f} exceeds max allowed ${max_notional_usd:.2f}."
-                self.logger.warning(f"[{self.name}] ❌ MAX NOTIONAL VETO: {msg}")
-                approved = False
-                veto_category = "MAX_MARGIN"
-                veto_reason = msg
+                if size_increment > 0:
+                    # Round up to the nearest size increment to ensure we meet the minimum
+                    import math
+                    contracts = math.ceil(contracts / size_increment) * size_increment
+                    
+                notional_usd = round(contracts * current_price, 2)
+                margin_usd = round(notional_usd / leverage if leverage > 0 else notional_usd, 2)
+                margin_pct = round((margin_usd / total_balance) * 100 if total_balance > 0 else 0, 2)
+                
+                # Double check we don't blow past maximum limits after bumping
+                if notional_usd > max_notional_usd:
+                    msg = f"Bumped size (${notional_usd:.2f}) exceeds max allowed ${max_notional_usd:.2f}."
+                    self.logger.warning(f"[{self.name}] ❌ MAX NOTIONAL VETO: {msg}")
+                    approved = False
+                    veto_category = "MAX_MARGIN"
+                    veto_reason = msg
+                elif margin_usd > total_balance:
+                    msg = f"Bumped size margin (${margin_usd:.2f}) exceeds balance (${total_balance:.2f})."
+                    self.logger.warning(f"[{self.name}] ❌ INSUFFICIENT BALANCE VETO: {msg}")
+                    approved = False
+                    veto_category = "INSUFFICIENT_BALANCE"
+                    veto_reason = msg
             
             risk_amount_usd = round(risk_amount_usd, 2)
             sl_price = round(sl_price, 6)
