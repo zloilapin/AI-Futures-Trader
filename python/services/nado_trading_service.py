@@ -126,11 +126,16 @@ class NadoTradingService(BaseTradingService):
             logger.error(f"[NadoTradingService] ⚠️ Failed to get portfolio summary: {e}")
             return {"total_usd": 0.0, "current_balance": 0.0, "balance": 0.0, "margin_used": 0.0, "free_margin": 0.0, "pnl": 0.0}
 
-    async def get_active_positions(self) -> List[Dict[str, Any]]:
+    async def get_active_positions(self, bypass_cache: bool = False) -> List[Dict[str, Any]]:
         """Returns active open positions from Nado."""
         if not self.is_connected:
             return []
             
+        import time
+        if not bypass_cache and getattr(self, "_pos_cache_time", 0) > 0:
+            if time.time() - self._pos_cache_time < 15.0 and hasattr(self, "_pos_cache"):
+                return self._pos_cache
+                
         active_list = []
         try:
             # Reverse map for product_id -> symbol
@@ -210,8 +215,13 @@ class NadoTradingService(BaseTradingService):
                         "_subaccount": sa.subaccount,
                         "_product_id": product_id
                     })
+            
+            self._pos_cache = active_list
+            import time
+            self._pos_cache_time = time.time()
+            
         except Exception as e:
-            logger.error(f"[NadoTradingService] ⚠️ Failed to fetch active positions: {e}")
+            logger.error(f"[NadoTradingService] ❌ Failed to fetch active positions: {e}")
             
         return active_list
 
@@ -470,12 +480,12 @@ class NadoTradingService(BaseTradingService):
     async def check_and_update_positions(self, symbol: str, current_price: float) -> List[Dict[str, Any]]:
         """Checks if a position was closed natively by Nado (TP/SL trigger)."""
         closed_reports = []
-        if symbol not in self.active_positions:
+        if not self.is_connected or symbol not in self.active_positions:
             return closed_reports
             
         try:
-            # Poll actual blockchain state instead of doing virtual price math
-            positions = await self.get_active_positions()
+            # Bypass cache for checking closures to be perfectly accurate
+            positions = await self.get_active_positions(bypass_cache=True)
             
             # If the position is no longer in the active list, it was closed natively!
             base_symbol = symbol.split('-')[0].upper()
@@ -546,7 +556,7 @@ class NadoTradingService(BaseTradingService):
 
             for attempt in range(max_retries):
                 if not bypass_check:
-                    positions = await self.get_active_positions()
+                    positions = await self.get_active_positions(bypass_cache=True)
                     target_pos = next((p for p in positions if p["symbol"] == base_symbol), None)
                             
                     if not target_pos:
@@ -639,7 +649,7 @@ class NadoTradingService(BaseTradingService):
             return
             
         try:
-            positions = await self.get_active_positions()
+            positions = await self.get_active_positions(bypass_cache=True)
             restored = 0
             for pos in positions:
                 symbol = pos["symbol"]
