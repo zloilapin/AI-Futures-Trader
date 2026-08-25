@@ -128,20 +128,11 @@ class RiskManager(BaseAgent):
                     dynamic_risk_pct = risk_pct * 0.5
                     self.logger.warning(f"[{self.name}] DRAWDOWN PROTECTION: 2 losses in a row. Risk cut to {dynamic_risk_pct*100}%.")
             
-            # ═══ 1. Liquidation Price Check & Finalize SL ═══
-            derivatives_data = market_data.get("derivatives_data") or {}
-            mm_pct = float(derivatives_data.get("maintenance_margin_pct", 0.01))
-            
-            if decision == "LONG":
-                liq_price = current_price * (1 - (1 / leverage) + mm_pct)
-                if sl_price <= liq_price:
-                    self.logger.warning(f"[{self.name}] SL {sl_price:.4f} is below Liquidation {liq_price:.4f}. Adjusting SL.")
-                    sl_price = liq_price * 1.005
-            elif decision == "SHORT":
-                liq_price = current_price * (1 + (1 / leverage) - mm_pct)
-                if sl_price >= liq_price:
-                    self.logger.warning(f"[{self.name}] SL {sl_price:.4f} is above Liquidation {liq_price:.4f}. Adjusting SL.")
-                    sl_price = liq_price * 0.995
+            # --- 1. Finalize SL ---
+            # NOTE: Removed standalone liquidation price calculation.
+            # In a cross-margin DEX (Nado/Vertex), liquidation is based on account-wide Health (maintenance margin),
+            # not a single price point for a single position. Adjusting SL based on a simplistic formula is dangerous.
+            liq_price = 0.0
             
             # Recalculate distance after SL adjustment
             distance_to_sl = abs(current_price - sl_price)
