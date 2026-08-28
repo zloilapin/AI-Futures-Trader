@@ -98,16 +98,21 @@ class MarketDataService:
                 
                 if snapshots and snapshots.snapshots:
                     vols = snapshots.snapshots[0].cumulative_volumes
-                    products = self.nado_client.market.get_all_product_symbols()
+                    products = await asyncio.to_thread(self.nado_client.market.get_all_product_symbols)
                     
                     data = []
+                    stablecoins = {'USDT', 'USDC', 'USDE', 'DAI', 'USD'}
                     for p in products:
-                        if p.symbol.startswith('USDT') or p.symbol.startswith('USDC'):
+                        base_symbol = p.symbol.split('-')[0].upper()
+                        if base_symbol in stablecoins:
+                            continue
+                            
+                        # Only include perp products (product_id > 0)
+                        if p.product_id == 0:
                             continue
                             
                         vid = str(p.product_id)
                         vol = float(vols.get(vid, 0)) / 1e18
-                        base_symbol = p.symbol.split('-')[0].upper()
                         data.append((base_symbol, vol))
                         
                     # Sort by highest volume
@@ -118,7 +123,8 @@ class MarketDataService:
                 self._log(f"⚠️ [MarketDataService] Failed to fetch Nado volume snapshots: {e}")
                 
             # If dynamic fetch fails, fallback to product_map keys
-            nado_symbols = [sym for sym in self.product_map.keys() if sym != "USDT"]
+            stablecoins = {'USDT', 'USDC', 'USDE', 'DAI', 'USD'}
+            nado_symbols = [sym for sym in self.product_map.keys() if sym.upper() not in stablecoins]
             return [{"symbol": f"{sym}-USD", "volumeQuote": 10000000} for sym in nado_symbols[:limit]]
             
         # Fallback to Kraken if Nado is disabled

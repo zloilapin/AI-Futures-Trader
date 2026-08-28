@@ -14,8 +14,11 @@ class NadoTradingService(BaseTradingService):
     
     def __init__(self, nado_client=None):
         self.wallet = Web3Wallet()
+        self.logger = logger
+        
         self.client = None
         self.is_connected = False
+        self._nado_time_offset = 0  # Store time offset transparently on the service instance
         self.active_positions = {}
         self.product_map: Dict[str, int] = {}
         self.default_subaccount_id = None
@@ -239,6 +242,8 @@ class NadoTradingService(BaseTradingService):
             import time
             import asyncio
             from nado_protocol.engine_client.types.execute import PlaceOrderParams, OrderParams
+            from nado_protocol.utils.bytes32 import subaccount_to_hex
+            from nado_protocol.utils.nonce import gen_order_nonce
             
             if not getattr(self, "_market_cache", None):
                 self._market_cache = {}
@@ -285,25 +290,52 @@ class NadoTradingService(BaseTradingService):
                 logger.error(f"[NadoTradingService] ❌ Order amount is zero after step size alignment.")
                 return False
                 
-            # Expiration for IOC
+            # Expiration
             try:
-                from nado_protocol.utils.expiration import OrderType, get_expiration_timestamp
-                expiration = get_expiration_timestamp(OrderType.IOC, int(time.time()) + 60)
-            except ImportError:
-                expiration = int(time.time()) + 60
+                from nado_protocol.utils.expiration import get_expiration_timestamp
+                expiration = get_expiration_timestamp(86400 * 30)
+            except Exception as e:
+                logger.warning(f"[NadoTradingService] Fallback to standard expiration: {e}")
+                expiration = int(time.time()) + 86400 * 30
             
-            from nado_protocol.utils.bytes32 import subaccount_to_hex
-            from nado_protocol.utils.math import gen_order_nonce
             sender = subaccount_to_hex(self.wallet.get_address(), "default")
             
-            # Order version must be 1 (appendix)
+            # Use official SDK nonce generator
+            nonce = gen_order_nonce()
+            
+            decoded_recv_time = nonce >> 20
+            now_ms = time.time_ns() // 1_000_000
+            
+            logger.warning(
+                f"[NADO TIME DEBUG] "
+                f"nonce={nonce}, "
+                f"recv_time={decoded_recv_time}, "
+                f"local_now={now_ms}, "
+                f"ttl={decoded_recv_time - now_ms}ms"
+            )
+            
+            # Use official SDK appendix builder
+            try:
+                from nado_protocol.utils.order import build_appendix
+                try:
+                    from nado_protocol.utils.expiration import OrderType
+                    order_type = OrderType.IOC
+                except ImportError:
+                    # Fallback if OrderType is in a different module
+                    order_type = 1 # Assuming IOC is 1, or use whatever enum Nado SDK uses
+                
+                appendix = build_appendix(order_type=order_type)
+            except Exception as e:
+                logger.warning(f"[NadoTradingService] Failed to build appendix officially, using fallback: {e}")
+                appendix = 1
+                
             order = OrderParams(
                 sender=sender,
                 amount=amount_x18,
                 priceX18=price_x18,
                 expiration=expiration,
-                nonce=gen_order_nonce(),
-                appendix=1
+                nonce=nonce,
+                appendix=appendix
             )
             
             params = PlaceOrderParams(
@@ -311,7 +343,27 @@ class NadoTradingService(BaseTradingService):
                 order=order
             )
             
-            res = self.client.market.place_order(params)
+            logger.warning(
+                f"[NADO FINAL ORDER] "
+                f"product={product_id}, "
+                f"nonce={order.nonce}, "
+                f"decoded_recv={int(order.nonce) >> 20}, "
+                f"ttl={(int(order.nonce) >> 20) - (time.time_ns() // 1_000_000)}ms"
+            )
+            
+            logger.warning(
+                f"[NADO DEBUG] "
+                f"Gateway={getattr(self.client.context.engine_client, 'url', 'Unknown')} "
+                f"ChainID={getattr(self.client.context.engine_client, 'chain_id', 'Unknown')}"
+            )
+            
+            # Pure SDK call (runs synchronously in thread to avoid blocking)
+            try:
+                res = await asyncio.to_thread(self.client.market.place_order, params)
+            except Exception as e:
+                logger.error(f"[NadoTradingService] ❌ Order placement failed: {e}")
+                return False
+                
             digest = res.data.digest if res.data else None
             
             if not digest:
@@ -445,7 +497,13 @@ class NadoTradingService(BaseTradingService):
             }
             return True
         except Exception as e:
-            logger.error(f"[NadoTradingService] ❌ Failed to place order: {e}")
+            logger.error(f"[NadoTradingService] ⚠️ Failed to place order: {e}")
+            try:
+                import traceback
+                with open("logs/nado_errors.txt", "a", encoding="utf-8") as f:
+                    f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {symbol} {direction} ERROR: {type(e).__name__}: {e}\n{traceback.format_exc()}\n")
+            except Exception:
+                pass
             return False
 
     def _load_state(self):

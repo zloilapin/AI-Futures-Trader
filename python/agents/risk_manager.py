@@ -18,8 +18,8 @@ class RiskManager(BaseAgent):
     def _get_profile_rules(self) -> tuple[float, float, float, float, int]:
         profile = config.TRADING_PROFILE
         if profile == "AGGRESSIVE":
-            # Risk 5% per trade, SL 1.5x ATR (min 1.2%), TP 4.5x ATR (RR 1:3), Max Margin 45%
-            return (0.05, 1.5, 4.5, 0.45, 70)
+            # Risk 5% per trade, SL 2.5x ATR, TP 4.5x ATR (RR 1:1.8), Max Margin 45%
+            return (0.05, 2.5, 4.5, 0.45, 70)
         elif profile == "CONSERVATIVE":
             # Risk 0.5% per trade, SL 2.0x ATR, TP 3.0x ATR, Max Margin 10%
             return (0.005, 2.0, 3.0, 0.10, 85)
