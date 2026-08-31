@@ -32,4 +32,4 @@ class UniverseAgent(BaseAgent):
         full_prompt = f"{self.system_instruction}\n\nBroad Market Data:\n{data_string}"
         
         # Отправляем в LLM
-        return await self.generate_json(full_prompt, required_keys=["selected_symbols", "reasoning"])
+        return await self.generate_json(full_prompt, required_keys=["selected_pairs", "reasoning"])

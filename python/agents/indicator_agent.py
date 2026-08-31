@@ -8,7 +8,7 @@ from core.llm_client import LLMClient
 class IndicatorAgent(BaseAgent):
     """
     Specialized agent for interpreting quantitative technical indicators (RSI, EMA-20, MACD momentum).
-    Identifies momentum divergence, trend direction, and overbought/oversold conditions on Kraken Futures.
+    Identifies momentum divergence, trend direction, and overbought/oversold conditions on Nado DEX.
     """
     def __init__(self, logger: TradeLogger, llm_client: LLMClient = None):
         super().__init__("Indicator_Agent", logger, llm_client)

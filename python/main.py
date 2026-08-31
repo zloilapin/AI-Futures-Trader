@@ -34,8 +34,6 @@ from agents.reflector_agent import ReflectorAgent
 # --- SERVICE IMPORTS ---
 from services.market_data_service import MarketDataService
 from services.telegram_service import TelegramService
-from services.paper_trading_service import PaperTradingService
-from services.kraken_trading_service import KrakenTradingService
 from services.telegram_bot_listener import TelegramBotListener
 
 
@@ -100,6 +98,23 @@ async def run_single_cycle(
 
     if force_scan and is_rest:
         print(f"⚡ [ForceScan] Ручной запуск /scan во время отдыха ({time_str}). Пропуск тихого режима!")
+
+    # Проверка Cooldown после серии убытков
+    cooldown_until = getattr(trading_service, "cooldown_until", 0)
+    if __import__("time").time() < cooldown_until:
+        remain_min = int((cooldown_until - __import__("time").time()) / 60)
+        print(f"🛑 [Cooldown] Бот на паузе после 3 убытков подряд. Осталось {remain_min} мин.")
+        logger.info(f"[System_Core] Cooldown active. {remain_min} min remaining.")
+        if not force_scan:
+            return
+            
+    if hasattr(trading_service, "recent_streak") and len(trading_service.recent_streak) >= 3 and trading_service.recent_streak[-3:] == ["LOSS", "LOSS", "LOSS"]:
+        trading_service.cooldown_until = __import__("time").time() + 3600
+        trading_service.recent_streak.clear()
+        print(f"🛑 [Cooldown Activated] Зафиксировано 3 убытка подряд! Торговля приостановлена на 1 час.")
+        logger.info("[System_Core] 3 consecutive losses detected. 1 hour cooldown activated.")
+        if not force_scan:
+            return
 
     # СТАДИЯ 1: UNIVERSE (Выбор активов)
     logger.info("[Stage 1] Universe Agent сканирует DEX на наличие ликвидных активов...")
@@ -339,6 +354,72 @@ async def run_single_cycle(
                 
             continue
 
+        # СТАДИЯ 4.5: КОРРЕЛЯЦИОННЫЙ ФИЛЬТР (BTC/ETH)
+        is_btc = symbol in ["BTC-USD", "WBTC-USD"]
+        is_eth = symbol in ["ETH-USD", "WETH-USD"]
+        if decision in ["LONG", "SHORT"] and (is_btc or is_eth):
+            conflict = False
+            btc_pos = trading_service.active_positions.get("BTC-USD") or trading_service.active_positions.get("WBTC-USD")
+            eth_pos = trading_service.active_positions.get("ETH-USD") or trading_service.active_positions.get("WETH-USD")
+            
+            if is_eth and btc_pos and btc_pos["direction"] == decision:
+                conflict = True
+            elif is_btc and eth_pos and eth_pos["direction"] == decision:
+                conflict = True
+                
+            if conflict:
+                print(f"⏸️ Пропуск {symbol}. Корреляционный фильтр: Родственный актив уже открыт в {decision}.")
+                logger.info(f"[System_Core] Пропуск {symbol} из-за корреляции. Родственный актив уже открыт.")
+                scan_summaries.append({
+                    "symbol": symbol,
+                    "decision": decision,
+                    "conviction": conviction,
+                    "scanner_status": "✅ OK",
+                    "scanner_reason": None,
+                    "risk_approved": False,
+                    "risk_reason": "Корреляционный фильтр (BTC/ETH уже открыт)",
+                    "ceo_reasoning": "Bypassed by Correlation Filter",
+                    "status": "⏸️ НЕТ СИГНАЛА"
+                })
+                tracker.record_rejection("CORRELATION_VETO")
+                continue
+
+        # СТАДИЯ 4.6: ФАНДИНГ ГЕЙТ (Funding Rate Gate)
+        funding_rate = market_data.get("derivatives_data", {}).get("funding_rate", 0.0)
+        if decision == "LONG" and funding_rate > 0.0005: # 0.05%
+            print(f"⏸️ Пропуск {symbol}. Фандинг гейт: Запрет LONG при экстремально положительном фандинге ({funding_rate*100:.3f}%).")
+            logger.info(f"[System_Core] Funding Gate: LONG denied for {symbol}. Funding = {funding_rate}")
+            scan_summaries.append({
+                "symbol": symbol,
+                "decision": decision,
+                "conviction": conviction,
+                "scanner_status": "✅ OK",
+                "scanner_reason": None,
+                "risk_approved": False,
+                "risk_reason": f"Фандинг гейт (Funding = {funding_rate*100:.3f}%)",
+                "ceo_reasoning": "Bypassed by Funding Gate",
+                "status": "⏸️ НЕТ СИГНАЛА"
+            })
+            tracker.record_rejection("FUNDING_VETO")
+            continue
+            
+        if decision == "SHORT" and funding_rate < -0.0005:
+            print(f"⏸️ Пропуск {symbol}. Фандинг гейт: Запрет SHORT при экстремально отрицательном фандинге ({funding_rate*100:.3f}%).")
+            logger.info(f"[System_Core] Funding Gate: SHORT denied for {symbol}. Funding = {funding_rate}")
+            scan_summaries.append({
+                "symbol": symbol,
+                "decision": decision,
+                "conviction": conviction,
+                "scanner_status": "✅ OK",
+                "scanner_reason": None,
+                "risk_approved": False,
+                "risk_reason": f"Фандинг гейт (Funding = {funding_rate*100:.3f}%)",
+                "ceo_reasoning": "Bypassed by Funding Gate",
+                "status": "⏸️ НЕТ СИГНАЛА"
+            })
+            tracker.record_rejection("FUNDING_VETO")
+            continue
+
         # СТАДИЯ 5: РИСК-МЕНЕДЖМЕНТ
         logger.info(f"[Stage 5] Risk Manager ({profile}) проверяет параметры сделки для {symbol}...")
         risk_verdict = await risk_manager.analyze(ceo_verdict, portfolio_data, market_data)
@@ -512,15 +593,15 @@ async def main():
     if trading_engine == "PAPER" and not config.LIVE_TRADING_ENABLED:
         from services.paper_trading_service import PaperTradingService
         trading_service = PaperTradingService(logger=logger)
-        exchange_name = "Paper Trading"
-        fetcher = MarketDataService(exchange_name="Kraken Futures", logger=logger)
-    elif config.NADO_LIVE_TRADING_ENABLED or trading_engine == "NADO":
+        exchange_name = f"Nado DEX (Paper - {config.NADO_NETWORK})"
+        fetcher = MarketDataService(exchange_name=exchange_name, logger=logger)
+    else:
         from services.nado_trading_service import NadoTradingService
         import os
         try:
-            from nado_protocol.client import create_nado_client, NadoClientMode
-            global_nado_client = create_nado_client(
-                mode=NadoClientMode.MAINNET,
+            from core.nado_helper import create_configured_nado_client
+            global_nado_client = create_configured_nado_client(
+                network_name=config.NADO_NETWORK,
                 signer=os.getenv("INK_PRIVATE_KEY")
             )
         except Exception as e:
@@ -529,13 +610,8 @@ async def main():
             
         trading_service = NadoTradingService()
         await trading_service.initialize(nado_client=global_nado_client)
-        exchange_name = "Nado DEX"
-        fetcher = MarketDataService(exchange_name="Nado DEX", logger=logger, nado_client=global_nado_client)
-    else:
-        from services.kraken_trading_service import KrakenTradingService
-        trading_service = KrakenTradingService()
-        exchange_name = "Kraken Futures"
-        fetcher = MarketDataService(exchange_name="Kraken Futures", logger=logger)
+        exchange_name = f"Nado DEX ({config.NADO_NETWORK})"
+        fetcher = MarketDataService(exchange_name=exchange_name, logger=logger, nado_client=global_nado_client)
     
     # P0.3: Startup sync — rebuild state from Exchange BEFORE any trading logic
     if hasattr(trading_service, "sync_with_exchange"):

@@ -65,12 +65,28 @@ class CEOAgent(BaseAgent):
         
         final_hold_category = "NONE"
         
-        # ESCALATION MODEL LOGIC
-        if conviction >= 80:
+        # ESCALATION MODEL LOGIC (Cost Optimized)
+        primary_decision = decision
+        primary_conviction = conviction
+        escalated = False
+        gemini_decision_log = "N/A"
+        gemini_conv_log = "N/A"
+        
+        if decision == "HOLD":
+            self.logger.info(f"[{self.name}] Primary CEO decided HOLD. Bypassing escalation to save API costs.")
+            print(f"⏩ [Escalation Bypassed] Рынок не имеет явного тренда (HOLD). Gemini не вызывается для экономии API.")
+        elif conviction >= 80:
             self.logger.info(f"[{self.name}] High conviction {decision} ({conviction}% >= 80%). Bypassing escalation.")
+            print(f"⏩ [Escalation Bypassed] Уверенность Llama достаточно высока ({conviction}%). Gemini не вызывается.")
+        elif conviction < 60:
+            self.logger.info(f"[{self.name}] Conviction too low ({decision} {conviction}% < 60%). Forcing HOLD to save API costs.")
+            print(f"⏩ [Escalation Bypassed] Слишком низкая уверенность Llama ({conviction}% < 60%). Принудительный пропуск сделки (HOLD).")
+            decision = "HOLD"
+            conviction = 0
         else:
-            self.logger.info(f"[{self.name}] Conviction < 80% ({decision} {conviction}%). Escalating to Gemini...")
-            print(f"⚠️ [Escalation] Недостаточная уверенность ({decision} {conviction}%). Передача дела в Gemini 3.7 Flash для поиска возможностей...")
+            escalated = True
+            self.logger.info(f"[{self.name}] Conviction {conviction}% (60-79%). Escalating to Gemini...")
+            print(f"⚠️ [Escalation] Спорный сетап ({decision} {conviction}%). Подключаем Gemini 3.7 Flash для финального вердикта...")
             
             escalation_prompt = f"""You are the Supreme Escalation AI (Gemini 3.7 Flash) for an elite crypto prop-trading firm.
 The Primary CEO (Llama 70B) has proposed a {decision} on {symbol} with a conviction of {conviction}%.
@@ -107,18 +123,31 @@ SCHEMA:
                 finally:
                     self.llm_client = original_llm
                 
-                decision = str(k3_response.get("decision", "ERROR")).upper()
-                if decision == "ERROR":
+                gemini_decision = str(k3_response.get("decision", "ERROR")).upper()
+                if gemini_decision == "ERROR":
                     raise ValueError("Gemini returned ERROR")
                     
                 k3_breakdown = k3_response.get("score_breakdown", {})
-                decision, conviction = self._validate_and_compute_score(decision, k3_breakdown)
+                gemini_decision, gemini_conviction = self._validate_and_compute_score(gemini_decision, k3_breakdown)
                 
+                gemini_decision_log = gemini_decision
+                gemini_conv_log = gemini_conviction
                 k3_reasoning = k3_response.get("reasoning_en", "")
                 
                 reasoning = f"[Primary CEO: {reasoning}]\n\n[ESCALATION GEMINI VERDICT: {k3_reasoning}]"
-                self.logger.info(f"[{self.name}] Escalation Gemini Final Decision: {decision} ({conviction}%)")
-                print(f"🧠 [Gemini 3.7 Flash] Вердикт: {decision} ({conviction}%)")
+                self.logger.info(f"[{self.name}] Escalation Gemini Final Decision: {gemini_decision} ({gemini_conviction}%)")
+                print(f"🧠 [Gemini 3.7 Flash] Вердикт: {gemini_decision} ({gemini_conviction}%)")
+                
+                # Consensus Check logic
+                if gemini_decision == primary_decision:
+                    decision = gemini_decision
+                    conviction = gemini_conviction
+                    print(f"🤝 [Consensus] Модели пришли к согласию! Подтвержден {decision}.")
+                else:
+                    print(f"⚔️ [Conflict] Llama ({primary_decision}) и Gemini ({gemini_decision}) разошлись во мнениях. Итог: HOLD.")
+                    decision = "HOLD"
+                    conviction = 0
+                    
             except Exception as e:
                 self.logger.error(f"[{self.name}] Escalation LLM failed: {e}")
                 decision = "ERROR"
@@ -131,6 +160,16 @@ SCHEMA:
         else:
             final_hold_category = "NONE"
 
+        # Log confidence stats for successful trades
+        if decision in ["LONG", "SHORT"]:
+            try:
+                import datetime
+                with open("confidence_stats.log", "a", encoding="utf-8") as f:
+                    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    f.write(f"[{ts}] {symbol} | Result: {decision} | Llama: {primary_decision} ({primary_conviction}%) | Gemini: {gemini_decision_log} ({gemini_conv_log}%)\n")
+            except Exception as e:
+                self.logger.error(f"Failed to log confidence stats: {e}")
+
         return {
             "decision": decision,
             "conviction": conviction,
@@ -138,7 +177,9 @@ SCHEMA:
             "reasoning_ru": llm_response.get("reasoning_ru", ""),
             "consensus_summary": llm_response.get("consensus_summary", ""),
             "mtf_validation": llm_response.get("mtf_validation", ""),
-            "hold_category": final_hold_category if decision == "HOLD" else "NONE"
+            "hold_category": final_hold_category if decision == "HOLD" else "NONE",
+            "primary_conviction": primary_conviction,
+            "escalated": escalated
         }
 
     def _determine_hold_category(self, analyst_reports: list, conviction: int) -> str:

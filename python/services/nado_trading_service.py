@@ -46,8 +46,10 @@ class NadoTradingService(BaseTradingService):
                 self.client = nado_client
             else:
                 # Initialize NadoClient with the private key (Fallback)
-                self.client = create_nado_client(
-                    mode=NadoClientMode.MAINNET,
+                from core.config import config
+                from core.nado_helper import create_configured_nado_client
+                self.client = create_configured_nado_client(
+                    network_name=config.NADO_NETWORK,
                     signer=self.wallet.get_private_key()
                 )
             self.is_connected = True
@@ -406,15 +408,11 @@ class NadoTradingService(BaseTradingService):
                 if not filled:
                     logger.error(f"[NadoTradingService] ❌ Order {digest} was accepted but NOT filled within 10s. Cancelling to prevent race condition...")
                     try:
-                        from nado_protocol.engine_client.types.execute import CancelOrdersParams, CancelOrderParams
+                        from nado_protocol.engine_client.types.execute import CancelOrdersParams
                         cancel_params = CancelOrdersParams(
-                            txs=[
-                                CancelOrderParams(
-                                    product_id=product_id,
-                                    digest=digest,
-                                    sender=sender
-                                )
-                            ]
+                            productIds=[product_id],
+                            digests=[digest],
+                            sender=sender
                         )
                         await asyncio.to_thread(self.client.market.cancel_orders, cancel_params)
                         logger.info(f"[NadoTradingService] 🗑️ Order {digest} cancelled successfully.")
@@ -434,40 +432,54 @@ class NadoTradingService(BaseTradingService):
                 tp_type = "oracle_price_below"
                 
             sl_digest = None
+            price_increment_base = float(price_increment) / 1e18
+            
             # Place Native Stop Loss
             if sl_price > 0:
                 exec_price = sl_price * 0.9 if direction.upper() == "LONG" else sl_price * 1.1
-                exec_price = (exec_price // price_increment) * price_increment
-                trigger_price = (sl_price // price_increment) * price_increment
+                
+                # Convert to integer x18 representation FIRST to avoid float math imprecision
+                exec_price_x18 = int(exec_price * 10**18)
+                trigger_price_x18 = int(sl_price * 10**18)
+                
+                # Round perfectly using integer arithmetic
+                exec_price_x18 = (exec_price_x18 // price_increment) * price_increment
+                trigger_price_x18 = (trigger_price_x18 // price_increment) * price_increment
+                
                 try:
                     sl_res = await asyncio.to_thread(
                         self.client.market.place_price_trigger_order,
                         product_id=product_id,
-                        price_x18=str(int(exec_price * 10**18)),
+                        price_x18=str(exec_price_x18),
                         amount_x18=trigger_amount_x18,
-                        trigger_price_x18=str(int(trigger_price * 10**18)),
+                        trigger_price_x18=str(trigger_price_x18),
                         trigger_type=sl_type,
                         reduce_only=True
                     )
-                    sl_digest = sl_res.data.digest if sl_res and sl_res.data else None
+                    sl_digest = sl_res.data.digest if sl_res.data else None
                     logger.info(f"[NadoTradingService] 🛡️ Native Stop Loss placed at {sl_price}")
                 except Exception as e:
                     logger.error(f"[NadoTradingService] ❌ Failed to place Native SL: {e}. ABORTING POSITION!")
                     await self.force_close_position(symbol, bypass_check=True)
                     return False
-
+                    
             # Place Native Take Profit
             if tp_price > 0:
                 exec_price = tp_price * 0.9 if direction.upper() == "LONG" else tp_price * 1.1
-                exec_price = (exec_price // price_increment) * price_increment
-                trigger_price = (tp_price // price_increment) * price_increment
+                
+                exec_price_x18 = int(exec_price * 10**18)
+                trigger_price_x18 = int(tp_price * 10**18)
+                
+                exec_price_x18 = (exec_price_x18 // price_increment) * price_increment
+                trigger_price_x18 = (trigger_price_x18 // price_increment) * price_increment
+                
                 try:
                     await asyncio.to_thread(
                         self.client.market.place_price_trigger_order,
                         product_id=product_id,
-                        price_x18=str(int(exec_price * 10**18)),
+                        price_x18=str(exec_price_x18),
                         amount_x18=trigger_amount_x18,
-                        trigger_price_x18=str(int(trigger_price * 10**18)),
+                        trigger_price_x18=str(trigger_price_x18),
                         trigger_type=tp_type,
                         reduce_only=True
                     )
@@ -476,8 +488,8 @@ class NadoTradingService(BaseTradingService):
                     logger.error(f"[NadoTradingService] ❌ Failed to place Native TP: {e}. ABORTING POSITION!")
                     if sl_digest:
                         try:
-                            from nado_protocol.engine_client.types.execute import CancelOrdersParams, CancelOrderParams
-                            await asyncio.to_thread(self.client.market.cancel_orders, CancelOrdersParams(txs=[CancelOrderParams(product_id=product_id, digest=sl_digest, sender=sender)]))
+                            from nado_protocol.engine_client.types.execute import CancelOrdersParams
+                            await asyncio.to_thread(self.client.market.cancel_trigger_orders, CancelOrdersParams(productIds=[product_id], digests=[sl_digest], sender=sender))
                         except Exception:
                             pass
                     await self.force_close_position(symbol, bypass_check=True)
@@ -493,8 +505,19 @@ class NadoTradingService(BaseTradingService):
                 "size_usd": notional_usd,
                 "tp_price": tp_price,
                 "sl_price": sl_price,
-                "leverage": leverage
+                "leverage": leverage,
+                "highest_price": entry_price,
+                "lowest_price": entry_price,
+                "product_id": product_id,
+                "sender": sender,
+                "sl_digest": sl_digest,
+                "sl_type": sl_type,
+                "trigger_amount_x18": trigger_amount_x18
             }
+            
+            if sl_digest:
+                asyncio.create_task(self._trailing_stop_monitor(symbol))
+                
             return True
         except Exception as e:
             logger.error(f"[NadoTradingService] ⚠️ Failed to place order: {e}")
@@ -776,3 +799,109 @@ class NadoTradingService(BaseTradingService):
                 logger.info(f"[NadoTradingService] ♻️ Successfully synced {restored} positions from Nado.")
         except Exception as e:
             logger.error(f"[NadoTradingService] ❌ Failed to sync with Nado: {e}")
+
+    async def _trailing_stop_monitor(self, symbol: str):
+        """Background task to manage trailing stop dynamically using Nado SDK."""
+        from nado_protocol.engine_client.types.execute import CancelOrdersParams
+        
+        # Wait a bit for everything to settle
+        await asyncio.sleep(5)
+        
+        while self.is_connected and symbol in self.active_positions:
+            try:
+                pos = self.active_positions.get(symbol)
+                if not pos:
+                    break
+                    
+                product_id = pos.get("product_id")
+                direction = pos.get("direction")
+                entry = pos.get("entry_price")
+                tp = pos.get("tp_price")
+                sl = pos.get("sl_price")
+                sl_digest = pos.get("sl_digest")
+                
+                if not sl_digest or product_id is None:
+                    break # Restored or missing trigger order info
+                
+                # Get latest price
+                price_data = await asyncio.to_thread(self.client.market.get_latest_market_price, product_id)
+                current_price = float(price_data) if price_data else 0.0
+                
+                if current_price <= 0:
+                    await asyncio.sleep(10)
+                    continue
+                    
+                # Update Extremes
+                if current_price > pos.get("highest_price", entry):
+                    pos["highest_price"] = current_price
+                if current_price < pos.get("lowest_price", entry):
+                    pos["lowest_price"] = current_price
+
+                highest = pos["highest_price"]
+                lowest = pos["lowest_price"]
+                
+                trail_pct = 0.015
+                activation_pct = 0.015
+                new_sl = None
+                
+                if direction == "LONG":
+                    halfway_to_tp = entry + ((tp - entry) * 0.5) if tp > 0 else float('inf')
+                    if current_price >= halfway_to_tp and pos["sl_price"] < entry:
+                        new_sl = entry
+                        logger.info(f"[NadoTradingService] 🛡️ [Breakeven Guard] {symbol} Price passed 50% TP. SL moved to breakeven: {entry:.4f}")
+                    elif (highest - entry) / entry >= activation_pct:
+                        candidate_sl = highest * (1 - trail_pct)
+                        if candidate_sl > pos["sl_price"]:
+                            new_sl = candidate_sl
+                            logger.info(f"[NadoTradingService] 📈 [Trailing Stop] {symbol} SL trailed up to: {new_sl:.4f}")
+                else:
+                    halfway_to_tp = entry - ((entry - tp) * 0.5) if tp > 0 else 0
+                    if current_price <= halfway_to_tp and pos["sl_price"] > entry:
+                        new_sl = entry
+                        logger.info(f"[NadoTradingService] 🛡️ [Breakeven Guard] {symbol} Price passed 50% TP. SL moved to breakeven: {entry:.4f}")
+                    elif (entry - lowest) / entry >= activation_pct:
+                        candidate_sl = lowest * (1 + trail_pct)
+                        if candidate_sl < pos["sl_price"] or pos["sl_price"] == 0:
+                            new_sl = candidate_sl
+                            logger.info(f"[NadoTradingService] 📉 [Trailing Stop] {symbol} SL trailed down to: {new_sl:.4f}")
+                            
+                # If we have a new SL, we must replace the trigger order on Nado
+                if new_sl and new_sl != pos["sl_price"]:
+                    # 1. Cancel old SL
+                    cancel_params = CancelOrdersParams(
+                        productIds=[product_id],
+                        digests=[sl_digest],
+                        sender=pos["sender"]
+                    )
+                    await asyncio.to_thread(self.client.market.cancel_trigger_orders, cancel_params)
+                    
+                    # 2. Place new SL
+                    price_increment = float(self.client.market.get_all_engine_markets().perp_products[product_id].price_increment_x18) / 1e18
+                    exec_price = new_sl * 0.9 if direction == "LONG" else new_sl * 1.1
+                    
+                    exec_price_x18 = int(exec_price * 10**18)
+                    trigger_price_x18 = int(new_sl * 10**18)
+                    
+                    exec_price_x18 = (exec_price_x18 // int(price_increment * 10**18)) * int(price_increment * 10**18)
+                    trigger_price_x18 = (trigger_price_x18 // int(price_increment * 10**18)) * int(price_increment * 10**18)
+                    
+                    sl_res = await asyncio.to_thread(
+                        self.client.market.place_price_trigger_order,
+                        product_id=product_id,
+                        price_x18=str(exec_price_x18),
+                        amount_x18=pos["trigger_amount_x18"],
+                        trigger_price_x18=str(trigger_price_x18),
+                        trigger_type=pos["sl_type"],
+                        reduce_only=True
+                    )
+                    if sl_res.data:
+                        pos["sl_digest"] = sl_res.data.digest
+                        pos["sl_price"] = new_sl
+                        logger.info(f"[NadoTradingService] ✅ Native Trailing SL replaced successfully for {symbol} at {new_sl:.4f}")
+                    else:
+                        logger.error(f"[NadoTradingService] ❌ Failed to place trailing SL order for {symbol}")
+                        
+            except Exception as e:
+                logger.error(f"[NadoTradingService] ⚠️ Trailing stop error for {symbol}: {e}")
+                
+            await asyncio.sleep(10)

@@ -40,9 +40,12 @@ class TelegramAgent(BaseAgent):
         reasoning_en = ceo.get("reasoning_en", "")
         reasoning = self._escape_md(f"{reasoning_en}".strip())
 
+        from core.config import config
+        net_badge = f" [{config.NADO_NETWORK}]" if config.NADO_NETWORK else ""
+        
         if decision == "HOLD":
             return (
-                f"⏸️ *MARKET UPDATE | KRAKEN FUTURES*\n\n"
+                f"⏸️ *MARKET UPDATE | NADO DEX{net_badge}*\n\n"
                 f"🪙 *Asset / Монета:* `{symbol}`\n"
                 f"📊 *Direction / Направление:* {dir_emoji}\n"
                 f"🔥 *AI Conviction / Уверенность:* `{conviction}%`\n\n"
@@ -57,12 +60,20 @@ class TelegramAgent(BaseAgent):
         notional_usd = risk.get("notional_size_usd", 0)
         pos_pct = risk.get("position_size_pct", 0)
         rr_ratio = risk.get("risk_reward_ratio", 0)
+        
+        primary_conviction = ceo.get("primary_conviction", conviction)
+        escalated = ceo.get("escalated", False)
+        
+        if escalated:
+            conv_str = f"Llama {primary_conviction}% | Gemini {conviction}% (Escalated)"
+        else:
+            conv_str = f"Llama {primary_conviction}% (Direct)"
 
         message = (
-            f"🚀 *TRADE SIGNAL | KRAKEN FUTURES*\n\n"
+            f"🚀 *TRADE SIGNAL | NADO DEX{net_badge}*\n\n"
             f"🪙 *Asset / Монета:* `{symbol}`\n"
             f"📊 *Direction / Направление:* {dir_emoji}\n"
-            f"🔥 *AI Conviction / Уверенность:* `{conviction}%` \n"
+            f"🔥 *AI Conviction:* `{conv_str}`\n"
             f"💰 *Position / Сумма сделки:* `${notional_usd:,.2f}` ({pos_pct}%)\n"
             f"🎯 *Entry / Цена входа:* `${self._format_price(entry_price)}`\n\n"
             f"🟢 *Take Profit (TP):* `${self._format_price(tp_price)}` (+{tp_pct}%)\n"

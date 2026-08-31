@@ -27,10 +27,10 @@ class MarketDataService:
             else:
                 # Fallback to instantiating if none was provided
                 try:
-                    from nado_protocol.client import create_nado_client, NadoClientMode
+                    from core.nado_helper import create_configured_nado_client
                     private_key = os.getenv("INK_PRIVATE_KEY")
-                    self.nado_client = create_nado_client(
-                        mode=NadoClientMode.MAINNET,
+                    self.nado_client = create_configured_nado_client(
+                        network_name=config.NADO_NETWORK,
                         signer=private_key
                     )
                     self._load_nado_product_map()
@@ -231,11 +231,7 @@ class MarketDataService:
     async def _fetch_ohlc_interval(self, symbol: str, interval_min: int) -> dict:
         pair = self._normalize_pair(symbol)
         
-        # Map integer minutes to Kraken Futures timeframe strings
-        tf_map = {15: "15m", 60: "1h", 240: "4h", 1440: "1d"}
-        interval_str = tf_map.get(interval_min, "15m")
-        
-        if getattr(self, "is_nado", False):
+        if getattr(self, "is_nado", False) or True: # Force Nado
             candles = await self._fetch_nado_candles(symbol, interval_min, 20)
             if candles:
                 closes = [c["close"] for c in candles]
@@ -254,35 +250,6 @@ class MarketDataService:
                 }
             self._log(f"⚠️ [MarketDataService] Nado candles empty for {symbol}. NO FALLBACK ALLOWED.")
             raise ValueError(f"Nado OHLCV data unavailable for {symbol}")
-
-        url = f"https://futures.kraken.com/api/charts/v1/trade/{pair}/{interval_str}"
-        try:
-            session = await self._get_session()
-            if True:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        candles = self._normalize_candles(data.get("candles", []))
-                        if candles:
-                            closes = [float(c["close"]) for c in candles[-20:]]
-                            current_price = closes[-1]
-                            price_5_ago = closes[-5] if len(closes) >= 5 else closes[0]
-                            pct_diff = ((current_price - price_5_ago) / price_5_ago) * 100
-                            trend = "BULLISH" if pct_diff > 0.2 else ("BEARISH" if pct_diff < -0.2 else "NEUTRAL")
-                            vol = sum(float(c["volume"]) for c in candles[-20:])
-                            return {
-                                "interval_min": interval_min,
-                                "current_price": round(current_price, 6),
-                                "trend": trend,
-                                "change_pct": round(pct_diff, 2),
-                                "volume": round(vol * current_price, 2),
-                                "candles_20": candles[-20:]
-                            }
-                        else:
-                            return {}
-        except Exception as e:
-            self._log(f"⚠️ [MarketDataService] Ошибка загрузки OHLC {interval_min}m для {symbol}: {e}")
-            raise Exception(f"Не удалось получить OHLC {interval_min}m для {symbol}") from e
         
         return {}
 
@@ -333,10 +300,9 @@ class MarketDataService:
         }
 
     async def fetch_order_book(self, symbol: str) -> Dict[str, Any]:
-        """Fetches real order book depth, spread, and wall strengths from Nado DEX (with Kraken fallback)."""
+        """Fetches real order book depth, spread, and wall strengths from Nado DEX."""
         pair = self._normalize_pair(symbol)
         
-        # 1. Try Nado DEX first
         if self.is_nado and self.nado_client:
             try:
                 import asyncio
@@ -376,40 +342,7 @@ class MarketDataService:
                 self._log(f"⚠️ [MarketDataService] Failed to fetch Nado order book for {symbol}: {e}. NO FALLBACK ALLOWED.")
                 raise ValueError(f"Nado OrderBook data unavailable for {symbol}")
                 
-        # 2. Fallback to Kraken Futures (Only for Kraken mode)
-        url = f"https://futures.kraken.com/derivatives/api/v3/orderbook?symbol={pair}"
-        try:
-            session = await self._get_session()
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    order_book = data.get("orderBook", {})
-                    bids = order_book.get("bids", [])
-                    asks = order_book.get("asks", [])
-                    if bids and asks:
-                        bids = sorted(bids, key=lambda x: float(x[0]), reverse=True)
-                        asks = sorted(asks, key=lambda x: float(x[0]))
-                        
-                        best_bid = float(bids[0][0])
-                        best_ask = float(asks[0][0])
-                        spread = round(best_ask - best_bid, 4)
-                        spread_pct = round((spread / best_bid) * 100, 4)
-                        bid_vol = sum(float(b[1]) for b in bids)
-                        ask_vol = sum(float(a[1]) for a in asks)
-                        return {
-                            "symbol": symbol,
-                            "spread": spread,
-                            "spread_pct": spread_pct,
-                            "bid_volume": round(bid_vol, 2),
-                            "ask_volume": round(ask_vol, 2),
-                            "imbalance": round(bid_vol / (ask_vol + 1e-8), 2),
-                            "best_bid": best_bid,
-                            "best_ask": best_ask
-                        }
-        except Exception as e:
-            self._log(f"⚠️ Failed to fetch Kraken fallback order book for {symbol}: {e}")
-            
-        return {}
+        raise ValueError(f"Nado OrderBook data unavailable for {symbol} (Client not initialized)")
 
     async def fetch_indicators(self, symbol: str) -> Dict[str, Any]:
         """Fetches candle data and computes RSI-14, EMA-20, and MACD."""
@@ -669,78 +602,79 @@ class MarketDataService:
         }
 
     async def fetch_oi_funding(self, symbol: str) -> Dict[str, Any]:
-        """Fetches real Open Interest and funding rates from Kraken Futures."""
-        url = "https://futures.kraken.com/derivatives/api/v3/tickers"
-        try:
-            session = await self._get_session()
-            if True:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        tickers = data.get("tickers", [])
-                        
-                        target_base = "XBT" if symbol.upper() == "BTC" else symbol.upper()
-                        
-                        for t in tickers:
-                            if t.get("tag") == "perpetual" and t.get("pair"):
-                                base_asset = t.get("pair").split(":")[0]
-                                if base_asset == target_base:
-                                    funding_rate = float(t.get("fundingRate", 0.0001) or 0.0001)
-                                    open_interest = float(t.get("openInterest", 0) or 0)
-                                    
-                                    # QW #4: Track OI Trend
-
-                                    oi_trend = "neutral"
-                                    if symbol in self._oi_history:
-                                        prev_oi = self._oi_history[symbol]
-                                        if open_interest > prev_oi * 1.01: # 1% increase
-                                            oi_trend = "rising"
-                                        elif open_interest < prev_oi * 0.99: # 1% decrease
-                                            oi_trend = "falling"
-                                        else:
-                                            oi_trend = "stable"
-                                            
-                                    self._oi_history[symbol] = open_interest
-                                    self._save_oi_history()
-
-                                    return {
-                                        "symbol": symbol,
-                                        "open_interest": open_interest,
-                                        "open_interest_trend": oi_trend,
-                                        "funding_rate": round(funding_rate, 6)
-                                    }
-        except Exception as e:
-            self._log(f"⚠️ [MarketDataService] Ошибка загрузки OI/Funding: {e}")
+        """Fetches real Open Interest and funding rates from Nado DEX."""
+        if not self.is_nado or not self.nado_client:
+            return {"symbol": symbol, "open_interest": 0.0, "open_interest_trend": "neutral", "funding_rate": 0.0001}
             
-        return {
-            "symbol": symbol,
-            "open_interest": 0.0,
-            "open_interest_trend": "neutral",
-            "funding_rate": 0.0001
-        }
+        try:
+            import asyncio
+            from nado_protocol.indexer_client.types.query import IndexerMarketSnapshotsParams, IndexerMarketSnapshotInterval
+            
+            base_symbol = symbol.split('-')[0].upper()
+            product_id = self.product_map.get(base_symbol)
+            if product_id is None:
+                return {"symbol": symbol, "open_interest": 0.0, "open_interest_trend": "neutral", "funding_rate": 0.0001}
+                
+            params = IndexerMarketSnapshotsParams(interval=IndexerMarketSnapshotInterval(count=1, granularity=86400))
+            snapshots = await asyncio.to_thread(self.nado_client.market.get_market_snapshots, params)
+            
+            if snapshots and snapshots.snapshots:
+                snap = snapshots.snapshots[0]
+                vid = str(product_id)
+                open_interest = float(snap.open_interests.get(vid, 0)) / 1e18
+                funding_rate = float(snap.funding_rates.get(vid, 0)) / 1e18
+                
+                # QW #4: Track OI Trend
+                oi_trend = "neutral"
+                if symbol in self._oi_history:
+                    prev_oi = self._oi_history[symbol]
+                    if open_interest > prev_oi * 1.01: # 1% increase
+                        oi_trend = "rising"
+                    elif open_interest < prev_oi * 0.99: # 1% decrease
+                        oi_trend = "falling"
+                    else:
+                        oi_trend = "stable"
+                        
+                self._oi_history[symbol] = open_interest
+                self._save_oi_history()
+
+                return {
+                    "symbol": symbol,
+                    "open_interest": open_interest,
+                    "open_interest_trend": oi_trend,
+                    "funding_rate": round(funding_rate, 8)
+                }
+        except Exception as e:
+            self._log(f"⚠️ [MarketDataService] Failed to fetch Nado OI/Funding for {symbol}: {e}")
+            
+        return {"symbol": symbol, "open_interest": 0.0, "open_interest_trend": "neutral", "funding_rate": 0.0001}
 
     async def fetch_margin_requirements(self, symbol: str) -> Dict[str, Any]:
-        """Fetches real maintenance margin parameters from Kraken Futures instruments endpoint."""
-        url = "https://futures.kraken.com/derivatives/api/v3/instruments"
+        """Fetches real maintenance margin parameters from Nado DEX SDK."""
+        if not self.is_nado or not self.nado_client:
+            return {"maintenance_margin_pct": 0.01}
+            
         try:
-            session = await self._get_session()
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    instruments = data.get("instruments", [])
-                    target_pair = self._normalize_pair(symbol)
-                    
-                    for inst in instruments:
-                        if inst.get("symbol") == target_pair:
-                            margin_levels = inst.get("marginLevels", [])
-                            if margin_levels:
-                                # Get tier 1 maintenance margin
-                                mm = float(margin_levels[0].get("maintenanceMargin", 0.01))
-                                return {"maintenance_margin_pct": mm}
-                            break
-                            
+            import asyncio
+            base_symbol = symbol.split('-')[0].upper()
+            product_id = self.product_map.get(base_symbol)
+            
+            if product_id is not None:
+                markets = await asyncio.to_thread(self.nado_client.market.get_all_engine_markets)
+                for p in markets.perp_products:
+                    if p.product_id == product_id:
+                        # Extract maintenance margin from risk parameters
+                        try:
+                            lwm = float(p.risk.long_weight_maintenance_x18) / 1e18
+                            if lwm > 0:
+                                mm = 1.0 - lwm
+                                return {"maintenance_margin_pct": round(mm, 4)}
+                        except Exception:
+                            # Fallback if SDK structures differ slightly
+                            pass
+                        break
         except Exception as e:
-            self._log(f"⚠️ [MarketDataService] Ошибка загрузки margin levels: {e}")
+            self._log(f"⚠️ [MarketDataService] Failed to fetch Nado margin for {symbol}: {e}")
             
         return {"maintenance_margin_pct": 0.01} # fallback to conservative 1%
 

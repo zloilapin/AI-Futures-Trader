@@ -34,9 +34,9 @@ class ScannerAgent(BaseAgent):
                 "proceed": False
             }
             
-        if atr_pct > 0 and atr_pct < 0.08:
+        if atr_pct > 0 and atr_pct < 0.03:
             return {
-                "reasoning": f"Волатильность слишком низкая: ATR {atr_pct}% < 0.08%.",
+                "reasoning": f"Волатильность слишком низкая: ATR {atr_pct}% < 0.03%.",
                 "status": "LOW_VOLATILITY",
                 "proceed": False
             }

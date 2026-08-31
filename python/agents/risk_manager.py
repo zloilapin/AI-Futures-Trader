@@ -185,9 +185,15 @@ class RiskManager(BaseAgent):
             # --- 6. Maximum Notional Guard ---
             symbol = ceo_decision.get("symbol", "")
             
-            if notional_usd > max_notional_usd:
+            if notional_usd <= 0 or contracts <= 0:
+                msg = f"Calculated order size is below minimum size increment ({size_increment}). Blocking trade to prevent sequencer error 2094."
+                self.logger.warning(f"[{self.name}] 🚫 MIN SIZE VETO: {msg}")
+                approved = False
+                veto_category = "MIN_SIZE"
+                veto_reason = msg
+            elif notional_usd > max_notional_usd:
                 msg = f"Required notional ${notional_usd:.2f} exceeds max allowed ${max_notional_usd:.2f}."
-                self.logger.warning(f"[{self.name}] ❌ MAX NOTIONAL VETO: {msg}")
+                self.logger.warning(f"[{self.name}] 🚫 MAX NOTIONAL VETO: {msg}")
                 approved = False
                 veto_category = "MAX_MARGIN"
                 veto_reason = msg

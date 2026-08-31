@@ -9,13 +9,20 @@ class Web3Wallet:
     Handles Web3 Private Key management and basic RPC connectivity for Nado DEX on Ink L2.
     """
     def __init__(self):
+        from core.config import config
+        self.network = config.NADO_NETWORK.upper()
         self.private_key = os.getenv("INK_PRIVATE_KEY", "")
         self.wallet_address = os.getenv("INK_WALLET_ADDRESS", "")
-        self.rpc_url = os.getenv("INK_RPC_URL", "https://rpc-gel.inkonchain.com")
-        self.chain_id = int(os.getenv("INK_CHAIN_ID", "763373"))  # Ink network chain ID
+        
+        if self.network == "TESTNET":
+            self.rpc_url = os.getenv("INK_RPC_URL", "https://rpc-gel-sepolia.inkonchain.com")
+            self.chain_id = int(os.getenv("INK_CHAIN_ID", "763373"))  # Ink Sepolia Testnet
+        else:
+            self.rpc_url = os.getenv("INK_RPC_URL", "https://rpc-gel.inkonchain.com")
+            self.chain_id = int(os.getenv("INK_CHAIN_ID", "57073"))  # Ink Mainnet
         
         if not self.private_key:
-            logger.warning("[Web3Wallet] ⚠️ INK_PRIVATE_KEY is not set in .env! Nado Trading Service will fail.")
+            logger.warning(f"[Web3Wallet] ⚠️ INK_PRIVATE_KEY is not set in .env! Nado Trading Service ({self.network}) will fail.")
         else:
             if not self.wallet_address:
                 try:
@@ -23,7 +30,7 @@ class Web3Wallet:
                     self.wallet_address = Account.from_key(self.private_key).address
                 except Exception as e:
                     logger.error(f"[Web3Wallet] ❌ Failed to derive wallet address: {e}")
-            logger.info(f"[Web3Wallet] ✅ Web3 Wallet initialized for Ink L2. Address: {self.wallet_address}")
+            logger.info(f"[Web3Wallet] ✅ Web3 Wallet initialized for Ink L2 ({self.network}). Address: {self.wallet_address}")
 
     def get_private_key(self) -> str:
         """Returns the private key for signing transactions/messages."""

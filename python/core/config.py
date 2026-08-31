@@ -12,12 +12,14 @@ class Config:
     KIE_MODEL: str = os.getenv("KIE_MODEL", "DeepSeek-V3")
     
     # Биржи
-    TRADING_ENGINE: str = os.getenv("TRADING_ENGINE", "PAPER").upper()
-    KRAKEN_API_KEY: str = os.getenv("KRAKEN_API_KEY", "")
-    KRAKEN_API_SECRET: str = os.getenv("KRAKEN_API_SECRET", "")
-    NADO_DEX_URL: str = os.getenv("NADO_DEX_URL", "https://app.nado.xyz/perpetuals")
-    LIVE_TRADING_ENABLED: bool = os.getenv("LIVE_TRADING_ENABLED", "False").lower() == "true"
-    NADO_LIVE_TRADING_ENABLED: bool = os.getenv("NADO_LIVE_TRADING_ENABLED", "False").lower() == "true"
+    TRADING_ENGINE: str = os.getenv("TRADING_ENGINE", "NADO").upper()
+    NADO_NETWORK: str = os.getenv("NADO_NETWORK", "TESTNET").upper()
+    NADO_DEX_URL: str = os.getenv(
+        "NADO_DEX_URL",
+        "https://testnet.app.nado.xyz/perpetuals" if os.getenv("NADO_NETWORK", "TESTNET").upper() == "TESTNET" else "https://app.nado.xyz/perpetuals"
+    )
+    LIVE_TRADING_ENABLED: bool = os.getenv("LIVE_TRADING_ENABLED", "True").lower() == "true"
+    NADO_LIVE_TRADING_ENABLED: bool = os.getenv("NADO_LIVE_TRADING_ENABLED", "True").lower() == "true"
     
     # Телеграм
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
