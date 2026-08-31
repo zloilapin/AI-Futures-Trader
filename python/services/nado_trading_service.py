@@ -57,9 +57,13 @@ class NadoTradingService(BaseTradingService):
             # Fetch product map dynamically
             import asyncio
             products = await asyncio.to_thread(self.client.market.get_all_product_symbols)
+            markets = await asyncio.to_thread(self.client.market.get_all_engine_markets)
+            perp_ids = {m.product_id for m in markets.perp_products}
+            
             for p in products:
-                base_symbol = p.symbol.split('-')[0].upper()
-                self.product_map[base_symbol] = p.product_id
+                if p.product_id in perp_ids:
+                    base_symbol = p.symbol.split('-')[0].upper()
+                    self.product_map[base_symbol] = p.product_id
                 
             from nado_protocol.utils.bytes32 import subaccount_to_hex
             self.default_subaccount_id = subaccount_to_hex(self.wallet.get_address(), "default")
@@ -825,7 +829,17 @@ class NadoTradingService(BaseTradingService):
                 
                 # Get latest price
                 price_data = await asyncio.to_thread(self.client.market.get_latest_market_price, product_id)
-                current_price = float(price_data) if price_data else 0.0
+                current_price = 0.0
+                if price_data:
+                    if hasattr(price_data, 'price_x18'):
+                        current_price = float(price_data.price_x18) / 1e18
+                    elif hasattr(price_data, 'price'):
+                        current_price = float(price_data.price)
+                    else:
+                        try:
+                            current_price = float(price_data)
+                        except (TypeError, ValueError):
+                            pass
                 
                 if current_price <= 0:
                     await asyncio.sleep(10)

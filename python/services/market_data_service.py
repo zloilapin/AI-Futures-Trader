@@ -40,9 +40,13 @@ class MarketDataService:
     def _load_nado_product_map(self):
         try:
             products = self.nado_client.market.get_all_product_symbols()
+            markets = self.nado_client.market.get_all_engine_markets()
+            perp_ids = {m.product_id for m in markets.perp_products}
+            
             for p in products:
-                base_symbol = p.symbol.split('-')[0].upper()
-                self.product_map[base_symbol] = p.product_id
+                if p.product_id in perp_ids:
+                    base_symbol = p.symbol.split('-')[0].upper()
+                    self.product_map[base_symbol] = p.product_id
         except Exception as e:
             self._log(f"⚠️ [MarketDataService] Failed to load Nado product map: {e}")
 
@@ -102,13 +106,14 @@ class MarketDataService:
                     
                     data = []
                     stablecoins = {'USDT', 'USDC', 'USDE', 'DAI', 'USD'}
+                    skip_symbols = {'WBTC'} # Skip WBTC to avoid duplicate BTC exposure
+                    
                     for p in products:
                         base_symbol = p.symbol.split('-')[0].upper()
-                        if base_symbol in stablecoins:
+                        if base_symbol in stablecoins or base_symbol in skip_symbols:
                             continue
-                            
-                        # Only include perp products (product_id > 0)
-                        if p.product_id == 0:
+                        
+                        if base_symbol not in self.product_map or self.product_map[base_symbol] != p.product_id:
                             continue
                             
                         vid = str(p.product_id)
@@ -140,12 +145,17 @@ class MarketDataService:
                     perps.sort(key=lambda x: float(x.get("volumeQuote", 0) or 0), reverse=True)
                     
                     top_symbols = []
-                    for p in perps[:limit]:
+                    skip_symbols = {'WBTC'}
+                    
+                    for p in perps:
                         pair = p.get("pair", "")
                         if ":" in pair:
                             base_asset = pair.split(":")[0]
                             if base_asset == "XBT":
                                 base_asset = "BTC"
+                            
+                            if base_asset in skip_symbols:
+                                continue
                                 
                             vol = round(float(p.get("volumeQuote", 0)), 2)
                             change = round(float(p.get("change24h", 0)), 2)
@@ -155,6 +165,8 @@ class MarketDataService:
                                 "vol24h": vol,
                                 "change24h": change
                             })
+                            if len(top_symbols) >= limit:
+                                break
                             
                     if top_symbols:
                         return top_symbols
