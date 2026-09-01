@@ -1,5 +1,5 @@
-# Используем официакольный легковесный образ Python
-FROM python:3.11-slim
+# Используем официальный легковесный образ Python 3.12+ (required by nado-protocol SDK)
+FROM python:3.12-slim
 
 # Установка системных зависимостей (если понадобятся, например, для компиляции некоторых Python-библиотек)
 RUN apt-get update && apt-get install -y --no-install-recommends \

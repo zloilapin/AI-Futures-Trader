@@ -35,21 +35,22 @@ class TelegramBotListener:
         if reply_markup:
             payload["reply_markup"] = reply_markup
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(self.send_url, json=payload) as resp:
-                    if resp.status == 200:
-                        print(f"✅ [TelegramListener] Ответ отправлен в Telegram (Markdown).")
-                    else:
-                        error_text = await resp.text()
-                        print(f"⚠️ [TelegramListener] Markdown ответ не прошёл (HTTP {resp.status}): {error_text[:200]}")
-                        # Повторяем без Markdown
-                        payload.pop("parse_mode", None)
-                        async with session.post(self.send_url, json=payload) as resp2:
-                            if resp2.status == 200:
-                                print(f"✅ [TelegramListener] Ответ отправлен без форматирования.")
-                            else:
-                                error_text2 = await resp2.text()
-                                print(f"❌ [TelegramListener] Не удалось отправить ответ (HTTP {resp2.status}): {error_text2[:200]}")
+            from core.session import SessionManager
+            session = await SessionManager.get()
+            async with session.post(self.send_url, json=payload) as resp:
+                if resp.status == 200:
+                    print(f"✅ [TelegramListener] Ответ отправлен в Telegram (Markdown).")
+                else:
+                    error_text = await resp.text()
+                    print(f"⚠️ [TelegramListener] Markdown ответ не прошёл (HTTP {resp.status}): {error_text[:200]}")
+                    # Повторяем без Markdown
+                    payload.pop("parse_mode", None)
+                    async with session.post(self.send_url, json=payload) as resp2:
+                        if resp2.status == 200:
+                            print(f"✅ [TelegramListener] Ответ отправлен без форматирования.")
+                        else:
+                            error_text2 = await resp2.text()
+                            print(f"❌ [TelegramListener] Не удалось отправить ответ (HTTP {resp2.status}): {error_text2[:200]}")
         except Exception as e:
             print(f"❌ [TelegramListener] Ошибка отправки ответа: {type(e).__name__}: {e}")
 
@@ -293,26 +294,28 @@ class TelegramBotListener:
         while self.running:
             try:
                 url = f"{self.api_url}?offset={self.offset}&timeout=30"
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=45)) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            results = data.get("result", [])
-                            for result in results:
-                                self.offset = result["update_id"] + 1
+                from core.session import SessionManager
+                import aiohttp
+                session = await SessionManager.get()
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=45)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        results = data.get("result", [])
+                        for result in results:
+                            self.offset = result["update_id"] + 1
+                            
+                            if "callback_query" in result:
+                                callback_query = result["callback_query"]
+                                cb_data = callback_query.get("data")
+                                cb_id = callback_query.get("id")
+                                cb_chat_id = str(callback_query.get("message", {}).get("chat", {}).get("id", ""))
                                 
-                                if "callback_query" in result:
-                                    callback_query = result["callback_query"]
-                                    cb_data = callback_query.get("data")
-                                    cb_id = callback_query.get("id")
-                                    cb_chat_id = str(callback_query.get("message", {}).get("chat", {}).get("id", ""))
-                                    
-                                    if cb_chat_id == str(self.chat_id):
-                                        await self.handle_callback(cb_id, cb_data, cb_chat_id)
-                                    else:
-                                        print(f"⚠️ [TelegramListener] Кнопка от чужого чата {cb_chat_id}")
-                                
-                                elif "message" in result:
+                                if cb_chat_id == str(self.chat_id):
+                                    await self.handle_callback(cb_id, cb_data, cb_chat_id)
+                                else:
+                                    print(f"⚠️ [TelegramListener] Кнопка от чужого чата {cb_chat_id}")
+                            
+                            elif "message" in result:
                                     message = result.get("message", {})
                                     text = message.get("text", "")
                                     sender_chat_id = str(message.get("chat", {}).get("id", ""))
@@ -323,10 +326,10 @@ class TelegramBotListener:
                                             await self.handle_command(text)
                                         else:
                                             print(f"⚠️ [TelegramListener] Команда '{text}' от ЧУЖОГО чата {sender_chat_id}, игнорируем.")
-                        else:
-                            error_body = await resp.text()
-                            print(f"❌ [TelegramListener] Ошибка polling (HTTP {resp.status}): {error_body[:300]}")
-                            await asyncio.sleep(5)
+                    else:
+                        error_body = await resp.text()
+                        print(f"❌ [TelegramListener] Ошибка polling (HTTP {resp.status}): {error_body[:300]}")
+                        await asyncio.sleep(5)
             except asyncio.CancelledError:
                 print("🛑 [TelegramListener] Слушатель остановлен (CancelledError).")
                 break

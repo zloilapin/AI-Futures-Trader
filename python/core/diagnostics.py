@@ -19,25 +19,18 @@ class DiagnosticTracker:
         self._load_stats()
 
     def _load_stats(self):
-        if os.path.exists(self.filepath):
-            try:
-                with open(self.filepath, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    self.stats["total_scans"] = data.get("total_scans", 0)
-                    self.stats["trades_executed"] = data.get("trades_executed", 0)
-                    self.stats["execution_failed"] = data.get("execution_failed", 0)
-                    rejections = data.get("rejections", {})
-                    self.stats["rejections"] = defaultdict(int, rejections)
-            except Exception:
-                pass
+        from core.state_store import StateStore
+        data = StateStore.load(self.filepath)
+        if data:
+            self.stats["total_scans"] = data.get("total_scans", 0)
+            self.stats["trades_executed"] = data.get("trades_executed", 0)
+            self.stats["execution_failed"] = data.get("execution_failed", 0)
+            rejections = data.get("rejections", {})
+            self.stats["rejections"] = defaultdict(int, rejections)
 
     def _save_stats(self):
-        try:
-            os.makedirs(os.path.dirname(self.filepath), exist_ok=True)
-            with open(self.filepath, "w", encoding="utf-8") as f:
-                json.dump(self.stats, f, indent=4)
-        except Exception:
-            pass
+        from core.state_store import StateStore
+        StateStore.save(self.filepath, self.stats)
 
     def record_scan(self):
         self.stats["total_scans"] += 1

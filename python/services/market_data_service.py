@@ -51,23 +51,15 @@ class MarketDataService:
             self._log(f"⚠️ [MarketDataService] Failed to load Nado product map: {e}")
 
     def _load_oi_history(self) -> dict:
-        import os, json
-        if os.path.exists(self._oi_file):
-            try:
-                with open(self._oi_file, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception:
-                pass
+        from core.state_store import StateStore
+        data = StateStore.load(self._oi_file)
+        if data:
+            return data
         return {}
 
     def _save_oi_history(self):
-        import os, json
-        os.makedirs(os.path.dirname(self._oi_file), exist_ok=True)
-        try:
-            with open(self._oi_file, "w", encoding="utf-8") as f:
-                json.dump(self._oi_history, f, indent=4)
-        except Exception:
-            pass
+        from core.state_store import StateStore
+        StateStore.save(self._oi_file, self._oi_history)
 
     def _log(self, msg: str, level: str = "error"):
         if self.logger:
@@ -78,9 +70,8 @@ class MarketDataService:
             print(f"[{level.upper()}] {msg}")
 
     async def _get_session(self):
-        if self.session is None or self.session.closed:
-            self.session = aiohttp.ClientSession()
-        return self.session
+        from core.session import SessionManager
+        return await SessionManager.get()
 
     async def close(self):
         if self.session and not self.session.closed:
@@ -339,6 +330,8 @@ class MarketDataService:
                         spread_pct = round((spread / best_bid) * 100, 4) if best_bid > 0 else 0.0
                         bid_vol = sum(b[1] for b in bids)
                         ask_vol = sum(a[1] for a in asks)
+                        total_vol = bid_vol + ask_vol
+                        imbalance = round((bid_vol - ask_vol) / (total_vol + 1e-8), 4)
                         
                         return {
                             "symbol": symbol,
@@ -346,7 +339,7 @@ class MarketDataService:
                             "spread_pct": spread_pct,
                             "bid_volume": round(bid_vol, 2),
                             "ask_volume": round(ask_vol, 2),
-                            "imbalance": round(bid_vol / (ask_vol + 1e-8), 2),
+                            "imbalance": imbalance,
                             "best_bid": best_bid,
                             "best_ask": best_ask
                         }
@@ -420,7 +413,7 @@ class MarketDataService:
                                 signal_val = signal_line_series[-1] if signal_line_series else 0
                                 
                                 macd_val = macd_line[-1]
-                                macd_signal = "bullish" if macd_val > signal_val else "bearish"
+                                macd_signal_label = "bullish" if macd_val > signal_val else "bearish"
 
                                 # ATR-14 (Wilder's Smoothing)
                                 tr_list = [max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1])) for i in range(1, len(closes))]
@@ -526,8 +519,10 @@ class MarketDataService:
                                     "ema_20": ema_20,
                                     "ema_trend": ema_trend,
                                     "ema_distance_pct": ema_distance_pct,
+                                    "macd": round(macd_val, 6),
                                     "macd_val": round(macd_val, 6),
-                                    "macd_signal": macd_signal,
+                                    "macd_signal": round(signal_val, 6),
+                                    "macd_label": macd_signal_label,
                                     "macd_histogram": macd_histogram,
                                     "histogram_momentum": histogram_momentum,
                                     "atr_14": round(atr_14, 6),
@@ -592,8 +587,8 @@ class MarketDataService:
         url = "https://api.alternative.me/fng/"
         try:
             headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
-            async with aiohttp.ClientSession(headers=headers) as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            session = await self._get_session()
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         item = data.get("data", [{}])[0]

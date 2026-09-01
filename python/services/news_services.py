@@ -16,15 +16,16 @@ class NewsService:
         url = "https://cointelegraph.com/rss"
         headlines = []
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=5) as resp:
-                    if resp.status == 200:
-                        content = await resp.read()
-                        root = ET.fromstring(content)
-                        for item in root.findall('.//item')[:3]:
-                            title = item.find('title')
-                            if title is not None and title.text:
-                                headlines.append(title.text)
+            from core.session import SessionManager
+            session = await SessionManager.get()
+            async with session.get(url, timeout=5) as resp:
+                if resp.status == 200:
+                    content = await resp.read()
+                    root = ET.fromstring(content)
+                    for item in root.findall('.//item')[:3]:
+                        title = item.find('title')
+                        if title is not None and title.text:
+                            headlines.append(title.text)
         except Exception as e:
             print(f"⚠️ [NewsService] Ошибка парсинга RSS: {e}")
             raise Exception(f"Не удалось получить новости для {symbol}") from e

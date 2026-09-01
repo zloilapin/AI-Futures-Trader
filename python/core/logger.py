@@ -1,13 +1,29 @@
 import os
+import json
+import structlog
 from datetime import datetime
 
 class TradeLogger:
     """
     Handles hierarchical logging of agent reasoning and trade decisions.
-    Structure: logs/MM-1/DD_MM_YYYY/decision_reasons.md
+    Uses structlog for structured JSON lines output.
     """
     def __init__(self, base_dir="logs"):
         self.base_dir = base_dir
+        
+        # Configure structlog for JSON output to files
+        structlog.configure(
+            processors=[
+                structlog.contextvars.merge_contextvars,
+                structlog.processors.add_log_level,
+                structlog.processors.TimeStamper(fmt="iso"),
+                structlog.processors.JSONRenderer(ensure_ascii=False)
+            ],
+            wrapper_class=structlog.make_filtering_bound_logger(20), # INFO
+            context_class=dict,
+            logger_factory=structlog.PrintLoggerFactory(),
+            cache_logger_on_first_use=False
+        )
 
     def _get_hierarchical_path(self) -> str:
         """
@@ -21,44 +37,44 @@ class TradeLogger:
         os.makedirs(path, exist_ok=True)
         return path
 
-    def log_decision(self, agent_name: str, message: str):
+    def log_decision(self, agent_name: str, message: str, **kwargs):
         """
-        Appends agent reasoning and decisions to a daily markdown file.
+        Appends agent reasoning and decisions to a daily JSONL file.
         """
         log_dir = self._get_hierarchical_path()
-        file_path = os.path.join(log_dir, "decision_reasons.md")
+        file_path = os.path.join(log_dir, "decisions.jsonl")
         
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        log_entry = f"\n### [{timestamp}] {agent_name}\n* **Reasoning:** {message}\n"
+        log_data = {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "agent": agent_name,
+            "message": message,
+            **kwargs
+        }
         
         with open(file_path, "a", encoding="utf-8") as f:
-            f.write(log_entry)
+            f.write(json.dumps(log_data, ensure_ascii=False) + "\n")
             
-        print(f"[Logger] Logged entry for {agent_name} in {file_path}")
+        print(f"[{agent_name}] {message}")
 
-    def info(self, message: str):
+    def info(self, message: str, **kwargs):
         """
         Standard info logging method used across all agents and services.
         Maps to log_decision under the hood with 'System' as the actor.
         """
-        print(f"[INFO] {message}")
-        self.log_decision("System_Core", message)
+        self.log_decision("System_Core", message, level="info", **kwargs)
 
-    def error(self, message: str):
+    def error(self, message: str, **kwargs):
         """
         Standard error logging method.
         """
-        print(f"[ERROR] {message}")
-        self.log_decision("System_Error", message)
+        self.log_decision("System_Error", message, level="error", **kwargs)
 
-    def warning(self, message: str):
+    def warning(self, message: str, **kwargs):
         """
         Standard warning logging method.
         """
-        print(f"[WARNING] {message}")
-        self.log_decision("System_Warning", message)
+        self.log_decision("System_Warning", message, level="warning", **kwargs)
 
 if __name__ == "__main__":
     logger = TradeLogger()
     logger.info("System initialized for Nado DEX monitoring.")
-

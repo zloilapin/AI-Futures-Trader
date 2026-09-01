@@ -1,53 +1,73 @@
 import os
-from dataclasses import dataclass
+from pydantic import Field, SecretStr
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Literal
 
-@dataclass
-class Config:
-    """Глобальные настройки проекта и API ключи."""
-    # API Ключи
-    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", os.getenv("GOOGLE_API_KEY", ""))
-    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
-    OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
-    KIE_API_KEY: str = os.getenv("KIE_API_KEY", "")
-    KIE_MODEL: str = os.getenv("KIE_MODEL", "DeepSeek-V3")
+class Settings(BaseSettings):
+    """Глобальные настройки проекта и API ключи, с валидацией типов."""
     
-    # Биржи
-    TRADING_ENGINE: str = os.getenv("TRADING_ENGINE", "NADO").upper()
-    NADO_NETWORK: str = os.getenv("NADO_NETWORK", "TESTNET").upper()
-    NADO_DEX_URL: str = os.getenv(
-        "NADO_DEX_URL",
-        "https://testnet.app.nado.xyz/perpetuals" if os.getenv("NADO_NETWORK", "TESTNET").upper() == "TESTNET" else "https://app.nado.xyz/perpetuals"
-    )
-    LIVE_TRADING_ENABLED: bool = os.getenv("LIVE_TRADING_ENABLED", "True").lower() == "true"
-    NADO_LIVE_TRADING_ENABLED: bool = os.getenv("NADO_LIVE_TRADING_ENABLED", "True").lower() == "true"
+    # API Ключи
+    GEMINI_API_KEY: str = Field(default="", validation_alias="GEMINI_API_KEY")
+    GOOGLE_API_KEY: str = Field(default="", validation_alias="GOOGLE_API_KEY")
+    GROQ_API_KEY: str = Field(default="", validation_alias="GROQ_API_KEY")
+    OPENROUTER_API_KEY: str = Field(default="", validation_alias="OPENROUTER_API_KEY")
+    KIE_API_KEY: str = Field(default="", validation_alias="KIE_API_KEY")
+    KIE_MODEL: str = Field(default="DeepSeek-V3")
+    
+    # Web3 / Nado
+    INK_PRIVATE_KEY: SecretStr = Field(default=SecretStr(""))
+    NADO_NETWORK: Literal["TESTNET", "MAINNET"] = Field(default="TESTNET")
+    TRADING_ENGINE: Literal["NADO", "PAPER"] = Field(default="NADO")
+    
+    LIVE_TRADING_ENABLED: bool = Field(default=True)
+    NADO_LIVE_TRADING_ENABLED: bool = Field(default=True)
     
     # Телеграм
-    TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
-    PUBLIC_CHANNEL_ID: str = os.getenv("PUBLIC_CHANNEL_ID", "")
+    TELEGRAM_BOT_TOKEN: str = Field(default="")
+    TELEGRAM_CHAT_ID: str = Field(default="")
+    PUBLIC_CHANNEL_ID: str = Field(default="")
     
     # Торговые настройки
-    TRADING_PROFILE: str = os.getenv("TRADING_PROFILE", "BALANCED").upper()
-    LEVERAGE: int = int(os.getenv("LEVERAGE", "10"))
-    STARTING_BALANCE: float = float(os.getenv("STARTING_BALANCE", "60.0"))
-    SCAN_INTERVAL_MINUTES: int = int(os.getenv("SCAN_INTERVAL_MINUTES", "30"))
+    TRADING_PROFILE: Literal["AGGRESSIVE", "BALANCED", "CONSERVATIVE"] = Field(default="BALANCED")
+    LEVERAGE: int = Field(default=10, ge=1, le=100)
+    STARTING_BALANCE: float = Field(default=60.0)
+    SCAN_INTERVAL_MINUTES: int = Field(default=30, ge=1)
     
     # Настройки времени сна
-    TIMEZONE_OFFSET: int = int(os.getenv("TIMEZONE_OFFSET", "3"))
-    REST_START_TIME: str = os.getenv("REST_START_TIME", "24:00")
-    REST_END_TIME: str = os.getenv("REST_END_TIME", "00:00")
+    TIMEZONE_OFFSET: int = Field(default=3)
+    REST_START_TIME: str = Field(default="24:00")
+    REST_END_TIME: str = Field(default="00:00")
     
     # Настройки логирования
-    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    LOG_LEVEL: str = Field(default="INFO")
     
     # Лимиты риск-менеджера
-    MAX_CONCURRENT_POSITIONS: int = int(os.getenv("MAX_CONCURRENT_POSITIONS", "2"))
+    MAX_CONCURRENT_POSITIONS: int = Field(default=2, ge=1)
     
     # Расширенные лимиты Risk Manager
-    MIN_SL_PCT: float = 0.025  # Increased from 1.2% to 2.5% to avoid 15m market noise
-    MIN_TP_PCT: float = 0.075  # Increased from 3.6% to 7.5% for better RR on 1H/4H trends
-    SPREAD_PENALTY_THRESHOLD: float = 0.4
-    SPREAD_VETO_THRESHOLD: float = 1.0
+    MIN_SL_PCT: float = Field(default=0.025)
+    MIN_TP_PCT: float = Field(default=0.075)
+    SPREAD_PENALTY_THRESHOLD: float = Field(default=0.4)
+    SPREAD_VETO_THRESHOLD: float = Field(default=1.0)
+
+    model_config = SettingsConfigDict(
+        env_file=".env", 
+        env_file_encoding="utf-8", 
+        extra="ignore"
+    )
+
+    @property
+    def NADO_DEX_URL(self) -> str:
+        return "https://testnet.app.nado.xyz/perpetuals" if self.NADO_NETWORK == "TESTNET" else "https://app.nado.xyz/perpetuals"
+
+    @property
+    def GEMINI_KEY(self) -> str:
+        return self.GEMINI_API_KEY or self.GOOGLE_API_KEY
 
 # Глобальный экземпляр конфига для импорта в другие модули
-config = Config()
+try:
+    config = Settings()
+except Exception as e:
+    print(f"❌ [Config] Ошибка конфигурации среды: {e}")
+    # Fallback for when we're just parsing AST or initializing docs without .env
+    config = Settings(_env_file=None)

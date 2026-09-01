@@ -26,11 +26,11 @@ class MemoryManager:
         Сохраняет результаты полного торгового цикла (отчеты аналитиков, решение CEO, риск-менеджмент) в JSON.
         """
         try:
+            from core.state_store import StateStore
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = os.path.join(self.storage_path, f"cycle_{timestamp}.json")
             
-            with open(filename, "w", encoding="utf-8") as f:
-                json.dump(cycle_data, f, indent=4, ensure_ascii=False)
+            StateStore.save(filename, cycle_data)
                 
             self.logger.info(f"[{self.name}] Данные цикла успешно сохранены в {filename}")
             
@@ -59,10 +59,12 @@ class MemoryManager:
             files.sort(reverse=True)
             
             # Читаем только последние `limit` файлов
+            from core.state_store import StateStore
             for file in files[:limit]:
                 filepath = os.path.join(self.storage_path, file)
-                with open(filepath, "r", encoding="utf-8") as f:
-                    context.append(json.load(f))
+                data = StateStore.load(filepath)
+                if data:
+                    context.append(data)
                     
             return context
         except Exception as e:

@@ -31,12 +31,10 @@ class PaperTradingService(BaseTradingService):
             self._log(msg)
 
     def _load_state(self) -> Dict[str, Any]:
-        if os.path.exists(self.data_file):
-            try:
-                with open(self.data_file, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception as e:
-                self._log(f"⚠️ [PaperTradingService] Ошибка чтения файла портфеля: {e}")
+        from core.state_store import StateStore
+        state = StateStore.load(self.data_file)
+        if state:
+            return state
         
         starting_balance = float(os.getenv("STARTING_BALANCE", "60.0"))
         default_state = {
@@ -58,9 +56,8 @@ class PaperTradingService(BaseTradingService):
         self._save_state_dict(self.state)
 
     def _save_state_dict(self, data: Dict[str, Any]):
-        os.makedirs(os.path.dirname(self.data_file), exist_ok=True)
-        with open(self.data_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
+        from core.state_store import StateStore
+        StateStore.save(self.data_file, data)
 
     async def _fetch_current_price(self, symbol: str) -> float:
         prices = await self._fetch_prices_batch([symbol])
@@ -74,15 +71,6 @@ class PaperTradingService(BaseTradingService):
             
         url = "https://futures.kraken.com/derivatives/api/v3/tickers"
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        tickers = data.get("tickers", [])
-                        
-                        for sym in symbols:
-                            base = sym.split('/')[0].replace(':USD', '').upper()
-                            if base == "BTC": base = "XBT"
                             suffix = f"_{base}USD".upper()
                             
                             for t in tickers:

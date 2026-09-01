@@ -22,49 +22,39 @@ class ReflectorAgent(BaseAgent):
 
     def get_lessons(self, limit: int = 5, symbol: str = None) -> List[str]:
         """Returns the most recent actionable rules/lessons learned, prioritizing LOSSes and specific symbols."""
-        if not os.path.exists(self.lessons_file):
-            return []
         try:
-            with open(self.lessons_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            from core.state_store import StateStore
+            data = StateStore.load(self.lessons_file, default=[])
                 
-                # Filter only for losses (we want to learn from mistakes, not successes)
-                loss_data = [item for item in data if item.get("trade_outcome") == "LOSS" and item.get("actionable_rule")]
-                
-                lessons = []
-                # First, get lessons specific to this symbol
-                if symbol:
-                    symbol_lessons = [item.get("actionable_rule") for item in loss_data if item.get("symbol") == symbol]
-                    lessons.extend(symbol_lessons[-limit:])
-                
-                # If we still have room, pad with generic recent losses
-                if len(lessons) < limit:
-                    generic_lessons = [item.get("actionable_rule") for item in loss_data if item.get("symbol") != symbol]
-                    lessons.extend(generic_lessons[-(limit - len(lessons)):])
-                
-                return lessons
+            # Filter only for losses (we want to learn from mistakes, not successes)
+            loss_data = [item for item in data if item.get("trade_outcome") == "LOSS" and item.get("actionable_rule")]
+            
+            lessons = []
+            # First, get lessons specific to this symbol
+            if symbol:
+                symbol_lessons = [item.get("actionable_rule") for item in loss_data if item.get("symbol") == symbol]
+                lessons.extend(symbol_lessons[-limit:])
+            
+            # If we still have room, pad with generic recent losses
+            if len(lessons) < limit:
+                generic_lessons = [item.get("actionable_rule") for item in loss_data if item.get("symbol") != symbol]
+                lessons.extend(generic_lessons[-(limit - len(lessons)):])
+            
+            return lessons
         except Exception as e:
             self.logger.error(f"[{self.name}] Error reading lessons: {e}")
             return []
 
     def _save_lesson(self, reflection: Dict[str, Any]):
-        os.makedirs(os.path.dirname(self.lessons_file), exist_ok=True)
-        data = []
-        if os.path.exists(self.lessons_file):
-            try:
-                with open(self.lessons_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except Exception:
-                data = []
-
+        from core.state_store import StateStore
+        data = StateStore.load(self.lessons_file, default=[])
         data.append(reflection)
         
         # Enforce memory rotation limit
         if len(data) > 100:
             data = data[-100:]
             
-        with open(self.lessons_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
+        StateStore.save(self.lessons_file, data)
 
     async def reflect(self, closed_trade: Dict[str, Any], market_context: Dict[str, Any]) -> Dict[str, Any]:
         """

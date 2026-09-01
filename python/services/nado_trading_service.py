@@ -534,38 +534,28 @@ class NadoTradingService(BaseTradingService):
             return False
 
     def _load_state(self):
-        import os, json
+        from core.state_store import StateStore
         state_file = "data/memory/nado_state.json"
-        if os.path.exists(state_file):
-            try:
-                with open(state_file, "r") as f:
-                    state = json.load(f)
-                    if "initial_balance" in state:
-                        self._initial_balance = float(state["initial_balance"])
-                        logger.info(f"[NadoTradingService] 💾 Loaded initial balance: {self._initial_balance}")
-                    if "win_count" in state:
-                        self.win_count = int(state["win_count"])
-                    if "loss_count" in state:
-                        self.loss_count = int(state["loss_count"])
-                    if "recent_streak" in state:
-                        self.recent_streak = state["recent_streak"]
-            except Exception as e:
-                logger.error(f"[NadoTradingService] ⚠️ Failed to load state: {e}")
+        state = StateStore.load(state_file)
+        if "initial_balance" in state:
+            self._initial_balance = float(state["initial_balance"])
+            logger.info(f"[NadoTradingService] 💾 Loaded initial balance: {self._initial_balance}")
+        if "win_count" in state:
+            self.win_count = int(state["win_count"])
+        if "loss_count" in state:
+            self.loss_count = int(state["loss_count"])
+        if "recent_streak" in state:
+            self.recent_streak = state["recent_streak"]
 
     def _save_state(self):
-        import os, json
+        from core.state_store import StateStore
         state_file = "data/memory/nado_state.json"
-        os.makedirs(os.path.dirname(state_file), exist_ok=True)
-        try:
-            with open(state_file, "w") as f:
-                json.dump({
-                    "initial_balance": self._initial_balance,
-                    "win_count": self.win_count,
-                    "loss_count": self.loss_count,
-                    "recent_streak": self.recent_streak
-                }, f)
-        except Exception as e:
-            logger.error(f"[NadoTradingService] ⚠️ Failed to save state: {e}")
+        StateStore.save(state_file, {
+            "initial_balance": self._initial_balance,
+            "win_count": self.win_count,
+            "loss_count": self.loss_count,
+            "recent_streak": self.recent_streak
+        })
 
     async def check_and_update_positions(self, symbol: str, current_price: float) -> List[Dict[str, Any]]:
         """Checks if a position was closed natively by Nado (TP/SL trigger)."""
@@ -894,14 +884,36 @@ class NadoTradingService(BaseTradingService):
                     await asyncio.to_thread(self.client.market.cancel_trigger_orders, cancel_params)
                     
                     # 2. Place new SL
-                    price_increment = float(self.client.market.get_all_engine_markets().perp_products[product_id].price_increment_x18) / 1e18
+                    # Fetch price increment from cached market data (safe dict lookup)
+                    params_dict = self._get_market_parameters(product_id)
+                    price_increment = params_dict["price_increment_x18"]
+                    if price_increment == 0:
+                        # Refresh cache if empty
+                        try:
+                            markets_data = await asyncio.to_thread(self.client.market.get_all_engine_markets)
+                            if not getattr(self, "_market_cache", None):
+                                self._market_cache = {}
+                            for m in markets_data.perp_products:
+                                self._market_cache[m.product_id] = m
+                            params_dict = self._get_market_parameters(product_id)
+                            price_increment = params_dict["price_increment_x18"]
+                        except Exception as cache_e:
+                            logger.error(f"[NadoTradingService] ❌ Failed to refresh market cache for trailing SL: {cache_e}")
+                            await asyncio.sleep(10)
+                            continue
+
+                    if price_increment == 0:
+                        logger.error(f"[NadoTradingService] ❌ Cannot trail SL for {symbol}: price_increment is 0")
+                        await asyncio.sleep(10)
+                        continue
+
                     exec_price = new_sl * 0.9 if direction == "LONG" else new_sl * 1.1
                     
                     exec_price_x18 = int(exec_price * 10**18)
                     trigger_price_x18 = int(new_sl * 10**18)
                     
-                    exec_price_x18 = (exec_price_x18 // int(price_increment * 10**18)) * int(price_increment * 10**18)
-                    trigger_price_x18 = (trigger_price_x18 // int(price_increment * 10**18)) * int(price_increment * 10**18)
+                    exec_price_x18 = (exec_price_x18 // price_increment) * price_increment
+                    trigger_price_x18 = (trigger_price_x18 // price_increment) * price_increment
                     
                     sl_res = await asyncio.to_thread(
                         self.client.market.place_price_trigger_order,

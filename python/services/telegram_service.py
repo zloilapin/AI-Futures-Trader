@@ -2,6 +2,7 @@ import os
 import aiohttp
 import asyncio
 from typing import Optional
+from core.session import SessionManager
 
 class TelegramService:
     """
@@ -36,27 +37,26 @@ class TelegramService:
             payload["reply_markup"] = reply_markup
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(self.api_url, json=payload) as response:
-                    if response.status == 200:
-                        print("✅ [TelegramService] Уведомление успешно доставлено в Telegram!")
-                        return True
-                    elif response.status == 400:
-                        # В случае ошибки форматирования Markdown пробуем отправить без разметки
-                        print("⚠️ [TelegramService] Ошибка форматирования Markdown, повторная отправка без форматирования...")
-                        payload.pop("parse_mode", None)
-                        async with session.post(self.api_url, json=payload) as fallback_res:
-                            if fallback_res.status == 200:
-                                print("✅ [TelegramService] Уведомление доставлено без форматирования.")
-                                return True
-                            else:
-                                err = await fallback_res.text()
-                                print(f"❌ [TelegramService] Ошибка отправки: HTTP {fallback_res.status} - {err}")
-                                return False
-                    else:
-                        error_data = await response.text()
-                        print(f"❌ [TelegramService] Ошибка отправки: HTTP {response.status} - {error_data}")
-                        return False
+            session = await SessionManager.get()
+            async with session.post(self.api_url, json=payload) as response:
+                if response.status == 200:
+                    print("✅ [TelegramService] Уведомление успешно доставлено в Telegram!")
+                    return True
+                elif response.status == 400:
+                    print("⚠️ [TelegramService] Ошибка форматирования Markdown, повторная отправка без форматирования...")
+                    payload.pop("parse_mode", None)
+                    async with session.post(self.api_url, json=payload) as fallback_res:
+                        if fallback_res.status == 200:
+                            print("✅ [TelegramService] Уведомление доставлено без форматирования.")
+                            return True
+                        else:
+                            err = await fallback_res.text()
+                            print(f"❌ [TelegramService] Ошибка отправки: HTTP {fallback_res.status} - {err}")
+                            return False
+                else:
+                    error_data = await response.text()
+                    print(f"❌ [TelegramService] Ошибка отправки: HTTP {response.status} - {error_data}")
+                    return False
         except Exception as e:
             print(f"❌ [TelegramService] Критическая ошибка при отправке в Telegram: {e}")
             return False
@@ -74,9 +74,9 @@ class TelegramService:
             "text": text
         }
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload) as response:
-                    return response.status == 200
+            session = await SessionManager.get()
+            async with session.post(url, json=payload) as response:
+                return response.status == 200
         except Exception as e:
             print(f"❌ [TelegramService] Ошибка answerCallbackQuery: {e}")
             return False
@@ -98,24 +98,24 @@ class TelegramService:
             payload["parse_mode"] = parse_mode
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(self.api_url, json=payload) as response:
-                    if response.status == 200:
-                        print("📢 [TelegramService] Сообщение успешно отправлено в публичный канал!")
-                        return True
-                    elif response.status == 400:
-                        payload.pop("parse_mode", None)
-                        async with session.post(self.api_url, json=payload) as fallback_res:
-                            if fallback_res.status == 200:
-                                return True
-                            else:
-                                err = await fallback_res.text()
-                                print(f"❌ [TelegramService] Ошибка отправки в канал (fallback): HTTP {fallback_res.status} - {err}")
-                                return False
-                    else:
-                        err = await response.text()
-                        print(f"❌ [TelegramService] Ошибка отправки в канал: HTTP {response.status} - {err}")
-                        return False
+            session = await SessionManager.get()
+            async with session.post(self.api_url, json=payload) as response:
+                if response.status == 200:
+                    print("📢 [TelegramService] Сообщение успешно отправлено в публичный канал!")
+                    return True
+                elif response.status == 400:
+                    payload.pop("parse_mode", None)
+                    async with session.post(self.api_url, json=payload) as fallback_res:
+                        if fallback_res.status == 200:
+                            return True
+                        else:
+                            err = await fallback_res.text()
+                            print(f"❌ [TelegramService] Ошибка отправки в канал (fallback): HTTP {fallback_res.status} - {err}")
+                            return False
+                else:
+                    err = await response.text()
+                    print(f"❌ [TelegramService] Ошибка отправки в канал: HTTP {response.status} - {err}")
+                    return False
         except Exception as e:
             print(f"❌ [TelegramService] Ошибка отправки в публичный канал: {e}")
             return False

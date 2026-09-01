@@ -29,14 +29,14 @@ class OrderBookAgent(BaseAgent):
             
         if imbalance > 0.3:
             signal = "BULLISH"
-            confidence = 60 + int(imbalance * 50)
-            reason_parts.append(f"Значительный перевес покупателей (imbalance: {imbalance:.2f}). Стенка на покупку.")
+            confidence = 60 + int(imbalance * 30)  # imbalance is now [-1, +1], so max boost = 30
+            reason_parts.append(f"Значительный перевес покупателей (imbalance: {imbalance:.4f}). Стенка на покупку.")
         elif imbalance < -0.3:
             signal = "BEARISH"
-            confidence = 60 + int(abs(imbalance) * 50)
-            reason_parts.append(f"Значительный перевес продавцов (imbalance: {imbalance:.2f}). Стенка на продажу.")
+            confidence = 60 + int(abs(imbalance) * 30)
+            reason_parts.append(f"Значительный перевес продавцов (imbalance: {imbalance:.4f}). Стенка на продажу.")
         else:
-            reason_parts.append(f"Баланс покупателей и продавцов нейтрален (imbalance: {imbalance:.2f})")
+            reason_parts.append(f"Баланс покупателей и продавцов нейтрален (imbalance: {imbalance:.4f})")
             
         return {
             "signal": signal,
