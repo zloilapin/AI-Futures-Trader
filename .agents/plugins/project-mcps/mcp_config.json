@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "sqlite": {
+      "command": "npx.cmd",
+      "args": ["-y", "@modelcontextprotocol/server-sqlite", "C:/Users/Admin/Downloads/AI-Futures-Trader-main/data/memory/database.db"]
+    },
+    "github": {
+      "command": "npx.cmd",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "ВАШ_GITHUB_TOKEN"
+      }
+    },
+    "brave-search": {
+      "command": "npx.cmd",
+      "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+      "env": {
+        "BRAVE_API_KEY": "ВАШ_BRAVE_API_KEY"
+      }
+    }
+  }
+}

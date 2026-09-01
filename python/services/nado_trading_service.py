@@ -833,6 +833,10 @@ class NadoTradingService(BaseTradingService):
                 if price_data:
                     if hasattr(price_data, 'price_x18'):
                         current_price = float(price_data.price_x18) / 1e18
+                    elif hasattr(price_data, 'ask_x18') and hasattr(price_data, 'bid_x18'):
+                        ask = float(price_data.ask_x18) / 1e18
+                        bid = float(price_data.bid_x18) / 1e18
+                        current_price = (ask + bid) / 2.0
                     elif hasattr(price_data, 'price'):
                         current_price = float(price_data.price)
                     else:
