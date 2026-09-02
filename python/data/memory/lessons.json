@@ -19,5 +19,12 @@
         "root_cause": "Bearish trend in the 15m, 1h, and 4h timeframes, with a strong bearish candle pattern and a lower sweep.",
         "actionable_rule": "WARNING: Do not enter SHORT when the 15m, 1h, and 4h trends are BEARISH, and the RSI-14 value is > 30, with a strong bearish candle pattern and a lower sweep.",
         "trade_outcome": "LOSS"
+    },
+    {
+        "symbol": "SOL-USD",
+        "reasoning": "The trade was entered as a SHORT position. The multi-timeframe analysis indicated a BEARISH trend on both 1H and 4H timeframes, which is consistent with the SHORT position. However, the trade was closed due to a 'CLOSED_ON_CHAIN' event, indicating that the trade was not managed according to a predetermined strategy. The RSI indicator showed a relatively low value of 30.26, indicating that the market may be oversold, but this was not enough to trigger a buy signal. The MACD indicator also showed a bearish signal, but it was not strong enough to trigger a buy signal.",
+        "root_cause": "The trade was closed due to a 'CLOSED_ON_CHAIN' event, indicating that the trade was not managed according to a predetermined strategy.",
+        "actionable_rule": "WARNING: Always follow a predetermined trading strategy and do not close trades due to external events like 'CLOSED_ON_CHAIN'.",
+        "trade_outcome": "LOSS"
     }
 ]

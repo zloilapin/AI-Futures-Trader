@@ -592,10 +592,27 @@ class NadoTradingService(BaseTradingService):
                 tp_price = pos.get("tp_price", current_price)
                 sl_price = pos.get("sl_price", current_price)
                 
-                if abs(current_price - tp_price) < abs(current_price - sl_price):
-                    exit_price = tp_price
-                else:
-                    exit_price = sl_price
+                triggered_by = "SL/TP/LIQ"
+                if direction == "LONG":
+                    if current_price >= tp_price:
+                        exit_price = tp_price
+                        triggered_by = "TP"
+                    elif current_price <= sl_price:
+                        exit_price = sl_price
+                        triggered_by = "SL"
+                    else:
+                        exit_price = current_price
+                        triggered_by = "Unknown/Manual"
+                else: # SHORT
+                    if current_price <= tp_price:
+                        exit_price = tp_price
+                        triggered_by = "TP"
+                    elif current_price >= sl_price:
+                        exit_price = sl_price
+                        triggered_by = "SL"
+                    else:
+                        exit_price = current_price
+                        triggered_by = "Unknown/Manual"
                 
                 if direction == "LONG":
                     target_pnl = (exit_price - entry_price) / entry_price * size_usd

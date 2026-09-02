@@ -1,0 +1,72 @@
+{
+    "symbol": "SOL-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0102%) и волатилен (ATR 0.3218%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Спред 0.0100. Баланс покупателей и продавцов нейтрален (imbalance: -0.1616)",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (-0.0000%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Neutral sentiment (63) indicates the market lacks a clear narrative. Expect choppy, range-bound price action without strong conviction.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BEARISH",
+            "confidence": 70,
+            "reasoning": "RSI нейтрален (30.0). MACD гистограмма красная. Цена ниже EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "SHORT",
+        "conviction": 80,
+        "reasoning_en": "After evaluating the Bull and Bear arguments, it appears that the Bear Agent has a stronger case, with a thesis score of 9 compared to the Bull Agent's score of 6. The Bear Agent's arguments, including the full alignment of bearish trends across 15m, 1h, and 4h timeframes, the MACD histogram indicating potential bearish momentum, and the current price being below EMA-20, suggest a strong potential for a short trade. The MTF trend is also bearish, with a score of -50. While the Bull Agent presents some valid points, such as the oversold RSI and relatively neutral Order Book imbalance, they are not enough to outweigh the Bear Agent's arguments. Therefore, the winning argument is the Bear Agent's, and the decision is to SHORT.",
+        "reasoning_ru": "",
+        "consensus_summary": "The Bear Agent's strong case, combined with the bearish MTF trend, leads to a decision to SHORT.",
+        "mtf_validation": "",
+        "hold_category": "NONE",
+        "primary_conviction": 80,
+        "escalated": false
+    },
+    "risk_assessment": {
+        "approved": true,
+        "veto_category": null,
+        "reasoning": "Math calculated based on BALANCED profile. SL=100.29625, TP=90.51125, RR=2.84",
+        "risk_amount_usd": 4.96,
+        "notional_size_usd": 197.66,
+        "margin_usd": 19.77,
+        "leverage": 10,
+        "contracts": 2.02,
+        "margin_pct": 3.99,
+        "entry_price": 97.85,
+        "take_profit_price": 90.51125,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 100.29625,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.84,
+        "liquidation_price": 0.0,
+        "position_size_pct": 3.99
+    },
+    "status": "APPROVED"
+}
