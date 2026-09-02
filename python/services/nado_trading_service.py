@@ -206,7 +206,7 @@ class NadoTradingService(BaseTradingService):
                     except Exception:
                         real_entry = current_price
                         
-                    entry_price = local_pos.get("entry_price", real_entry)
+                    entry_price = real_entry
                     
                     # Calculate PnL
                     if direction == "LONG":

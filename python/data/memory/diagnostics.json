@@ -1,5 +1,5 @@
 {
-    "total_scans": 184,
+    "total_scans": 189,
     "trades_executed": 3,
     "execution_failed": 0,
     "rejections": {
@@ -9,10 +9,10 @@
         "CEO_HOLD_LOW_EDGE": 16,
         "CEO HOLD ANALYST DISAGREEMENT": 1,
         "FETCH_ERROR": 8,
-        "NO_SIGNAL": 22,
+        "NO_SIGNAL": 24,
         "LOW_CONFIDENCE": 29,
-        "LOW_VOLATILITY": 48,
+        "LOW_VOLATILITY": 49,
         "LOW_EDGE": 12,
-        "ANALYST_DISAGREEMENT": 3
+        "ANALYST_DISAGREEMENT": 4
     }
 }
