@@ -53,10 +53,10 @@ class IndicatorAgent(BaseAgent):
                 reason_parts.append("MACD медвежье пересечение выше нуля")
             elif macd > macd_signal:
                 bull_score += 1
-                reason_parts.append("MACD гистограмма зелёная")
+                reason_parts.append("MACD выше сигнальной линии")
             else:
                 bear_score += 1
-                reason_parts.append("MACD гистограмма красная")
+                reason_parts.append("MACD ниже сигнальной линии")
 
         if ema_20 is not None and current_price:
             if current_price > ema_20:

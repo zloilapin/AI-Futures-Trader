@@ -55,6 +55,7 @@ class RiskManager(BaseAgent):
         atr_14 = float(indicators.get("atr_14", current_price * 0.02) or current_price * 0.02)
         
         total_balance = float(portfolio_data.get("total_usd", portfolio_data.get("current_balance", 0.0)) or 0.0)
+        available_margin = float(portfolio_data.get("available_margin", total_balance))
         
         # Initialized output fields
         approved = None
@@ -184,6 +185,7 @@ class RiskManager(BaseAgent):
             elif spread_pct > config.SPREAD_PENALTY_THRESHOLD:
                 notional_usd *= 0.8 # Cut notional by 20%
                 contracts = notional_usd / current_price if current_price > 0 else 0
+                risk_amount_usd = contracts * distance_to_sl # Fix HIGH #4: Recalculate planned risk to match reduced position
             
             # Fee and Funding Impact on RR
             derivatives_data = market_data.get("derivatives_data", {})
@@ -209,11 +211,26 @@ class RiskManager(BaseAgent):
             # --- 6. Maximum Notional Guard ---
             symbol = ceo_decision.get("symbol", "")
             
+            min_size = float(derivatives_data.get("min_size", 0.0))
+            min_notional = float(derivatives_data.get("min_notional", 10.0))
+            
             if notional_usd <= 0 or contracts <= 0:
-                msg = f"Calculated order size is below minimum size increment ({size_increment}). Blocking trade to prevent sequencer error 2094."
+                msg = f"Calculated order size is 0. Blocking trade."
+                self.logger.warning(f"[{self.name}] 🚫 ZERO SIZE VETO: {msg}")
+                approved = False
+                veto_category = "MIN_SIZE"
+                veto_reason = msg
+            elif min_size > 0 and contracts < min_size:
+                msg = f"Calculated order size {contracts} is below exchange minimum size ({min_size}). Blocking trade to prevent sequencer error 2094."
                 self.logger.warning(f"[{self.name}] 🚫 MIN SIZE VETO: {msg}")
                 approved = False
                 veto_category = "MIN_SIZE"
+                veto_reason = msg
+            elif min_notional > 0 and notional_usd < min_notional:
+                msg = f"Calculated notional ${notional_usd:.2f} is below exchange minimum notional (${min_notional:.2f}). Blocking trade."
+                self.logger.warning(f"[{self.name}] 🚫 MIN NOTIONAL VETO: {msg}")
+                approved = False
+                veto_category = "MIN_NOTIONAL"
                 veto_reason = msg
             elif notional_usd > max_notional_usd:
                 msg = f"Required notional ${notional_usd:.2f} exceeds max allowed ${max_notional_usd:.2f}."
@@ -221,9 +238,9 @@ class RiskManager(BaseAgent):
                 approved = False
                 veto_category = "MAX_MARGIN"
                 veto_reason = msg
-            elif margin_usd > total_balance:
-                msg = f"Required margin ${margin_usd:.2f} exceeds balance (${total_balance:.2f})."
-                self.logger.warning(f"[{self.name}] ❌ INSUFFICIENT BALANCE VETO: {msg}")
+            elif margin_usd > available_margin:
+                msg = f"Required margin ${margin_usd:.2f} exceeds available margin (${available_margin:.2f})."
+                self.logger.warning(f"[{self.name}] ❌ INSUFFICIENT MARGIN VETO: {msg}")
                 approved = False
                 veto_category = "INSUFFICIENT_BALANCE"
                 veto_reason = msg

@@ -238,10 +238,36 @@ class MarketDataService:
             candles = await self._fetch_nado_candles(symbol, interval_min, 20)
             if candles:
                 closes = [c["close"] for c in candles]
+                highs = [c["high"] for c in candles]
+                lows = [c["low"] for c in candles]
                 current_price = closes[-1]
-                price_5_ago = closes[-5] if len(closes) >= 5 else closes[0]
-                pct_diff = ((current_price - price_5_ago) / (price_5_ago + 1e-9)) * 100
-                trend = "BULLISH" if pct_diff > 0.2 else ("BEARISH" if pct_diff < -0.2 else "NEUTRAL")
+                
+                # CRITICAL-16, HIGH-17: Robust MTF Trend using EMA-9 and ATR
+                # 1. Calculate ATR (Average True Range) over available candles
+                if len(candles) > 1:
+                    tr = [max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1])) for i in range(1, len(candles))]
+                    atr = sum(tr) / len(tr)
+                else:
+                    atr = 0
+                    
+                # 2. Calculate EMA-9
+                ema_9 = closes[0]
+                if len(closes) > 1:
+                    multiplier = 2 / (9 + 1)
+                    for c in closes[1:]:
+                        ema_9 = (c - ema_9) * multiplier + ema_9
+                        
+                # 3. Determine Trend
+                price_change = current_price - closes[0]
+                trend = "NEUTRAL"
+                if current_price > ema_9 and price_change > (atr * 0.5):
+                    trend = "BULLISH"
+                elif current_price < ema_9 and price_change < -(atr * 0.5):
+                    trend = "BEARISH"
+                
+                # For compatibility with legacy logic, keep pct_diff calculation
+                pct_diff = ((current_price - closes[0]) / (closes[0] + 1e-9)) * 100
+                
                 vol = sum(c["volume"] for c in candles)
                 return {
                     "interval_min": interval_min,
@@ -328,8 +354,10 @@ class MarketDataService:
                         best_ask = asks[0][0]
                         spread = round(best_ask - best_bid, 4)
                         spread_pct = round((spread / best_bid) * 100, 4) if best_bid > 0 else 0.0
-                        bid_vol = sum(b[1] for b in bids)
-                        ask_vol = sum(a[1] for a in asks)
+                        import math
+                        mid_price = (best_bid + best_ask) / 2
+                        bid_vol = sum(size * math.exp(-100 * (abs(price - mid_price) / mid_price)) for price, size in bids)
+                        ask_vol = sum(size * math.exp(-100 * (abs(price - mid_price) / mid_price)) for price, size in asks)
                         total_vol = bid_vol + ask_vol
                         imbalance = round((bid_vol - ask_vol) / (total_vol + 1e-8), 4)
                         
@@ -624,19 +652,50 @@ class MarketDataService:
             if product_id is None:
                 return {"symbol": symbol, "open_interest": 0.0, "open_interest_trend": "neutral", "funding_rate": 0.0001}
                 
-            params = IndexerMarketSnapshotsParams(interval=IndexerMarketSnapshotInterval(count=1, granularity=86400))
+            # 1. Real-time OI from engine markets
+            open_interest = 0.0
+            markets = await asyncio.to_thread(self.nado_client.market.get_all_engine_markets)
+            for p in markets.perp_products:
+                if p.product_id == product_id:
+                    try:
+                        open_interest = float(p.open_interest_x18) / 1e18
+                    except Exception:
+                        pass
+                    break
+                    
+            # 2. Hourly Snapshot for Funding Rate (CRITICAL-14)
+            funding_rate = 0.0001
+            params = IndexerMarketSnapshotsParams(interval=IndexerMarketSnapshotInterval(count=1, granularity=3600))
             snapshots = await asyncio.to_thread(self.nado_client.market.get_market_snapshots, params)
             
             if snapshots and snapshots.snapshots:
                 snap = snapshots.snapshots[0]
                 vid = str(product_id)
-                open_interest = float(snap.open_interests.get(vid, 0)) / 1e18
                 funding_rate = float(snap.funding_rates.get(vid, 0)) / 1e18
                 
-                # QW #4: Track OI Trend
-                oi_trend = "neutral"
-                if symbol in self._oi_history:
-                    prev_oi = self._oi_history[symbol]
+            # 3. Time-Weighted OI Trend (CRITICAL-13)
+            import time
+            current_time = time.time()
+            oi_trend = "neutral"
+            
+            if symbol not in self._oi_history or not isinstance(self._oi_history.get(symbol), list):
+                self._oi_history[symbol] = []
+                
+            history = self._oi_history[symbol]
+            history.append({"ts": current_time, "oi": open_interest})
+            
+            # Auto-purge data older than 2 hours (7200 seconds)
+            history = [x for x in history if current_time - x["ts"] <= 7200]
+            self._oi_history[symbol] = history
+            
+            # Find closest point to 1 hour ago
+            target_time = current_time - 3600
+            past_points = [x for x in history if x["ts"] <= current_time - 1800] # at least 30m old
+            
+            if past_points:
+                closest_point = min(past_points, key=lambda x: abs(x["ts"] - target_time))
+                prev_oi = closest_point["oi"]
+                if prev_oi > 0:
                     if open_interest > prev_oi * 1.01: # 1% increase
                         oi_trend = "rising"
                     elif open_interest < prev_oi * 0.99: # 1% decrease
@@ -644,24 +703,24 @@ class MarketDataService:
                     else:
                         oi_trend = "stable"
                         
-                self._oi_history[symbol] = open_interest
-                self._save_oi_history()
+            self._save_oi_history()
 
-                return {
-                    "symbol": symbol,
-                    "open_interest": open_interest,
-                    "open_interest_trend": oi_trend,
-                    "funding_rate": round(funding_rate, 8)
-                }
+            return {
+                "symbol": symbol,
+                "open_interest": open_interest,
+                "open_interest_trend": oi_trend,
+                "funding_rate_decimal": round(funding_rate, 8)
+            }
         except Exception as e:
             self._log(f"⚠️ [MarketDataService] Failed to fetch Nado OI/Funding for {symbol}: {e}")
             
         return {"symbol": symbol, "open_interest": 0.0, "open_interest_trend": "neutral", "funding_rate": 0.0001}
 
     async def fetch_margin_requirements(self, symbol: str) -> Dict[str, Any]:
-        """Fetches real maintenance margin parameters from Nado DEX SDK."""
+        """Fetches real maintenance margin parameters and size limits from Nado DEX SDK."""
+        result = {"maintenance_margin_pct": 0.01, "min_size": 0.0, "size_increment": 0.001}
         if not self.is_nado or not self.nado_client:
-            return {"maintenance_margin_pct": 0.01}
+            return result
             
         try:
             import asyncio
@@ -676,16 +735,22 @@ class MarketDataService:
                         try:
                             lwm = float(p.risk.long_weight_maintenance_x18) / 1e18
                             if lwm > 0:
-                                mm = 1.0 - lwm
-                                return {"maintenance_margin_pct": round(mm, 4)}
+                                result["maintenance_margin_pct"] = round(1.0 - lwm, 4)
                         except Exception:
                             # Fallback if SDK structures differ slightly
+                            pass
+                        
+                        # Extract min_size and size_increment
+                        try:
+                            result["size_increment"] = float(p.book_info.size_increment) / 1e18
+                            result["min_size"] = float(getattr(p.book_info, "min_size", 0)) / 1e18
+                        except Exception:
                             pass
                         break
         except Exception as e:
             self._log(f"⚠️ [MarketDataService] Failed to fetch Nado margin for {symbol}: {e}")
             
-        return {"maintenance_margin_pct": 0.01} # fallback to conservative 1%
+        return result
 
     async def fetch_all_market_data(self, symbol: str) -> Dict[str, Any]:
         """
@@ -707,6 +772,11 @@ class MarketDataService:
                 # Merge margin into derivatives_data
                 if isinstance(oi, dict) and isinstance(margin, dict):
                     oi.update(margin)
+
+                # CRITICAL-12: Inject open_interest_usd for OI_FundingAgent
+                current_price = ohlcv.get("current_price", 0.0) if isinstance(ohlcv, dict) else 0.0
+                if isinstance(oi, dict) and current_price > 0:
+                    oi["open_interest_usd"] = oi.get("open_interest", 0.0) * current_price
 
                 return {
                     "exchange": self.exchange_name,

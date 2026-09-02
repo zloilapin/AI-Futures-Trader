@@ -17,6 +17,14 @@ class CandleAgent(BaseAgent):
         
         price_data = market_data.get("price_data", {})
         ohlcv = price_data.get("candles_20", [])
+        indicators = market_data.get("indicators", {})
+        atr_14 = float(indicators.get("atr_14", 0) or 0)
+        
+        avg_volume_10 = 0
+        if len(ohlcv) >= 10:
+            avg_volume_10 = sum(float(c.get("volume", 0)) for c in ohlcv[-10:]) / 10
+        elif len(ohlcv) > 0:
+            avg_volume_10 = sum(float(c.get("volume", 0)) for c in ohlcv) / len(ohlcv)
         
         if not ohlcv or len(ohlcv) < 2:
             return {"signal": "NEUTRAL", "confidence": 0, "reasoning": "Not enough candle data for analysis", "pattern_detected": "None"}
@@ -60,29 +68,54 @@ class CandleAgent(BaseAgent):
         if total_range1 > 0:
             # 1. Sweep (Pin Bar / Hammer)
             if lower_wick1 > body1 * 2 and lower_wick1 > upper_wick1 * 2 and is_bullish1:
-                signal = "BULLISH"
-                confidence = 80
-                reasoning = "Длинная нижняя тень. Сбор ликвидности (стопов) снизу и агрессивный откуп."
-                pattern = "Bullish Liquidity Sweep"
+                if total_range1 > 0.75 * atr_14 and v1 > avg_volume_10:
+                    signal = "BULLISH"
+                    confidence = 80
+                    reasoning = "Длинная нижняя тень. Сбор ликвидности (стопов) снизу и агрессивный откуп."
+                    pattern = "Bullish Liquidity Sweep"
+                else:
+                    signal = "BULLISH"
+                    confidence = 55
+                    reasoning = "Слабое отклонение снизу, недостаточный объем или волатильность."
+                    pattern = "Weak Bullish Rejection"
                 
             elif upper_wick1 > body1 * 2 and upper_wick1 > lower_wick1 * 2 and is_bearish1:
-                signal = "BEARISH"
-                confidence = 80
-                reasoning = "Длинная верхняя тень. Сбор ликвидности (стопов) сверху и давление продавцов."
-                pattern = "Bearish Liquidity Sweep"
+                if total_range1 > 0.75 * atr_14 and v1 > avg_volume_10:
+                    signal = "BEARISH"
+                    confidence = 80
+                    reasoning = "Длинная верхняя тень. Сбор ликвидности (стопов) сверху и давление продавцов."
+                    pattern = "Bearish Liquidity Sweep"
+                else:
+                    signal = "BEARISH"
+                    confidence = 55
+                    reasoning = "Слабое отклонение сверху, недостаточный объем или волатильность."
+                    pattern = "Weak Bearish Rejection"
                 
-            # 2. Engulfing + Displacement
-            elif is_bullish1 and is_bearish2 and c1 > h2 and o1 <= c2:
+            # 2. Standard Engulfing
+            elif is_bullish1 and is_bearish2 and c1 > o2 and o1 < c2 and body1 > body2 * 1.2:
                 signal = "BULLISH"
                 confidence = 75
-                reasoning = "Бычье поглощение. Сильный импульс (Displacement), перекрывающий предыдущее падение."
+                reasoning = "Бычье поглощение. Тело текущей свечи полностью перекрывает тело предыдущей."
                 pattern = "Bullish Engulfing"
                 
-            elif is_bearish1 and is_bullish2 and c1 < l2 and o1 >= c2:
+            elif is_bearish1 and is_bullish2 and c1 < o2 and o1 > c2 and body1 > body2 * 1.2:
                 signal = "BEARISH"
                 confidence = 75
-                reasoning = "Медвежье поглощение. Сильный дамп (Displacement), перекрывающий предыдущий рост."
+                reasoning = "Медвежье поглощение. Тело текущей свечи полностью перекрывает тело предыдущей."
                 pattern = "Bearish Engulfing"
+                
+            # 3. Breakout
+            elif is_bullish1 and is_bearish2 and c1 > h2:
+                signal = "BULLISH"
+                confidence = 70
+                reasoning = "Бычий пробой. Закрытие выше максимума предыдущей медвежьей свечи."
+                pattern = "Bullish Breakout"
+                
+            elif is_bearish1 and is_bullish2 and c1 < l2:
+                signal = "BEARISH"
+                confidence = 70
+                reasoning = "Медвежий пробой. Закрытие ниже минимума предыдущей бычьей свечи."
+                pattern = "Bearish Breakout"
 
         return {
             "signal": signal,

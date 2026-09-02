@@ -40,4 +40,4 @@ class SentinelAgent(BaseAgent):
             return await self.generate_json(full_prompt, required_keys=["decision", "reasoning_en"])
         except Exception as e:
             self.logger.error(f"[{self.name}] Failed to evaluate position: {e}")
-            return {"decision": "HOLD_POSITION", "reasoning_en": f"Error: {e}"}
+            return {"decision": "ERROR", "reasoning_en": f"Error: {e}"}

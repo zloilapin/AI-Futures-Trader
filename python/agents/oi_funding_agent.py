@@ -17,8 +17,9 @@ class OIFundingAgent(BaseAgent):
         
         oi_data = market_data.get("derivatives_data", {})
         
-        funding_rate = oi_data.get("funding_rate", 0.0)
+        funding_rate = oi_data.get("funding_rate_decimal", 0.0)
         oi_usd = oi_data.get("open_interest_usd", 0.0)
+        oi_trend = oi_data.get("open_interest_trend", "neutral")
         
         signal = "NEUTRAL"
         confidence = 50
@@ -27,14 +28,22 @@ class OIFundingAgent(BaseAgent):
         bull_score = 0
         bear_score = 0
         
-        if funding_rate > 0.005:  # High positive funding (Longs paying shorts)
+        if funding_rate > 0.0005:  # High positive funding (Longs paying shorts)
             bear_score += 2
-            reason_parts.append(f"Фандинг сильно позитивный ({funding_rate:.4f}%). Лонги перегружены, риск сквиза вниз")
-        elif funding_rate < -0.005: # High negative funding (Shorts paying longs)
+            reason = f"Фандинг сильно позитивный ({funding_rate:.4f}). Лонги перегружены, риск сквиза вниз"
+            if oi_trend == "rising":
+                bear_score += 1
+                reason += " (усилено ростом OI)"
+            reason_parts.append(reason)
+        elif funding_rate < -0.0005: # High negative funding (Shorts paying longs)
             bull_score += 2
-            reason_parts.append(f"Фандинг сильно негативный ({funding_rate:.4f}%). Шорты перегружены, риск шорт-сквиза")
+            reason = f"Фандинг сильно негативный ({funding_rate:.4f}). Шорты перегружены, риск шорт-сквиза"
+            if oi_trend == "rising":
+                bull_score += 1
+                reason += " (усилено ростом OI)"
+            reason_parts.append(reason)
         else:
-            reason_parts.append(f"Фандинг нейтрален ({funding_rate:.4f}%)")
+            reason_parts.append(f"Фандинг нейтрален ({funding_rate:.4f})")
             
         if oi_usd > 1000000:
             reason_parts.append("Высокий открытый интерес")

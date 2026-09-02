@@ -24,12 +24,24 @@ class ScannerAgent(BaseAgent):
         spread = float(ob_data.get("spread", 0) or 0)
         atr_14 = float(indicators.get("atr_14", 0) or 0)
         
-        spread_pct = round((spread / current_price) * 100, 4) if current_price > 0 else 0.0
+        # CRITICAL-18: Fail-closed if ATR is missing
+        if atr_14 == 0:
+            return {
+                "reasoning": "Данные ATR отсутствуют или равны 0. Оценка риска невозможна.",
+                "status": "DATA_INVALID",
+                "proceed": False
+            }
+            
+        # MEDIUM-19: Canonical Spread Calculation
+        spread_pct = float(ob_data.get("spread_pct", 0.0))
         atr_pct = round((atr_14 / current_price) * 100, 4) if current_price > 0 else 0.0
         
-        if spread_pct > 0.1:
+        # HIGH-20: Dynamic Spread Limits
+        max_allowed_spread = min(0.75, max(0.15, atr_pct * 0.20))
+        
+        if spread_pct > max_allowed_spread:
             return {
-                "reasoning": f"Спред слишком высокий: {spread_pct}% > 0.1%.",
+                "reasoning": f"Спред слишком высокий: {spread_pct:.3f}% > {max_allowed_spread:.3f}%.",
                 "status": "SPREAD_TOO_HIGH",
                 "proceed": False
             }

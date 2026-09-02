@@ -119,12 +119,24 @@ class TradingPipeline:
             detected_profile = regime_verdict.get("recommended_profile", "BALANCED")
             regime_reasoning = regime_verdict.get("reasoning_en", "")
             
-            # Динамически меняем профиль на этот цикл
-            config.TRADING_PROFILE = detected_profile
+            # Динамически меняем профиль на этот цикл (но с ограничением сверху)
+            import os
+            original_profile = os.getenv("TRADING_PROFILE", "BALANCED").upper()
+            profile_ranks = {"CONSERVATIVE": 1, "BALANCED": 2, "AGGRESSIVE": 3}
+            orig_rank = profile_ranks.get(original_profile, 2)
+            detected_rank = profile_ranks.get(detected_profile, 2)
+            
+            # Защита: RegimeAgent может только ПОНИЖАТЬ риск во время шторма
+            if detected_rank > orig_rank:
+                config.TRADING_PROFILE = original_profile
+                self.services.logger.info(f"[Macro Regime] LLM proposed {detected_profile}, but bounded to {original_profile}.")
+            else:
+                config.TRADING_PROFILE = detected_profile
+                
             profile = config.TRADING_PROFILE
             
             print(f"🌍 [Macro Regime] Рынок находится в фазе: {detected_regime}")
-            print(f"🛡️ [Risk Profile] Профиль риска автоматически изменен на: {profile}")
+            print(f"🛡️ [Risk Profile] Профиль риска на этот цикл: {profile}")
             self.services.logger.info(f"[Macro Regime] {detected_regime} -> {profile}. Reason: {regime_reasoning}")
         except Exception as e:
             print(f"⚠️ [Macro Regime] Ошибка при определении режима: {e}. Используем базовый профиль {profile}.")
@@ -398,6 +410,36 @@ class TradingPipeline:
                 continue
 
             # СТАДИЯ 5: РИСК-МЕНЕДЖМЕНТ
+            self.services.logger.info(f"[Stage 5] Fetching fresh price to prevent slippage on {symbol}...")
+            try:
+                fresh_market_data = await self.services.fetcher.fetch_all_market_data(symbol)
+                fresh_price = fresh_market_data.get("price_data", {}).get("current_price", current_price)
+                if fresh_price > 0 and current_price > 0:
+                    deviation = abs(fresh_price - current_price) / current_price
+                    if deviation > 0.003: # 0.3%
+                        msg = f"⏸️ Пропуск {symbol}. Сильное проскальзывание цены во время анализа: {deviation*100:.2f}% (Signal: {current_price}, Fresh: {fresh_price})."
+                        print(msg)
+                        self.services.logger.info(f"[System_Core] Slippage Gate: {msg}")
+                        scan_summaries.append({
+                            "symbol": symbol,
+                            "decision": decision,
+                            "conviction": conviction,
+                            "scanner_status": "✅ OK",
+                            "scanner_reason": None,
+                            "risk_approved": False,
+                            "risk_reason": f"Slippage Gate: отклонение {deviation*100:.2f}%",
+                            "ceo_reasoning": "Bypassed by Slippage Gate",
+                            "status": "⏸️ НЕТ СИГНАЛА"
+                        })
+                        tracker.record_rejection("SLIPPAGE_VETO")
+                        continue
+                
+                # Update market data and price for RiskManager
+                market_data["price_data"]["current_price"] = fresh_price
+                current_price = fresh_price
+            except Exception as e:
+                self.services.logger.error(f"[Stage 5] Failed to fetch fresh price for {symbol}: {e}. Proceeding with signal price.")
+                
             self.services.logger.info(f"[Stage 5] Risk Manager ({profile}) проверяет параметры сделки для {symbol}...")
             portfolio_data["active_positions"] = self.services.trading_service.active_positions
             risk_verdict = await self.agents.risk.analyze(ceo_verdict, portfolio_data, market_data)
@@ -415,7 +457,8 @@ class TradingPipeline:
                     tp_price=risk_verdict.get("take_profit_price", 0),
                     sl_price=risk_verdict.get("stop_loss_price", 0),
                     leverage=config.LEVERAGE,
-                    original_thesis=ceo_verdict.get("reasoning_en", "")
+                    original_thesis=ceo_verdict.get("reasoning_en", ""),
+                    contracts=risk_verdict.get("contracts", 0.0)
                 )
 
                 if not trade_success:
@@ -608,19 +651,36 @@ class TradingPipeline:
                     }
                     sentinel_verdict = await self.agents.sentinel.analyze(sentinel_payload)
                     
+                    if not hasattr(self, "_pending_sentinel_closes"):
+                        self._pending_sentinel_closes = {}
+                        
                     if sentinel_verdict.get("decision") == "CLOSE_POSITION":
-                        self.services.logger.warning(f"🚨 [Sentinel] Thesis invalidated for {symbol}! Triggering early exit.")
-                        print(f"🚨 [Sentinel] EARLY EXIT TRIGGERED for {symbol}. Reason: {sentinel_verdict.get('reasoning_en', '')}")
+                        count = self._pending_sentinel_closes.get(symbol, 0) + 1
+                        self._pending_sentinel_closes[symbol] = count
                         
-                        await self.services.trading_service.force_close_position(symbol, bypass_check=True)
+                        if count >= 2:
+                            self.services.logger.warning(f"🚨 [Sentinel] Thesis invalidated for {symbol}! Triggering early exit (Confirmed).")
+                            print(f"🚨 [Sentinel] EARLY EXIT TRIGGERED for {symbol}. Reason: {sentinel_verdict.get('reasoning_en', '')}")
+                            await self.services.trading_service.force_close_position(symbol, bypass_check=False)
+                            
+                            early_exit_msg = (
+                                f"🚨 *SENTINEL EARLY EXIT / РАННИЙ ВЫХОД*\n\n"
+                                f"🪙 *Asset / Монета:* `{symbol}`\n"
+                                f"📝 *Reason / Причина:* `{sentinel_verdict.get('reasoning_en', '')}`\n"
+                                f"🛡 *Action:* The original thesis was invalidated. Position closed to prevent further losses."
+                            )
+                            await self.services.tg_sender.send_message(early_exit_msg)
+                            self._pending_sentinel_closes[symbol] = 0
+                        else:
+                            self.services.logger.info(f"⚠️ [Sentinel] First CLOSE vote for {symbol}. Waiting for confirmation on next tick.")
+                            print(f"⚠️ [Sentinel] {symbol} thesis questioned. Waiting for 1 more confirmation.")
+                    elif sentinel_verdict.get("decision") == "ERROR":
+                        self._pending_sentinel_closes[symbol] = 0
+                        self.services.logger.error(f"❌ [Sentinel] SENTINEL_UNAVAILABLE: {sentinel_verdict.get('reasoning_en')}")
+                    else:
+                        self._pending_sentinel_closes[symbol] = 0
+                        self.services.logger.info(f"[Sentinel] Thesis intact for {symbol}.")
                         
-                        early_exit_msg = (
-                            f"🚨 *SENTINEL EARLY EXIT / РАННИЙ ВЫХОД*\n\n"
-                            f"🪙 *Asset / Монета:* `{symbol}`\n"
-                            f"📝 *Reason / Причина:* `{sentinel_verdict.get('reasoning_en', '')}`\n"
-                            f"🛡 *Action:* The original thesis was invalidated. Position closed to prevent further losses."
-                        )
-                        await self.services.tg_sender.send_message(early_exit_msg)
                         
             except Exception as e:
                 print(f"❌ Ошибка проверки позиции {symbol}: {e}")

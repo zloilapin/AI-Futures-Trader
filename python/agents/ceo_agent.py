@@ -211,6 +211,7 @@ SCHEMA:
         }
         
         net_score = 0
+        total_absolute = 0
         if isinstance(breakdown, dict):
             for k, v in breakdown.items():
                 try:
@@ -231,10 +232,15 @@ SCHEMA:
                     
                     val = max(-limit, min(limit, val))
                     net_score += val
+                    total_absolute += abs(val)
                 except (ValueError, TypeError):
                     continue
                     
-        conviction = min(100, int(abs(net_score)))
+        # Fix HIGH #5: Penalty for highly conflicting signals
+        # If Bull=50 and Bear=-50, total_absolute=100, abs(net_score)=0, conflict=50. Conviction = 0.
+        conflict_penalty = max(0, (total_absolute - abs(net_score)) / 2.0)
+        conviction = max(0, int(abs(net_score) - conflict_penalty))
+        conviction = min(100, conviction)
         
         # Prevent math hallucinations
         if decision == "LONG" and net_score < 0:

@@ -236,13 +236,15 @@ class NadoTradingService(BaseTradingService):
             
         return active_list
 
-    async def open_position(self, symbol: str, direction: str, entry_price: float, notional_usd: float, tp_price: float, sl_price: float, leverage: int, original_thesis: str = "") -> bool:
+    async def open_position(self, symbol: str, direction: str, entry_price: float, notional_usd: float, tp_price: float, sl_price: float, leverage: int, original_thesis: str = "", contracts: float = 0.0) -> bool:
         """Submits an EIP-712 signed order to Nado Gateway."""
         if not self.is_connected:
             logger.error(f"[NadoTradingService] Cannot open {direction} on {symbol} - SDK not connected.")
             return False
             
         logger.info(f"[NadoTradingService] 🚀 Routing {direction} {symbol} to Nado DEX...")
+        
+        actual_entry_price = entry_price
         
         try:
             import time
@@ -268,7 +270,7 @@ class NadoTradingService(BaseTradingService):
                 logger.error(f"[NadoTradingService] ❌ Market params not found for product_id {product_id}")
                 return False
                 
-            amount_base = notional_usd / entry_price
+            amount_base = contracts if contracts > 0 else notional_usd / entry_price
             amount_x18 = int(amount_base * 10**18)
             # Apply dynamic slippage for market-like execution (IOC)
             base_asset = symbol.split('-')[0].upper()
@@ -391,6 +393,14 @@ class NadoTradingService(BaseTradingService):
                         if abs(int(order_info.base_filled)) > 0:
                             filled = True
                             actual_filled_x18 = int(order_info.base_filled)
+                            try:
+                                quote_f = abs(float(order_info.quote_filled))
+                                base_f = abs(float(order_info.base_filled))
+                                if base_f > 0:
+                                    actual_entry_price = quote_f / base_f
+                                    logger.info(f"[NadoTradingService] 🔍 Exact Entry Price from fill: {actual_entry_price}")
+                            except Exception:
+                                pass
                             logger.info(f"[NadoTradingService] ✅ Order {digest} FILLED successfully!")
                             break
                 except Exception as poll_e:
@@ -405,6 +415,14 @@ class NadoTradingService(BaseTradingService):
                         if abs(int(final_order.base_filled)) > 0:
                             filled = True
                             actual_filled_x18 = int(final_order.base_filled)
+                            try:
+                                quote_f = abs(float(final_order.quote_filled))
+                                base_f = abs(float(final_order.base_filled))
+                                if base_f > 0:
+                                    actual_entry_price = quote_f / base_f
+                                    logger.info(f"[NadoTradingService] 🔍 Exact Entry Price from fill on final check: {actual_entry_price}")
+                            except Exception:
+                                pass
                             logger.info(f"[NadoTradingService] ✅ Order {digest} FILLED on final check!")
                 except Exception as e:
                     logger.warning(f"[NadoTradingService] ⚠️ Final order status check failed for {digest}: {e}")
@@ -424,6 +442,16 @@ class NadoTradingService(BaseTradingService):
                         logger.error(f"[NadoTradingService] ❌ Failed to cancel timed out order {digest}: {cancel_e}")
                     
                     return False
+            
+            # --- Partial Fill Guard (CRITICAL-4) ---
+            fill_ratio = abs(actual_filled_x18) / abs(amount_x18) if amount_x18 != 0 else 0
+            if fill_ratio < 0.95:
+                logger.error(f"[NadoTradingService] ❌ PARTIAL FILL {fill_ratio*100:.1f}%. Closing immediately to prevent slivers.")
+                try:
+                    await self.force_close_position(symbol, bypass_check=True)
+                except Exception as e:
+                    logger.error(f"[NadoTradingService] ⚠️ Failed to close partial position {symbol}: {e}")
+                return False
             
             # --- Native Trigger Orders (TP/SL) ---
             trigger_amount_x18 = str(-actual_filled_x18)
@@ -500,18 +528,18 @@ class NadoTradingService(BaseTradingService):
                     return False
             
             # Recalculate notional_usd to reflect actual fill (Option A: allow partial fills)
-            notional_usd = abs(actual_filled_x18 / 1e18) * entry_price
+            notional_usd = abs(actual_filled_x18 / 1e18) * actual_entry_price
             
             # Store position state to prevent duplicate orders and track PnL
             self.active_positions[symbol] = {
                 "direction": direction.upper(),
-                "entry_price": entry_price,
+                "entry_price": actual_entry_price,
                 "size_usd": notional_usd,
                 "tp_price": tp_price,
                 "sl_price": sl_price,
                 "leverage": leverage,
-                "highest_price": entry_price,
-                "lowest_price": entry_price,
+                "highest_price": actual_entry_price,
+                "lowest_price": actual_entry_price,
                 "product_id": product_id,
                 "sender": sender,
                 "sl_digest": sl_digest,
@@ -614,6 +642,35 @@ class NadoTradingService(BaseTradingService):
                         exit_price = current_price
                         triggered_by = "Unknown/Manual"
                 
+                # --- Exact Execution Price (CRITICAL-6) ---
+                try:
+                    from nado_protocol.client.types import IndexerSubaccountHistoricalOrdersParams
+                    
+                    address = self.wallet.get_address()
+                    res_sub = await asyncio.to_thread(self.client.subaccount.get_subaccounts, address)
+                    subaccount_id = res_sub.subaccounts[0].subaccount if res_sub and res_sub.subaccounts else None
+                    
+                    if subaccount_id and "product_id" in pos:
+                        params = IndexerSubaccountHistoricalOrdersParams(
+                            subaccount=subaccount_id,
+                            product_ids=[pos["product_id"]],
+                            limit=20,
+                        )
+                        history = await asyncio.to_thread(self.client.market.get_subaccount_historical_orders, params)
+                        
+                        if history and history.orders:
+                            for order in history.orders:
+                                quote = abs(float(order.quote_filled))
+                                base = abs(float(order.base_filled))
+                                if base > 0:
+                                    exec_price = quote / base
+                                    logger.info(f"[NadoTradingService] 🔍 Found exact execution price from history: {exec_price}")
+                                    exit_price = exec_price
+                                    triggered_by += " (EXACT)"
+                                    break
+                except Exception as e:
+                    logger.warning(f"[NadoTradingService] ⚠️ Could not fetch exact history for {symbol}, falling back to estimation: {e}")
+                
                 if direction == "LONG":
                     target_pnl = (exit_price - entry_price) / entry_price * size_usd
                 else:
@@ -666,17 +723,20 @@ class NadoTradingService(BaseTradingService):
             subaccount = res.subaccounts[0].subaccount
 
             for attempt in range(max_retries):
-                if not bypass_check:
-                    positions = await self.get_active_positions(bypass_cache=True)
-                    target_pos = next((p for p in positions if p["symbol"] == base_symbol), None)
-                            
-                    if not target_pos:
+                # CRITICAL-5: Always fetch active positions to capture realized PnL prior to close
+                positions = await self.get_active_positions(bypass_cache=True)
+                target_pos = next((p for p in positions if p["symbol"] == base_symbol), None)
+                        
+                if not target_pos:
+                    if not bypass_check:
                         if attempt < max_retries - 1:
                             logger.warning(f"[NadoTradingService] Position {symbol} invisible to Indexer. Retrying ({attempt+1}/{max_retries})...")
                             await asyncio.sleep(1.5)
                             continue
                         else:
                             return False, 0.0
+                    else:
+                        logger.warning(f"[NadoTradingService] ⚠️ bypass_check=True, but position {symbol} not found in Indexer. PnL will be 0.")
                             
                 # Fire close_position via SDK
                 try:
@@ -714,7 +774,9 @@ class NadoTradingService(BaseTradingService):
         params = {
             "size_increment_base": 0.0,
             "size_increment_x18": 0,
-            "price_increment_x18": 0
+            "price_increment_x18": 0,
+            "min_size": 0.0,
+            "min_notional": 10.0 # Default fallback
         }
         if not getattr(self, "_market_cache", None):
             return params
@@ -725,13 +787,16 @@ class NadoTradingService(BaseTradingService):
                 params["size_increment_base"] = float(market_info.book_info.size_increment) / 1e18
                 params["size_increment_x18"] = int(market_info.book_info.size_increment)
                 params["price_increment_x18"] = int(market_info.book_info.price_increment_x18)
+                params["min_size"] = float(getattr(market_info.book_info, "min_size", 0)) / 1e18
+                if hasattr(market_info.book_info, "min_notional"):
+                    params["min_notional"] = float(market_info.book_info.min_notional) / 1e18
             except Exception:
                 pass
         return params
 
     async def get_market_limits(self, symbol: str) -> dict:
         """Fetch min_size and size_increment for the given product"""
-        limits = {"size_increment": 0.0}
+        limits = {"size_increment": 0.0, "min_size": 0.0, "min_notional": 10.0}
         if not self.is_connected:
             return limits
             
@@ -749,6 +814,9 @@ class NadoTradingService(BaseTradingService):
                     
             params = self._get_market_parameters(product_id)
             limits["size_increment"] = params["size_increment_base"]
+            limits["min_size"] = params["min_size"]
+            limits["min_notional"] = params["min_notional"]
+            limits["price_increment"] = float(params["price_increment_x18"]) / 1e18
         except Exception as e:
             logger.warning(f"[NadoTradingService] ⚠️ Could not fetch limits for {symbol}: {e}")
         return limits
@@ -776,7 +844,17 @@ class NadoTradingService(BaseTradingService):
                     
                     try:
                         # In Nado/Vertex, trigger orders are fetched via indexer
-                        res = await asyncio.to_thread(self.client.indexer.get_trigger_orders, {"subaccount": self.default_subaccount_id, "product_id": product_id, "pending": True})
+                        # CRITICAL-7: Retry logic for network failures
+                        res = None
+                        for attempt in range(3):
+                            try:
+                                res = await asyncio.to_thread(self.client.indexer.get_trigger_orders, {"subaccount": self.default_subaccount_id, "product_id": product_id, "pending": True})
+                                break
+                            except Exception as e:
+                                if attempt == 2:
+                                    raise e
+                                await asyncio.sleep(2)
+                                
                         if res and hasattr(res, 'orders'):
                             for o in res.orders:
                                 # Safely extract trigger price
@@ -804,8 +882,17 @@ class NadoTradingService(BaseTradingService):
                             continue
                             
                     except Exception as e:
-                        logger.error(f"[NadoTradingService] ❌ Failed to fetch real trigger orders for {symbol} ({e}). Emergency close triggered!")
-                        await self.force_close_position(symbol)
+                        logger.warning(f"[NadoTradingService] ⚠️ Failed to fetch real trigger orders for {symbol} ({e}). Marking UNVERIFIED.")
+                        self.active_positions[symbol] = {
+                            "direction": direction,
+                            "entry_price": entry,
+                            "size_usd": pos.get("size_usd", 0.0),
+                            "tp_price": tp_price,
+                            "sl_price": sl_price,
+                            "leverage": pos.get("leverage", 1),
+                            "unverified_triggers": True
+                        }
+                        restored += 1
                         continue
                     
                     self.active_positions[symbol] = {
@@ -909,7 +996,10 @@ class NadoTradingService(BaseTradingService):
                         digests=[sl_digest],
                         sender=pos["sender"]
                     )
-                    await asyncio.to_thread(self.client.market.cancel_trigger_orders, cancel_params)
+                    try:
+                        await asyncio.to_thread(self.client.market.cancel_trigger_orders, cancel_params)
+                    except Exception as e:
+                        logger.warning(f"[NadoTradingService] ⚠️ Failed to cancel old SL for {symbol} ({e}).")
                     
                     # 2. Place new SL
                     # Fetch price increment from cached market data (safe dict lookup)
@@ -943,21 +1033,26 @@ class NadoTradingService(BaseTradingService):
                     exec_price_x18 = (exec_price_x18 // price_increment) * price_increment
                     trigger_price_x18 = (trigger_price_x18 // price_increment) * price_increment
                     
-                    sl_res = await asyncio.to_thread(
-                        self.client.market.place_price_trigger_order,
-                        product_id=product_id,
-                        price_x18=str(exec_price_x18),
-                        amount_x18=pos["trigger_amount_x18"],
-                        trigger_price_x18=str(trigger_price_x18),
-                        trigger_type=pos["sl_type"],
-                        reduce_only=True
-                    )
-                    if sl_res.data:
-                        pos["sl_digest"] = sl_res.data.digest
-                        pos["sl_price"] = new_sl
-                        logger.info(f"[NadoTradingService] ✅ Native Trailing SL replaced successfully for {symbol} at {new_sl:.4f}")
-                    else:
-                        logger.error(f"[NadoTradingService] ❌ Failed to place trailing SL order for {symbol}")
+                    try:
+                        sl_res = await asyncio.to_thread(
+                            self.client.market.place_price_trigger_order,
+                            product_id=product_id,
+                            price_x18=str(exec_price_x18),
+                            amount_x18=pos["trigger_amount_x18"],
+                            trigger_price_x18=str(trigger_price_x18),
+                            trigger_type=pos["sl_type"],
+                            reduce_only=True
+                        )
+                        if sl_res.data:
+                            pos["sl_digest"] = sl_res.data.digest
+                            pos["sl_price"] = new_sl
+                            logger.info(f"[NadoTradingService] ✅ Native Trailing SL replaced successfully for {symbol} at {new_sl:.4f}")
+                        else:
+                            raise Exception("Empty response data")
+                    except Exception as e:
+                        logger.error(f"[NadoTradingService] ❌ CRITICAL: Failed to place trailing SL order for {symbol} ({e}). Position UNPROTECTED. EMERGENCY CLOSE!")
+                        await self.force_close_position(symbol, bypass_check=True)
+                        break
                         
             except Exception as e:
                 logger.error(f"[NadoTradingService] ⚠️ Trailing stop error for {symbol}: {e}")
