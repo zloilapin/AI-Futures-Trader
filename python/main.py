@@ -176,7 +176,7 @@ async def main():
                 while True:
                     current_time = time.time()
                     scan_interval = getattr(config, "SCAN_INTERVAL_MINUTES", 30) * 60
-                    sentinel_interval = getattr(config, "SENTINEL_INTERVAL_MINUTES", 5) * 60
+                    sentinel_interval = getattr(config, "SENTINEL_INTERVAL_SECONDS", 30)
                     
                     do_full_scan = (current_time - last_full_scan_time) >= scan_interval
                     
@@ -195,9 +195,9 @@ async def main():
                     
                     if not do_full_scan:
                         minutes_to_full = int((scan_interval - (time.time() - last_full_scan_time)) / 60)
-                        print(f"\n⏳ Ожидание {int(sentinel_interval/60)} мин. (Sentinel-check). До полного сканирования рынка: {max(0, minutes_to_full)} мин...")
+                        print(f"\n⏳ Ожидание {sentinel_interval} сек. (Sentinel-check). До полного сканирования рынка: {max(0, minutes_to_full)} мин...")
                     else:
-                        print(f"\n⏳ Ожидание {int(sentinel_interval/60)} мин. до следующего Sentinel-check...")
+                        print(f"\n⏳ Ожидание {sentinel_interval} сек. до следующего Sentinel-check...")
                         
                     await asyncio.sleep(sentinel_interval)
             except (KeyboardInterrupt, asyncio.CancelledError):
