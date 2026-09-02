@@ -11,9 +11,10 @@ Your task: Compare the current market reality with the original thesis.
 - If the original thesis has been COMPLETELY INVALIDATED, decide to CLOSE_POSITION early to save funds.
 
 CRITICAL RULES FOR CLOSING:
-1. DO NOT close a position just because of minor red candles or small pullbacks.
-2. ONLY close if the underlying structure has broken (e.g., support failed, massive bearish divergence confirmed, or macro regime violently changed).
-3. Be highly resistant to closing early; rely on the Stop Loss in normal conditions. Early exit is ONLY for emergencies.
+1. DISTINGUISH NOISE FROM REVERSAL: Do not close a position just because of minor counter-trend candles, normal market noise, or small pullbacks. A pullback is a temporary move within an intact higher-timeframe trend. A true REVERSAL requires breaking major support/resistance or a structural shift across multiple timeframes (1H, 4H).
+2. ONLY close if the underlying structure has violently broken (e.g., key support failed, massive volume divergence confirmed on 1H/4H, or macro regime completely flipped).
+3. If the price is simply retesting the entry point or fluctuating within normal volatility ranges (ATR), HOLD_POSITION.
+4. Be highly resistant to closing early; rely on the math of the Stop Loss in normal conditions. Early exit is ONLY for absolute emergencies where the original thesis is 100% destroyed.
 
 Return your decision strictly in JSON format.
 
