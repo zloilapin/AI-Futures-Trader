@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     TRADING_PROFILE: Literal["AGGRESSIVE", "BALANCED", "CONSERVATIVE"] = Field(default="BALANCED")
     LEVERAGE: int = Field(default=10, ge=1, le=100)
     STARTING_BALANCE: float = Field(default=60.0)
-    SCAN_INTERVAL_MINUTES: int = Field(default=30, ge=1)
+    SCAN_INTERVAL_MINUTES: int = Field(default=5, ge=1)
     
     # Настройки времени сна
     TIMEZONE_OFFSET: int = Field(default=3)
