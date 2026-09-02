@@ -193,13 +193,21 @@ async def main():
                     
                     cycle_number += 1
                     
-                    if not do_full_scan:
-                        minutes_to_full = int((scan_interval - (time.time() - last_full_scan_time)) / 60)
-                        print(f"\n⏳ Ожидание {sentinel_interval} сек. (Sentinel-check). До полного сканирования рынка: {max(0, minutes_to_full)} мин...")
+                    has_active = len(trading_service.active_positions) > 0
+                    
+                    if has_active:
+                        sleep_time = sentinel_interval
+                        if not do_full_scan:
+                            minutes_to_full = int((scan_interval - (time.time() - last_full_scan_time)) / 60)
+                            print(f"\n⏳ Ожидание {sleep_time} сек. (Sentinel-check). До полного сканирования рынка: {max(0, minutes_to_full)} мин...")
+                        else:
+                            print(f"\n⏳ Ожидание {sleep_time} сек. до следующего Sentinel-check...")
                     else:
-                        print(f"\n⏳ Ожидание {sentinel_interval} сек. до следующего Sentinel-check...")
+                        sleep_time = max(1, scan_interval - (time.time() - last_full_scan_time))
+                        minutes_to_full = int(sleep_time / 60)
+                        print(f"\n⏳ Нет открытых позиций. Ожидание {minutes_to_full} мин. до следующего цикла сканирования...")
                         
-                    await asyncio.sleep(sentinel_interval)
+                    await asyncio.sleep(sleep_time)
             except (KeyboardInterrupt, asyncio.CancelledError):
                 print("\n🛑 Автономный торговый бот остановлен.")
     finally:

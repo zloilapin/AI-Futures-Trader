@@ -1,5 +1,5 @@
 {
-    "total_scans": 189,
+    "total_scans": 191,
     "trades_executed": 3,
     "execution_failed": 0,
     "rejections": {
@@ -11,8 +11,8 @@
         "FETCH_ERROR": 8,
         "NO_SIGNAL": 24,
         "LOW_CONFIDENCE": 29,
-        "LOW_VOLATILITY": 49,
-        "LOW_EDGE": 12,
+        "LOW_VOLATILITY": 51,
+        "LOW_EDGE": 13,
         "ANALYST_DISAGREEMENT": 4
     }
 }
