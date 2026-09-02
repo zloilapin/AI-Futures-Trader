@@ -4,8 +4,6 @@ import asyncio
 import traceback
 from typing import Callable, Awaitable, Dict, Any, Optional
 
-from services.paper_trading_service import PaperTradingService
-
 class TelegramBotListener:
     """
     Background listener for interactive Telegram commands (/status, /pnl, /balance, /scan, /help).

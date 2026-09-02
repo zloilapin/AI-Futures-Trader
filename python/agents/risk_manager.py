@@ -75,6 +75,30 @@ class RiskManager(BaseAgent):
             approved = False
             veto_category = "INSUFFICIENT_BALANCE"
         elif decision in ["LONG", "SHORT"] and conviction >= min_conviction:
+            
+            # --- Correlation Filter ---
+            symbol = ceo_decision.get("symbol", "")
+            active_positions = portfolio_data.get("active_positions", {})
+            is_btc = symbol in ["BTC-USD", "WBTC-USD"]
+            is_eth = symbol in ["ETH-USD", "WETH-USD"]
+            if is_btc or is_eth:
+                btc_pos = active_positions.get("BTC-USD") or active_positions.get("WBTC-USD")
+                eth_pos = active_positions.get("ETH-USD") or active_positions.get("WETH-USD")
+                conflict = False
+                if is_eth and btc_pos and btc_pos["direction"] == decision:
+                    conflict = True
+                elif is_btc and eth_pos and eth_pos["direction"] == decision:
+                    conflict = True
+                
+                if conflict:
+                    msg = f"Correlation Filter: Related asset already open in {decision}."
+                    self.logger.warning(f"[{self.name}] 🚫 CORRELATION VETO: {msg}")
+                    return {
+                        "approved": False,
+                        "veto_category": "CORRELATION_VETO",
+                        "reasoning": msg
+                    }
+            # --------------------------
             # QW #6: Win Rate Gate Check
             win_count = portfolio_data.get("win_count", 0)
             loss_count = portfolio_data.get("loss_count", 0)

@@ -14,7 +14,11 @@ from agents.order_book_agent import OrderBookAgent
 from agents.oi_funding_agent import OIFundingAgent
 from agents.news_agent import NewsAgent
 from agents.indicator_agent import IndicatorAgent
+from agents.bull_agent import BullAgent
+from agents.bear_agent import BearAgent
 from agents.ceo_agent import CEOAgent
+from agents.sentinel_agent import SentinelAgent
+from agents.regime_agent import RegimeAgent
 from agents.risk_manager import RiskManager
 from agents.telegram_agent import TelegramAgent
 from agents.reflector_agent import ReflectorAgent
@@ -33,7 +37,11 @@ class AgentRegistry:
     oi_funding: OIFundingAgent
     news: NewsAgent
     indicator: IndicatorAgent
+    bull: BullAgent
+    bear: BearAgent
     ceo: CEOAgent
+    sentinel: SentinelAgent
+    regime: RegimeAgent
     risk: RiskManager
     telegram: TelegramAgent
     reflector: ReflectorAgent
@@ -91,6 +99,36 @@ class TradingPipeline:
             self.services.logger.info("[System_Core] 3 consecutive losses detected. 1 hour cooldown activated.")
             if not force_scan:
                 return
+
+        # СТАДИЯ 0: REGIME DETECTION (Адаптивный профиль риска)
+        self.services.logger.info("[Stage 0] Regime Agent определяет фазу рынка (BTC/ETH)...")
+        macro_cache = {}
+        try:
+            btc_data = await self.services.fetcher.fetch_all_market_data("BTC-USD")
+            eth_data = await self.services.fetcher.fetch_all_market_data("ETH-USD")
+            macro_cache["BTC-USD"] = btc_data
+            macro_cache["ETH-USD"] = eth_data
+            
+            regime_payload = {
+                "btc_data": btc_data,
+                "eth_data": eth_data
+            }
+            regime_verdict = await self.agents.regime.analyze(regime_payload)
+            
+            detected_regime = regime_verdict.get("regime", "RANGE_CHOPPY")
+            detected_profile = regime_verdict.get("recommended_profile", "BALANCED")
+            regime_reasoning = regime_verdict.get("reasoning_en", "")
+            
+            # Динамически меняем профиль на этот цикл
+            config.TRADING_PROFILE = detected_profile
+            profile = config.TRADING_PROFILE
+            
+            print(f"🌍 [Macro Regime] Рынок находится в фазе: {detected_regime}")
+            print(f"🛡️ [Risk Profile] Профиль риска автоматически изменен на: {profile}")
+            self.services.logger.info(f"[Macro Regime] {detected_regime} -> {profile}. Reason: {regime_reasoning}")
+        except Exception as e:
+            print(f"⚠️ [Macro Regime] Ошибка при определении режима: {e}. Используем базовый профиль {profile}.")
+            self.services.logger.error(f"[Macro Regime] Failed to detect regime: {e}")
 
         # СТАДИЯ 1: UNIVERSE (Выбор активов)
         self.services.logger.info("[Stage 1] Universe Agent сканирует DEX на наличие ликвидных активов...")
@@ -151,6 +189,38 @@ class TradingPipeline:
                     await self.services.tg_sender.send_message(closed_msg)
                     await self.services.tg_sender.broadcast_to_channel(closed_msg)
                     asyncio.create_task(safe_reflect(self.agents.reflector, closed, market_data))
+                
+                # СТАДИЯ 1.6: SENTINEL AGENT (PHASE 2) - SIGNAL EVOLUTION TRACKING
+                if symbol in self.services.trading_service.active_positions:
+                    pos = self.services.trading_service.active_positions[symbol]
+                    self.services.logger.info(f"[Stage 1.6] Sentinel Agent оценивает актуальность тезиса для {symbol}...")
+                    
+                    # Фильтруем данные, чтобы избежать TypeError при сериализации Nado-объектов
+                    safe_pos = {k: str(v) if not isinstance(v, (int, float, str, bool, type(None))) else v for k, v in pos.items()}
+                    
+                    sentinel_payload = {
+                        "symbol": symbol,
+                        "position_details": safe_pos,
+                        "market_data": market_data,
+                        "original_thesis": pos.get("original_thesis", "No thesis recorded.")
+                    }
+                    sentinel_verdict = await self.agents.sentinel.analyze(sentinel_payload)
+                    
+                    if sentinel_verdict.get("decision") == "CLOSE_POSITION":
+                        self.services.logger.warning(f"🚨 [Sentinel] Thesis invalidated for {symbol}! Triggering early exit.")
+                        print(f"🚨 [Sentinel] EARLY EXIT TRIGGERED for {symbol}. Reason: {sentinel_verdict.get('reasoning_en', '')}")
+                        
+                        # Use force close (supported by both Nado and Paper)
+                        await self.services.trading_service.force_close_position(symbol, bypass_check=True)
+                        
+                        early_exit_msg = (
+                            f"🚨 *SENTINEL EARLY EXIT / РАННИЙ ВЫХОД*\n\n"
+                            f"🪙 *Asset / Монета:* `{symbol}`\n"
+                            f"📝 *Reason / Причина:* `{sentinel_verdict.get('reasoning_en', '')}`\n"
+                            f"🛡 *Action:* The original thesis was invalidated. Position closed to prevent further losses."
+                        )
+                        await self.services.tg_sender.send_message(early_exit_msg)
+                        
             except Exception as e:
                 print(f"❌ Ошибка проверки позиции {symbol}: {e}")
 
@@ -177,7 +247,10 @@ class TradingPipeline:
             # СТАДИЯ 2: СБОР ДАННЫХ И ПРОВЕРКА СТАТУСА
             self.services.logger.info(f"[Stage 2] Сбор мульти-таймфреймовых данных (15m, 1H, 4H) для {symbol}...")
             try:
-                market_data = await self.services.fetcher.fetch_all_market_data(symbol)
+                if symbol in macro_cache:
+                    market_data = macro_cache[symbol]
+                else:
+                    market_data = await self.services.fetcher.fetch_all_market_data(symbol)
 
                 # Inject Nado native market limits
                 limits = await self.services.trading_service.get_market_limits(symbol)
@@ -283,14 +356,33 @@ class TradingPipeline:
                 tracker.record_rejection("NO_SIGNAL")
                 continue
 
-            # СТАДИЯ 4: СИНТЕЗ CEO И МУЛЬТИ-ТАЙМФРЕЙМ ТРЕНД
-            self.services.logger.info(f"[Stage 4] CEO Agent проверяет согласованность 1H/4H тренда и выносит решение по {symbol}...")
+            # СТАДИЯ 4: MULTI-AGENT DEBATE & CEO JUDGEMENT
+            self.services.logger.info(f"[Stage 4] Bull and Bear agents debating on {symbol}...")
+            
+            debate_payload = {
+                "symbol": symbol,
+                "multi_timeframe_context": market_data.get("multi_timeframe", {}),
+                "analyst_reports": valid_reports
+            }
+            
+            # Запускаем Быка и Медведя параллельно
+            bull_verdict, bear_verdict = await asyncio.gather(
+                self.agents.bull.analyze(debate_payload),
+                self.agents.bear.analyze(debate_payload)
+            )
+            
+            print(f"🐂 Bull Thesis: {bull_verdict.get('summary', 'N/A')[:100]}...")
+            print(f"🐻 Bear Thesis: {bear_verdict.get('summary', 'N/A')[:100]}...")
+            
+            self.services.logger.info(f"[Stage 4] CEO Agent (Judge) evaluates the debate and MTF trend for {symbol}...")
             historical_context = self.agents.memory.get_recent_context(limit=3)
+            
             ceo_payload = {
                 "symbol": symbol,
                 "multi_timeframe_context": market_data.get("multi_timeframe", {}),
-                "raw_market_data": {k: v for k, v in market_data.items() if k not in ["multi_timeframe", "price_data"]},
-                "analyst_reports": valid_reports,
+                "bull_thesis": bull_verdict,
+                "bear_thesis": bear_verdict,
+                "subordinate_analyst_reports": valid_reports,
                 "historical_context": historical_context,
                 "past_lessons_learned": recent_lessons
             }
@@ -330,36 +422,7 @@ class TradingPipeline:
 
                 continue
 
-            # СТАДИЯ 4.5: КОРРЕЛЯЦИОННЫЙ ФИЛЬТР (BTC/ETH)
-            is_btc = symbol in ["BTC-USD", "WBTC-USD"]
-            is_eth = symbol in ["ETH-USD", "WETH-USD"]
-            if decision in ["LONG", "SHORT"] and (is_btc or is_eth):
-                conflict = False
-                btc_pos = self.services.trading_service.active_positions.get("BTC-USD") or self.services.trading_service.active_positions.get("WBTC-USD")
-                eth_pos = self.services.trading_service.active_positions.get("ETH-USD") or self.services.trading_service.active_positions.get("WETH-USD")
-
-                if is_eth and btc_pos and btc_pos["direction"] == decision:
-                    conflict = True
-                elif is_btc and eth_pos and eth_pos["direction"] == decision:
-                    conflict = True
-
-                if conflict:
-                    print(f"⏸️ Пропуск {symbol}. Корреляционный фильтр: Родственный актив уже открыт в {decision}.")
-                    self.services.logger.info(f"[System_Core] Пропуск {symbol} из-за корреляции. Родственный актив уже открыт.")
-                    scan_summaries.append({
-                        "symbol": symbol,
-                        "decision": decision,
-                        "conviction": conviction,
-                        "scanner_status": "✅ OK",
-                        "scanner_reason": None,
-                        "risk_approved": False,
-                        "risk_reason": "Корреляционный фильтр (BTC/ETH уже открыт)",
-                        "ceo_reasoning": "Bypassed by Correlation Filter",
-                        "status": "⏸️ НЕТ СИГНАЛА"
-                    })
-                    tracker.record_rejection("CORRELATION_VETO")
-                    continue
-
+            # (Stage 4.5 Correlation Filter moved to RiskManager)
             # СТАДИЯ 4.6: ФАНДИНГ ГЕЙТ (Funding Rate Gate)
             funding_rate = market_data.get("derivatives_data", {}).get("funding_rate", 0.0)
             if decision == "LONG" and funding_rate > 0.0005: # 0.05%
@@ -398,6 +461,7 @@ class TradingPipeline:
 
             # СТАДИЯ 5: РИСК-МЕНЕДЖМЕНТ
             self.services.logger.info(f"[Stage 5] Risk Manager ({profile}) проверяет параметры сделки для {symbol}...")
+            portfolio_data["active_positions"] = self.services.trading_service.active_positions
             risk_verdict = await self.agents.risk.analyze(ceo_verdict, portfolio_data, market_data)
 
             if risk_verdict.get("approved"):
@@ -412,7 +476,8 @@ class TradingPipeline:
                     notional_usd=risk_verdict.get("notional_size_usd", 0),
                     tp_price=risk_verdict.get("take_profit_price", 0),
                     sl_price=risk_verdict.get("stop_loss_price", 0),
-                    leverage=config.LEVERAGE
+                    leverage=config.LEVERAGE,
+                    original_thesis=ceo_verdict.get("reasoning_en", "")
                 )
 
                 if not trade_success:

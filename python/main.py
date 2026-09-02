@@ -23,7 +23,11 @@ from agents.order_book_agent import OrderBookAgent
 from agents.oi_funding_agent import OIFundingAgent
 from agents.news_agent import NewsAgent
 from agents.indicator_agent import IndicatorAgent
+from agents.bull_agent import BullAgent
+from agents.bear_agent import BearAgent
 from agents.ceo_agent import CEOAgent
+from agents.sentinel_agent import SentinelAgent
+from agents.regime_agent import RegimeAgent
 from agents.risk_manager import RiskManager
 from agents.telegram_agent import TelegramAgent
 from agents.memory_manager import MemoryManager
@@ -48,33 +52,24 @@ async def main():
     tg_sender = TelegramService()
     print("Инициализация сервисов...")
     
-    trading_engine = config.TRADING_ENGINE
-    
     # Global shared Nado Client if applicable
     global_nado_client = None
     
-    if trading_engine == "PAPER" and not config.LIVE_TRADING_ENABLED:
-        from services.paper_trading_service import PaperTradingService
-        trading_service = PaperTradingService(logger=logger)
-        exchange_name = f"Nado DEX (Paper - {config.NADO_NETWORK})"
-        fetcher = MarketDataService(exchange_name=exchange_name, logger=logger)
-    else:
-        from services.nado_trading_service import NadoTradingService
-        import os
-        try:
-            from core.nado_helper import create_configured_nado_client
-            global_nado_client = create_configured_nado_client(
-                network_name=config.NADO_NETWORK,
-                signer=os.getenv("INK_PRIVATE_KEY")
-            )
-        except Exception as e:
-            logger.error(f"[Init] Failed to create global Nado Client: {e}")
-            sys.exit(1)
-            
-        trading_service = NadoTradingService()
-        await trading_service.initialize(nado_client=global_nado_client)
+    from services.nado_trading_service import NadoTradingService
+    try:
+        from core.nado_helper import create_configured_nado_client
+        global_nado_client = create_configured_nado_client(
+            signer=config.INK_PRIVATE_KEY.get_secret_value(),
+            network_name=config.NADO_NETWORK
+        )
+        trading_service = NadoTradingService(nado_client=global_nado_client)
         exchange_name = f"Nado DEX ({config.NADO_NETWORK})"
         fetcher = MarketDataService(exchange_name=exchange_name, logger=logger, nado_client=global_nado_client)
+        await trading_service.initialize(nado_client=global_nado_client)
+    except Exception as e:
+        logger.error(f"[System] Failed to initialize Nado Trading Engine: {e}")
+        print(f"❌ Критическая ошибка: Не удалось запустить Nado Trading Engine. {e}")
+        sys.exit(1)
     
     # P0.3: Startup sync — rebuild state from Exchange BEFORE any trading logic
     if hasattr(trading_service, "sync_with_exchange"):
@@ -96,7 +91,11 @@ async def main():
     oi_agent = OIFundingAgent(logger, None)
     news_agent = NewsAgent(logger, cheap_llm_client)
     indicator_agent = IndicatorAgent(logger, None)
+    bull_agent = BullAgent(logger, primary_ceo_llm)
+    bear_agent = BearAgent(logger, primary_ceo_llm)
     ceo_agent = CEOAgent(logger, primary_ceo_llm, escalation_ceo_llm)
+    sentinel_agent = SentinelAgent(logger, cheap_llm_client)
+    regime_agent = RegimeAgent(logger, cheap_llm_client)
     risk_manager = RiskManager(logger, primary_ceo_llm)
     telegram_agent = TelegramAgent(logger, cheap_llm_client)
     reflector_agent = ReflectorAgent(logger, cheap_llm_client)
@@ -111,7 +110,11 @@ async def main():
         oi_funding=oi_agent,
         news=news_agent,
         indicator=indicator_agent,
+        bull=bull_agent,
+        bear=bear_agent,
         ceo=ceo_agent,
+        sentinel=sentinel_agent,
+        regime=regime_agent,
         risk=risk_manager,
         telegram=telegram_agent,
         reflector=reflector_agent,
@@ -211,7 +214,7 @@ async def main():
             print("🧹 [System] Все фоновые задачи успешно отменены.")
             
         from core.session import SessionManager
-        await SessionManager.close_all()
+        await SessionManager.close()
         print("🧹 [System] Глобальные aiohttp сессии закрыты.")
 
 if __name__ == "__main__":

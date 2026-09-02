@@ -27,15 +27,17 @@ class CEOAgent(BaseAgent):
         Executes the 4-Tier Escalation Model logic.
         """
         symbol = data.get("symbol")
-        analyst_reports = data.get("analyst_reports", [])
+        analyst_reports = data.get("subordinate_analyst_reports", [])
         mtf_data = data.get("multi_timeframe_context", {})
         historical_context = data.get("historical_context", {})
 
-        self.logger.info(f"[{self.name}] Llama 70B анализирует консенсус аналитиков по {symbol}...")
+        self.logger.info(f"[{self.name}] Llama 70B (Judge) анализирует дебаты Bull vs Bear по {symbol}...")
         
         payload = {
             "target_symbol": symbol,
             "multi_timeframe_context": mtf_data,
+            "bull_thesis": data.get("bull_thesis", {}),
+            "bear_thesis": data.get("bear_thesis", {}),
             "subordinate_analyst_reports": analyst_reports,
             "historical_trade_memory": historical_context,
             "past_lessons_learned": data.get("past_lessons_learned", [])
@@ -105,14 +107,13 @@ SCHEMA:
 {{
   "decision": "LONG",
   "score_breakdown": {{
-    "candle": 16,
-    "orderbook": 12,
-    "derivatives": 18,
-    "indicators": 13,
-    "news": -2,
-    "mtf": 17
+    "bull_argument": 25,
+    "bear_argument": -5,
+    "mtf_trend": 15
   }},
-  "reasoning_en": "Your detailed escalation review reasoning"
+  "winning_argument": "Bull / Bear / Neither",
+  "consensus_summary": "Your detailed escalation review reasoning",
+  "reasoning_en": "Step-by-step CIO executive summary"
 }}
 """
             try:
@@ -204,12 +205,9 @@ SCHEMA:
             return "ERROR", 0
             
         max_weights = {
-            "candle": 20,
-            "orderbook": 15,
-            "derivatives": 20,
-            "indicators": 15,
-            "news": 10,
-            "mtf": 20
+            "bull_argument": 35,
+            "bear_argument": 35,
+            "mtf_trend": 30
         }
         
         net_score = 0
@@ -220,13 +218,16 @@ SCHEMA:
                     key = k.lower().replace(" ", "").replace("_", "")
                     
                     limit = 0
-                    if "candle" in key: limit = max_weights["candle"]
-                    elif "orderbook" in key or "ob" in key: limit = max_weights["orderbook"]
-                    elif "deriv" in key or "oi" in key or "funding" in key: limit = max_weights["derivatives"]
-                    elif "indicator" in key: limit = max_weights["indicators"]
-                    elif "news" in key or "sentiment" in key: limit = max_weights["news"]
-                    elif "mtf" in key or "timeframe" in key: limit = max_weights["mtf"]
-                    else: limit = 20
+                    if "bull" in key: 
+                        limit = max_weights["bull_argument"]
+                        val = abs(val) # Enforce positive for bull
+                    elif "bear" in key: 
+                        limit = max_weights["bear_argument"]
+                        val = -abs(val) # Enforce negative for bear
+                    elif "mtf" in key or "trend" in key: 
+                        limit = max_weights["mtf_trend"]
+                    else: 
+                        limit = 20
                     
                     val = max(-limit, min(limit, val))
                     net_score += val

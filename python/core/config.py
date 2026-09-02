@@ -17,7 +17,6 @@ class Settings(BaseSettings):
     # Web3 / Nado
     INK_PRIVATE_KEY: SecretStr = Field(default=SecretStr(""))
     NADO_NETWORK: Literal["TESTNET", "MAINNET"] = Field(default="TESTNET")
-    TRADING_ENGINE: Literal["NADO", "PAPER"] = Field(default="NADO")
     
     LIVE_TRADING_ENABLED: bool = Field(default=True)
     NADO_LIVE_TRADING_ENABLED: bool = Field(default=True)

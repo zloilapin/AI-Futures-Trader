@@ -18,7 +18,7 @@ class BaseTradingService(ABC):
         pass
         
     @abstractmethod
-    async def open_position(self, symbol: str, direction: str, entry_price: float, size_usd: float, tp_price: float, sl_price: float, leverage: int) -> bool:
+    async def open_position(self, symbol: str, direction: str, entry_price: float, size_usd: float, tp_price: float, sl_price: float, leverage: int, original_thesis: str = "") -> bool:
         """Opens a new position on the exchange."""
         pass
         
@@ -28,7 +28,7 @@ class BaseTradingService(ABC):
         pass
         
     @abstractmethod
-    async def force_close_position(self, symbol: str) -> tuple:
+    async def force_close_position(self, symbol: str, bypass_check: bool = False) -> tuple:
         """Manually closes a position. Returns (success_bool, message_string)."""
         pass
         

@@ -236,7 +236,7 @@ class NadoTradingService(BaseTradingService):
             
         return active_list
 
-    async def open_position(self, symbol: str, direction: str, entry_price: float, notional_usd: float, tp_price: float, sl_price: float, leverage: int) -> bool:
+    async def open_position(self, symbol: str, direction: str, entry_price: float, notional_usd: float, tp_price: float, sl_price: float, leverage: int, original_thesis: str = "") -> bool:
         """Submits an EIP-712 signed order to Nado Gateway."""
         if not self.is_connected:
             logger.error(f"[NadoTradingService] Cannot open {direction} on {symbol} - SDK not connected.")
@@ -516,7 +516,8 @@ class NadoTradingService(BaseTradingService):
                 "sender": sender,
                 "sl_digest": sl_digest,
                 "sl_type": sl_type,
-                "trigger_amount_x18": trigger_amount_x18
+                "trigger_amount_x18": trigger_amount_x18,
+                "original_thesis": original_thesis
             }
             
             if sl_digest:
