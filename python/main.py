@@ -168,22 +168,23 @@ async def main():
             print("💡 Для остановки нажмите Ctrl+C в любой момент.\n")
             if hasattr(trading_service, "start_background_watcher"):
                 asyncio.create_task(trading_service.start_background_watcher(tg_sender))
+            async def sentinel_loop():
+                while True:
+                    try:
+                        sentinel_interval = getattr(config, "SENTINEL_INTERVAL_SECONDS", 30)
+                        if len(trading_service.active_positions) > 0:
+                            await pipeline.run_sentinel_checks()
+                    except Exception as e:
+                        logger.error(f"[SentinelLoop] Ошибка: {e}")
+                    await asyncio.sleep(sentinel_interval)
+            
+            asyncio.create_task(sentinel_loop())
             asyncio.create_task(bot_listener.start_listening())
 
             try:
-                import time
-                last_full_scan_time = 0
                 while True:
-                    current_time = time.time()
-                    scan_interval = getattr(config, "SCAN_INTERVAL_MINUTES", 30) * 60
-                    sentinel_interval = getattr(config, "SENTINEL_INTERVAL_SECONDS", 30)
-                    
-                    do_full_scan = (current_time - last_full_scan_time) >= scan_interval
-                    
                     try:
-                        await pipeline.run_cycle(cycle_number, skip_new_trades=not do_full_scan)
-                        if do_full_scan:
-                            last_full_scan_time = time.time()
+                        await pipeline.run_cycle(cycle_number)
                     except Exception as e:
                         import traceback
                         error_msg = f"КРИТИЧЕСКАЯ ОШИБКА В ЦИКЛЕ №{cycle_number}: {e}"
@@ -191,23 +192,12 @@ async def main():
                         traceback.print_exc()
                         logger.error(error_msg)
                     
+                    is_rest_now, _ = get_msk_status()
+                    scan_interval = getattr(config, "SCAN_INTERVAL_MINUTES", 30) * 60
+                    
                     cycle_number += 1
-                    
-                    has_active = len(trading_service.active_positions) > 0
-                    
-                    if has_active:
-                        sleep_time = sentinel_interval
-                        if not do_full_scan:
-                            minutes_to_full = int((scan_interval - (time.time() - last_full_scan_time)) / 60)
-                            print(f"\n⏳ Ожидание {sleep_time} сек. (Sentinel-check). До полного сканирования рынка: {max(0, minutes_to_full)} мин...")
-                        else:
-                            print(f"\n⏳ Ожидание {sleep_time} сек. до следующего Sentinel-check...")
-                    else:
-                        sleep_time = max(1, scan_interval - (time.time() - last_full_scan_time))
-                        minutes_to_full = int(sleep_time / 60)
-                        print(f"\n⏳ Нет открытых позиций. Ожидание {minutes_to_full} мин. до следующего цикла сканирования...")
-                        
-                    await asyncio.sleep(sleep_time)
+                    print(f"\n⏳ Ожидание {int(scan_interval/60)} мин. до следующего цикла сканирования...")
+                    await asyncio.sleep(scan_interval)
             except (KeyboardInterrupt, asyncio.CancelledError):
                 print("\n🛑 Автономный торговый бот остановлен.")
     finally:

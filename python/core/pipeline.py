@@ -160,77 +160,11 @@ class TradingPipeline:
         any_signal_sent = False
         scan_summaries = []  # Сводка по каждому активу для отчёта ручного /scan
 
-        # СТАДИЯ 1.5: ПРОВЕРКА УЖЕ ОТКРЫТЫХ ПОЗИЦИЙ (TP/SL)
-        if hasattr(self.services.trading_service, "sync_with_exchange"):
-            self.services.logger.info("[Stage 1.5] Синхронизация состояний позиций с биржей...")
-            await self.services.trading_service.sync_with_exchange()
-
-        active_symbols = list(self.services.trading_service.active_positions.keys())
-        if active_symbols:
-            self.services.logger.info("[Stage 1.5] Keeper проверяет TP/SL для открытых позиций...")
-        for symbol in active_symbols:
-            try:
-                market_data = await self.services.fetcher.fetch_all_market_data(symbol)
-                current_price = market_data.get("price_data", {}).get("current_price", 0)
-
-                closed_reports = await self.services.trading_service.check_and_update_positions(symbol, current_price)
-                for closed in closed_reports:
-                    pnl_emoji = "🎉" if closed["pnl_usd"] >= 0 else "🔻"
-                    closed_msg = (
-                        f"{pnl_emoji} *TRADE CLOSED / СДЕЛКА ЗАКРЫТА ({closed['triggered_by']})*\n\n"
-                        f"🪙 *Asset / Монета:* `{closed['symbol']}`\n"
-                        f"📊 *Direction / Направление:* `{closed['direction']}`\n"
-                        f"🎯 *Entry / Вход:* `${closed['entry_price']:,.2f}` ➔ *Exit / Выход:* `${closed['exit_price']:,.2f}`\n"
-                        f"💰 *PnL:* `${closed['pnl_usd']:,.2f}` (ROI: {closed.get('roi_pct', 0):+.2f}%)\n"
-                    )
-                    print(f"\n--- ЗАКРЫТИЕ ПОЗИЦИИ В TELEGRAM [{symbol}] ---")
-                    print(closed_msg)
-                    print("--------------------------------------------")
-                    await self.services.tg_sender.send_message(closed_msg)
-                    await self.services.tg_sender.broadcast_to_channel(closed_msg)
-                    asyncio.create_task(safe_reflect(self.agents.reflector, closed, market_data))
-                
-                # СТАДИЯ 1.6: SENTINEL AGENT (PHASE 2) - SIGNAL EVOLUTION TRACKING
-                if symbol in self.services.trading_service.active_positions:
-                    pos = self.services.trading_service.active_positions[symbol]
-                    self.services.logger.info(f"[Stage 1.6] Sentinel Agent оценивает актуальность тезиса для {symbol}...")
-                    
-                    # Фильтруем данные, чтобы избежать TypeError при сериализации Nado-объектов
-                    safe_pos = {k: str(v) if not isinstance(v, (int, float, str, bool, type(None))) else v for k, v in pos.items()}
-                    
-                    sentinel_payload = {
-                        "symbol": symbol,
-                        "position_details": safe_pos,
-                        "market_data": market_data,
-                        "original_thesis": pos.get("original_thesis", "No thesis recorded.")
-                    }
-                    sentinel_verdict = await self.agents.sentinel.analyze(sentinel_payload)
-                    
-                    if sentinel_verdict.get("decision") == "CLOSE_POSITION":
-                        self.services.logger.warning(f"🚨 [Sentinel] Thesis invalidated for {symbol}! Triggering early exit.")
-                        print(f"🚨 [Sentinel] EARLY EXIT TRIGGERED for {symbol}. Reason: {sentinel_verdict.get('reasoning_en', '')}")
-                        
-                        # Use force close (supported by both Nado and Paper)
-                        await self.services.trading_service.force_close_position(symbol, bypass_check=True)
-                        
-                        early_exit_msg = (
-                            f"🚨 *SENTINEL EARLY EXIT / РАННИЙ ВЫХОД*\n\n"
-                            f"🪙 *Asset / Монета:* `{symbol}`\n"
-                            f"📝 *Reason / Причина:* `{sentinel_verdict.get('reasoning_en', '')}`\n"
-                            f"🛡 *Action:* The original thesis was invalidated. Position closed to prevent further losses."
-                        )
-                        await self.services.tg_sender.send_message(early_exit_msg)
-                        
-            except Exception as e:
-                print(f"❌ Ошибка проверки позиции {symbol}: {e}")
+        await self.run_sentinel_checks()
 
         # QW Quiet Rest: Выход из цикла, если сейчас тихий час и нет force_scan
         if is_rest and not force_scan:
             print(f"⏸️ [Schedule] Тихий час. Позиции проверены. Пропуск новых сделок.")
-            return
-
-        if skip_new_trades:
-            print(f"⏩ [Schedule] Только проверка Sentinel. Поиск новых активов пропущен.")
             return
 
         # Фильтруем активы: не сканируем то, что уже открыто
@@ -619,3 +553,74 @@ class TradingPipeline:
 
 
 
+
+    async def run_sentinel_checks(self):
+        """
+        Independent Stage 1.5 (TP/SL) and 1.6 (Sentinel) execution.
+        """
+        async def safe_reflect(reflector, closed_trd, context):
+            try:
+                await reflector.reflect(closed_trd, context)
+            except Exception as e:
+                self.services.logger.error(f"[ReflectorAgent] Error during background reflection: {e}")
+
+        if hasattr(self.services.trading_service, "sync_with_exchange"):
+            self.services.logger.info("[Stage 1.5] Синхронизация состояний позиций с биржей...")
+            await self.services.trading_service.sync_with_exchange()
+
+        active_symbols = list(self.services.trading_service.active_positions.keys())
+        if active_symbols:
+            self.services.logger.info("[Stage 1.5] Keeper проверяет TP/SL для открытых позиций...")
+        for symbol in active_symbols:
+            try:
+                market_data = await self.services.fetcher.fetch_all_market_data(symbol)
+                current_price = market_data.get("price_data", {}).get("current_price", 0)
+
+                closed_reports = await self.services.trading_service.check_and_update_positions(symbol, current_price)
+                for closed in closed_reports:
+                    pnl_emoji = "🎉" if closed["pnl_usd"] >= 0 else "🔻"
+                    closed_msg = (
+                        f"{pnl_emoji} *TRADE CLOSED / СДЕЛКА ЗАКРЫТА ({closed['triggered_by']})*\n\n"
+                        f"🪙 *Asset / Монета:* `{closed['symbol']}`\n"
+                        f"📊 *Direction / Направление:* `{closed['direction']}`\n"
+                        f"🎯 *Entry / Вход:* `${closed['entry_price']:,.2f}` ➔ *Exit / Выход:* `${closed['exit_price']:,.2f}`\n"
+                        f"💰 *PnL:* `${closed['pnl_usd']:,.2f}` (ROI: {closed.get('roi_pct', 0):+.2f}%)\n"
+                    )
+                    print(f"\n--- ЗАКРЫТИЕ ПОЗИЦИИ В TELEGRAM [{symbol}] ---")
+                    print(closed_msg)
+                    print("--------------------------------------------")
+                    await self.services.tg_sender.send_message(closed_msg)
+                    await self.services.tg_sender.broadcast_to_channel(closed_msg)
+                    asyncio.create_task(safe_reflect(self.agents.reflector, closed, market_data))
+                
+                # СТАДИЯ 1.6: SENTINEL AGENT (PHASE 2) - SIGNAL EVOLUTION TRACKING
+                if symbol in self.services.trading_service.active_positions:
+                    pos = self.services.trading_service.active_positions[symbol]
+                    self.services.logger.info(f"[Stage 1.6] Sentinel Agent оценивает актуальность тезиса для {symbol}...")
+                    
+                    safe_pos = {k: str(v) if not isinstance(v, (int, float, str, bool, type(None))) else v for k, v in pos.items()}
+                    
+                    sentinel_payload = {
+                        "symbol": symbol,
+                        "position_details": safe_pos,
+                        "market_data": market_data,
+                        "original_thesis": pos.get("original_thesis", "No thesis recorded.")
+                    }
+                    sentinel_verdict = await self.agents.sentinel.analyze(sentinel_payload)
+                    
+                    if sentinel_verdict.get("decision") == "CLOSE_POSITION":
+                        self.services.logger.warning(f"🚨 [Sentinel] Thesis invalidated for {symbol}! Triggering early exit.")
+                        print(f"🚨 [Sentinel] EARLY EXIT TRIGGERED for {symbol}. Reason: {sentinel_verdict.get('reasoning_en', '')}")
+                        
+                        await self.services.trading_service.force_close_position(symbol, bypass_check=True)
+                        
+                        early_exit_msg = (
+                            f"🚨 *SENTINEL EARLY EXIT / РАННИЙ ВЫХОД*\n\n"
+                            f"🪙 *Asset / Монета:* `{symbol}`\n"
+                            f"📝 *Reason / Причина:* `{sentinel_verdict.get('reasoning_en', '')}`\n"
+                            f"🛡 *Action:* The original thesis was invalidated. Position closed to prevent further losses."
+                        )
+                        await self.services.tg_sender.send_message(early_exit_msg)
+                        
+            except Exception as e:
+                print(f"❌ Ошибка проверки позиции {symbol}: {e}")
