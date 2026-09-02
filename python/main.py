@@ -171,9 +171,19 @@ async def main():
             asyncio.create_task(bot_listener.start_listening())
 
             try:
+                import time
+                last_full_scan_time = 0
                 while True:
+                    current_time = time.time()
+                    scan_interval = getattr(config, "SCAN_INTERVAL_MINUTES", 30) * 60
+                    sentinel_interval = getattr(config, "SENTINEL_INTERVAL_MINUTES", 5) * 60
+                    
+                    do_full_scan = (current_time - last_full_scan_time) >= scan_interval
+                    
                     try:
-                        await pipeline.run_cycle(cycle_number)
+                        await pipeline.run_cycle(cycle_number, skip_new_trades=not do_full_scan)
+                        if do_full_scan:
+                            last_full_scan_time = time.time()
                     except Exception as e:
                         import traceback
                         error_msg = f"КРИТИЧЕСКАЯ ОШИБКА В ЦИКЛЕ №{cycle_number}: {e}"
@@ -181,13 +191,15 @@ async def main():
                         traceback.print_exc()
                         logger.error(error_msg)
                     
-                    is_rest_now, _ = get_msk_status()
-                    current_interval_min = config.SCAN_INTERVAL_MINUTES
-                    interval_seconds = current_interval_min * 60
-                    
                     cycle_number += 1
-                    print(f"\n⏳ Ожидание {current_interval_min} мин. до следующего цикла №{cycle_number}...")
-                    await asyncio.sleep(interval_seconds)
+                    
+                    if not do_full_scan:
+                        minutes_to_full = int((scan_interval - (time.time() - last_full_scan_time)) / 60)
+                        print(f"\n⏳ Ожидание {int(sentinel_interval/60)} мин. (Sentinel-check). До полного сканирования рынка: {max(0, minutes_to_full)} мин...")
+                    else:
+                        print(f"\n⏳ Ожидание {int(sentinel_interval/60)} мин. до следующего Sentinel-check...")
+                        
+                    await asyncio.sleep(sentinel_interval)
             except (KeyboardInterrupt, asyncio.CancelledError):
                 print("\n🛑 Автономный торговый бот остановлен.")
     finally:

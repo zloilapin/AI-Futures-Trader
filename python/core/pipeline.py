@@ -67,7 +67,7 @@ class TradingPipeline:
         self.services = services
         self.exchange_name = exchange_name
 
-    async def run_cycle(self, cycle_number: int, force_scan: bool = False):
+    async def run_cycle(self, cycle_number: int, force_scan: bool = False, skip_new_trades: bool = False):
         is_rest, time_str = get_msk_status()
         profile = config.TRADING_PROFILE
 
@@ -227,6 +227,10 @@ class TradingPipeline:
         # QW Quiet Rest: Выход из цикла, если сейчас тихий час и нет force_scan
         if is_rest and not force_scan:
             print(f"⏸️ [Schedule] Тихий час. Позиции проверены. Пропуск новых сделок.")
+            return
+
+        if skip_new_trades:
+            print(f"⏩ [Schedule] Только проверка Sentinel. Поиск новых активов пропущен.")
             return
 
         # Фильтруем активы: не сканируем то, что уже открыто

@@ -12,5 +12,12 @@
         "root_cause": "Entered SHORT in a BEARISH trend with RSI > 27 and MACD bearish",
         "actionable_rule": "WARNING: Do not enter SHORT when the 15m, 1h, and 4h trends are BEARISH and the RSI is > 27, as this may indicate a false break and a potential loss.",
         "trade_outcome": "LOSS"
+    },
+    {
+        "symbol": "BTC-USD",
+        "reasoning": "The trade was closed due to a bearish trend in the 15m, 1h, and 4h timeframes, with the price moving down by 0.33% in the 15m timeframe and 2.55% in the 4h timeframe. The RSI-14 value was 35.44, indicating a bearish signal. The MACD was also bearish, with a value of -197.96897 and a signal of -106.568199. The algo signals also indicated a lower sweep and a strong bearish candle pattern.",
+        "root_cause": "Bearish trend in the 15m, 1h, and 4h timeframes, with a strong bearish candle pattern and a lower sweep.",
+        "actionable_rule": "WARNING: Do not enter SHORT when the 15m, 1h, and 4h trends are BEARISH, and the RSI-14 value is > 30, with a strong bearish candle pattern and a lower sweep.",
+        "trade_outcome": "LOSS"
     }
 ]
