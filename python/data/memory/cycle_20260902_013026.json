@@ -1,0 +1,72 @@
+{
+    "symbol": "SOL-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.01%) и волатилен (ATR 0.2447%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Спред 0.0100. Баланс покупателей и продавцов нейтрален (imbalance: -0.0020)",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (-0.0000%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Neutral sentiment (Fear & Greed Index: 63) with no clear narrative or catalyst.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BEARISH",
+            "confidence": 70,
+            "reasoning": "RSI нейтрален (44.5). MACD гистограмма красная. Цена ниже EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "SHORT",
+        "conviction": 80,
+        "reasoning_en": "After evaluating the Bull and Bear arguments, it's clear that the Bear Agent has a stronger case. The bearish alignment across multiple timeframes, combined with neutral RSI and a red MACD histogram, suggests a high likelihood of a downward move. The current price below EMA-20 and slightly bearish order book imbalance further support this thesis. The Bull Agent's arguments, while valid, are not as convincing given the overall bearish trend.",
+        "reasoning_ru": "",
+        "consensus_summary": "The Bear Agent's thesis is more convincing due to the bearish alignment across multiple timeframes and the current price being below EMA-20.",
+        "mtf_validation": "",
+        "hold_category": "NONE",
+        "primary_conviction": 80,
+        "escalated": false
+    },
+    "risk_assessment": {
+        "approved": true,
+        "veto_category": null,
+        "reasoning": "Math calculated based on BALANCED profile. SL=102.213, TP=92.241, RR=2.84",
+        "risk_amount_usd": 4.93,
+        "notional_size_usd": 196.45,
+        "margin_usd": 19.64,
+        "leverage": 10,
+        "contracts": 1.97,
+        "margin_pct": 3.98,
+        "entry_price": 99.72,
+        "take_profit_price": 92.241,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 102.213,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.84,
+        "liquidation_price": 0.0,
+        "position_size_pct": 3.98
+    },
+    "status": "APPROVED"
+}

@@ -205,9 +205,9 @@ SCHEMA:
             return "ERROR", 0
             
         max_weights = {
-            "bull_argument": 35,
-            "bear_argument": 35,
-            "mtf_trend": 30
+            "bull_argument": 50,
+            "bear_argument": 50,
+            "mtf_trend": 50
         }
         
         net_score = 0

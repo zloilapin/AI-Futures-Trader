@@ -1,0 +1,16 @@
+[
+    {
+        "symbol": "SOL-USD",
+        "reasoning": "The position was closed due to a bearish trend across multiple timeframes (15m, 1h, 4h) with a strong bearish candle pattern in the 15m timeframe. The RSI-14 indicator showed a value of 33.26, which is below the overbought threshold, but the MACD indicator was bearish. The algo signals did not indicate any strong bearish or bullish signals.",
+        "root_cause": "Bearish trend across multiple timeframes (15m, 1h, 4h) with a strong bearish candle pattern in the 15m timeframe.",
+        "actionable_rule": "WARNING: Do not enter SHORT positions when the 15m trend is BEARISH and the RSI-14 value is below 30.",
+        "trade_outcome": "LOSS"
+    },
+    {
+        "symbol": "ETH-USD",
+        "reasoning": "The closed trade was a result of entering a SHORT position in a 15m, 1h, and 4h BEARISH trend. The RSI was at 27.64, indicating a potential oversold condition, but the MACD was bearish and the ATR was 7.620817, indicating a high level of volatility. The algo signals also indicated a strong bearish candle pattern. Despite these indicators, the trade still resulted in a small loss.",
+        "root_cause": "Entered SHORT in a BEARISH trend with RSI > 27 and MACD bearish",
+        "actionable_rule": "WARNING: Do not enter SHORT when the 15m, 1h, and 4h trends are BEARISH and the RSI is > 27, as this may indicate a false break and a potential loss.",
+        "trade_outcome": "LOSS"
+    }
+]

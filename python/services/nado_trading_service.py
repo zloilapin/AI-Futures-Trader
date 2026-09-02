@@ -587,10 +587,20 @@ class NadoTradingService(BaseTradingService):
                 entry_price = pos["entry_price"]
                 size_usd = pos["size_usd"]
                 
-                if direction == "LONG":
-                    target_pnl = (current_price - entry_price) / entry_price * size_usd
+                # Estimate exit price based on which trigger (TP or SL) is closer to the current market price
+                # This prevents false PNL if the market bounced before polling
+                tp_price = pos.get("tp_price", current_price)
+                sl_price = pos.get("sl_price", current_price)
+                
+                if abs(current_price - tp_price) < abs(current_price - sl_price):
+                    exit_price = tp_price
                 else:
-                    target_pnl = (entry_price - current_price) / entry_price * size_usd
+                    exit_price = sl_price
+                
+                if direction == "LONG":
+                    target_pnl = (exit_price - entry_price) / entry_price * size_usd
+                else:
+                    target_pnl = (entry_price - exit_price) / entry_price * size_usd
                     
                 del self.active_positions[symbol]
                 
@@ -608,7 +618,7 @@ class NadoTradingService(BaseTradingService):
                     "direction": direction,
                     "triggered_by": "CLOSED_ON_CHAIN",  # Avoiding false TP/SL attribution without indexer proof
                     "entry_price": entry_price,
-                    "exit_price": current_price,
+                    "exit_price": exit_price,
                     "pnl_usd": target_pnl,
                     "roi_pct": (target_pnl / pos.get("margin_used", size_usd) * 100) if size_usd > 0 else 0
                 })
@@ -657,8 +667,8 @@ class NadoTradingService(BaseTradingService):
                     logger.info(f"[NadoTradingService] 🧹 Successfully forced closed {symbol}. TX: {res}")
                     
                     # Clean up local cache and update stats
-                    if base_symbol in self.active_positions:
-                        del self.active_positions[base_symbol]
+                    if symbol in self.active_positions:
+                        del self.active_positions[symbol]
                         
                     pnl = target_pos["pnl"] if target_pos else 0.0
                     if pnl > 0:

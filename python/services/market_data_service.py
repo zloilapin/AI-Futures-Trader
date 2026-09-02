@@ -343,11 +343,13 @@ class MarketDataService:
                             "best_bid": best_bid,
                             "best_ask": best_ask
                         }
+                    else:
+                        raise ValueError(f"Nado OrderBook is completely empty for {symbol} (No liquidity)")
             except Exception as e:
                 self._log(f"⚠️ [MarketDataService] Failed to fetch Nado order book for {symbol}: {e}. NO FALLBACK ALLOWED.")
-                raise ValueError(f"Nado OrderBook data unavailable for {symbol}")
+                raise ValueError(f"Nado OrderBook data unavailable for {symbol}: {e}")
                 
-        raise ValueError(f"Nado OrderBook data unavailable for {symbol} (Client not initialized)")
+        raise ValueError(f"Nado OrderBook client not initialized for {symbol}")
 
     async def fetch_indicators(self, symbol: str) -> Dict[str, Any]:
         """Fetches candle data and computes RSI-14, EMA-20, and MACD."""

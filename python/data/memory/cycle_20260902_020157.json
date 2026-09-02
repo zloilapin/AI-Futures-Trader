@@ -1,0 +1,72 @@
+{
+    "symbol": "ETH-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0209%) и волатилен (ATR 0.2859%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Спред 0.5000. Баланс покупателей и продавцов нейтрален (imbalance: -0.0561)",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0000%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 80,
+            "reasoning": "Neutral sentiment (Fear & Greed Index: 63) indicates a lack of clear narrative, expecting choppy, range-bound price action.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BEARISH",
+            "confidence": 70,
+            "reasoning": "RSI нейтрален (32.7). MACD гистограмма красная. Цена ниже EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "SHORT",
+        "conviction": 80,
+        "reasoning_en": "The bearish thesis has a stronger case, with full alignment of bearish trends across 15m, 1h, and 4h timeframes, neutral RSI, and bearish MACD histogram. The current price is below EMA-20, suggesting bearish pressure, and the negative order book imbalance could lead to further price decline. Although the bull thesis presents some potential support levels and oversold conditions, the bearish thesis is more convincing, especially considering the lack of clear narrative in news sentiment, which may lead to choppy price action favoring bears.",
+        "reasoning_ru": "",
+        "consensus_summary": "The bearish thesis is stronger due to the full alignment of bearish trends, bearish MACD histogram, and negative order book imbalance.",
+        "mtf_validation": "",
+        "hold_category": "NONE",
+        "primary_conviction": 80,
+        "escalated": false
+    },
+    "risk_assessment": {
+        "approved": true,
+        "veto_category": null,
+        "reasoning": "Math calculated based on BALANCED profile. SL=2453.7475, TP=2214.3575, RR=2.85",
+        "risk_amount_usd": 4.95,
+        "notional_size_usd": 196.3,
+        "margin_usd": 19.63,
+        "leverage": 10,
+        "contracts": 0.082,
+        "margin_pct": 3.97,
+        "entry_price": 2393.9,
+        "take_profit_price": 2214.3575,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 2453.7475,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.85,
+        "liquidation_price": 0.0,
+        "position_size_pct": 3.97
+    },
+    "status": "APPROVED"
+}

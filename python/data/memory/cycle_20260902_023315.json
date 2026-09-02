@@ -1,0 +1,72 @@
+{
+    "symbol": "BTC-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0456%) и волатилен (ATR 0.2329%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 76,
+            "reasoning": "Спред 35.0000. Значительный перевес покупателей (imbalance: 0.5514). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0000%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 60,
+            "reasoning": "Neutral sentiment (Fear & Greed Index: 63), lacking a clear narrative.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BEARISH",
+            "confidence": 70,
+            "reasoning": "RSI нейтрален (33.3). MACD гистограмма красная. Цена ниже EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "SHORT",
+        "conviction": 80,
+        "reasoning_en": "The Bear Agent presents a stronger case, with a thesis score of 8, citing the bearish alignment across all timeframes, neutral RSI, and red MACD histogram. The multi-timeframe context also shows a bearish trend, with the current price below the EMA-20. While the Bull Agent argues for a potential reversal, the bearish momentum and lack of buying interest suggest a short trade is more likely. The MTF trend is bearish, with a full alignment across the 15m, 1h, and 4h timeframes, which further supports the Bear Agent's argument.",
+        "reasoning_ru": "",
+        "consensus_summary": "The Bear Agent's argument is stronger due to the bearish alignment across all timeframes and the lack of buying interest.",
+        "mtf_validation": "",
+        "hold_category": "NONE",
+        "primary_conviction": 80,
+        "escalated": false
+    },
+    "risk_assessment": {
+        "approved": true,
+        "veto_category": null,
+        "reasoning": "Math calculated based on AGGRESSIVE profile. SL=78725.125, TP=71044.625, RR=2.85",
+        "risk_amount_usd": 24.83,
+        "notional_size_usd": 990.78,
+        "margin_usd": 99.08,
+        "leverage": 10,
+        "contracts": 0.0129,
+        "margin_pct": 19.95,
+        "entry_price": 76805.0,
+        "take_profit_price": 71044.625,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 78725.125,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.85,
+        "liquidation_price": 0.0,
+        "position_size_pct": 19.95
+    },
+    "status": "APPROVED"
+}
