@@ -36,44 +36,39 @@ class DataQualityGuard:
             return False, "MISSING_PRICE_DATA"
             
         current_price = price_data.get("current_price")
-        price_ts = price_data.get("timestamp")
         if current_price is None or not math.isfinite(current_price) or current_price <= 0:
             return False, "INVALID_CURRENT_PRICE"
             
-        if price_ts:
-            age_sec = (current_time_ms - price_ts) / 1000
-            if age_sec > self.MAX_PRICE_AGE:
-                return False, f"STALE_PRICE_DATA (Age: {age_sec:.1f}s)"
+        candles_20 = price_data.get("candles_20", [])
+        if candles_20:
+            price_ts = candles_20[-1].get("timestamp")
+            if price_ts:
+                age_sec = (current_time_ms - price_ts) / 1000
+                if age_sec > self.MAX_PRICE_AGE:
+                    return False, f"STALE_PRICE_DATA (Age: {age_sec:.1f}s)"
 
         # 2. Order Book Integrity
-        orderbook = market_data.get("orderbook", {})
+        orderbook = market_data.get("order_book_data", {})
         if not orderbook:
             return False, "MISSING_ORDER_BOOK"
             
-        bids = orderbook.get("bids", [])
-        asks = orderbook.get("asks", [])
-        if not bids or not asks:
-            return False, "EMPTY_ORDER_BOOK_SIDE"
-            
-        best_bid = bids[0][0]
-        best_ask = asks[0][0]
+        best_bid = orderbook.get("best_bid")
+        best_ask = orderbook.get("best_ask")
         
-        if not math.isfinite(best_bid) or best_bid <= 0:
+        if best_bid is None or not math.isfinite(best_bid) or best_bid <= 0:
             return False, "INVALID_BEST_BID"
-        if not math.isfinite(best_ask) or best_ask <= 0:
+        if best_ask is None or not math.isfinite(best_ask) or best_ask <= 0:
             return False, "INVALID_BEST_ASK"
             
         if best_ask < best_bid: # Allow == if extreme low liquidity, but strictly < is crossed book anomaly
             return False, "CROSSED_ORDER_BOOK"
             
-        ob_ts = orderbook.get("timestamp")
-        if ob_ts:
-            age_sec = (current_time_ms - ob_ts) / 1000
-            if age_sec > self.MAX_ORDER_BOOK_AGE:
-                return False, f"STALE_ORDER_BOOK (Age: {age_sec:.1f}s)"
+        # Nado DEX order book fetcher doesn't return a timestamp right now, 
+        # so we rely on the price timestamp check above for freshness.
 
         # 3. OHLCV Integrity & Gaps
-        candles_15m = market_data.get("candles_15m", [])
+        price_data_dict = market_data.get("price_data", {})
+        candles_15m = price_data_dict.get("candles_20", [])
         if not candles_15m:
             return False, "MISSING_OHLCV_DATA"
             
