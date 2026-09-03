@@ -28,7 +28,6 @@ class Settings(BaseSettings):
     
     # Торговые настройки
     TRADING_PROFILE: Literal["AGGRESSIVE", "BALANCED", "CONSERVATIVE"] = Field(default="BALANCED")
-    LEVERAGE: int = Field(default=10, ge=1, le=100)
     STARTING_BALANCE: float = Field(default=60.0)
     SCAN_INTERVAL_MINUTES: int = Field(default=30, ge=1)
     SENTINEL_INTERVAL_SECONDS: int = Field(default=10, ge=5)

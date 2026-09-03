@@ -15,8 +15,7 @@ class RiskManager(BaseAgent):
     def __init__(self, logger: TradeLogger, llm_client: LLMClient):
         super().__init__("Risk_Manager", logger, llm_client)
 
-    def _get_profile_rules(self) -> dict:
-        profile = config.TRADING_PROFILE
+    def _get_profile_rules(self, profile: str) -> dict:
         if profile == "AGGRESSIVE":
             return {"min_conviction": 65, "base_risk": 0.015, "risk_cap": 0.03, "sl_mult": 1.75, "tp_mult": 3.5, "target_margin_pct": 0.20, "max_margin_pct": 0.45, "max_leverage": 15}
         elif profile == "CONSERVATIVE":
@@ -79,7 +78,7 @@ class RiskManager(BaseAgent):
 
         return 1.0, "NORMAL"
 
-    async def analyze(self, ceo_decision: Dict[str, Any], portfolio_data: Dict[str, Any], market_data: Dict[str, Any]) -> Dict[str, Any]:
+    async def analyze(self, ceo_decision: Dict[str, Any], portfolio_data: Dict[str, Any], market_data: Dict[str, Any], effective_profile: str = "BALANCED") -> Dict[str, Any]:
         """
         Deterministic risk engine. All sizing is math-only, no LLM.
         
@@ -91,7 +90,7 @@ class RiskManager(BaseAgent):
             contracts        — base asset amount = notional_usd / entry_price
             margin_pct       — margin_usd as % of total_balance
         """
-        profile_rules = self._get_profile_rules()
+        profile_rules = self._get_profile_rules(effective_profile)
         min_conviction = profile_rules["min_conviction"]
         base_risk = profile_rules["base_risk"]
         risk_cap = profile_rules["risk_cap"]
@@ -99,10 +98,9 @@ class RiskManager(BaseAgent):
         tp_mult = profile_rules["tp_mult"]
         max_margin_pct = profile_rules["max_margin_pct"]
         
-        profile_name = config.TRADING_PROFILE
-        leverage = config.LEVERAGE
+        profile_name = effective_profile
         
-        self.logger.info(f"[{self.name}] Расчет математики риска по профилю: {profile_name} (Base Risk: {base_risk*100}%, Leverage: {leverage}x)...")
+        self.logger.info(f"[{self.name}] Расчет математики риска по профилю: {profile_name} (Base Risk: {base_risk*100}%)...")
         
         decision = ceo_decision.get("decision", "HOLD")
         conviction = ceo_decision.get("conviction", 0)

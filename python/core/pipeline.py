@@ -122,20 +122,19 @@ class TradingPipeline:
             regime_reasoning = regime_verdict.get("reasoning_en", "")
             
             # Динамически меняем профиль на этот цикл (но с ограничением сверху)
-            import os
-            original_profile = os.getenv("TRADING_PROFILE", "BALANCED").upper()
+            original_profile = config.TRADING_PROFILE
             profile_ranks = {"CONSERVATIVE": 1, "BALANCED": 2, "AGGRESSIVE": 3}
             orig_rank = profile_ranks.get(original_profile, 2)
             detected_rank = profile_ranks.get(detected_profile, 2)
             
             # Защита: RegimeAgent может только ПОНИЖАТЬ риск во время шторма
             if detected_rank > orig_rank:
-                config.TRADING_PROFILE = original_profile
+                effective_profile = original_profile
                 self.services.logger.info(f"[Macro Regime] LLM proposed {detected_profile}, but bounded to {original_profile}.")
             else:
-                config.TRADING_PROFILE = detected_profile
+                effective_profile = detected_profile
                 
-            profile = config.TRADING_PROFILE
+            profile = effective_profile
             
             print(f"🌍 [Macro Regime] Рынок находится в фазе: {detected_regime}")
             print(f"🛡️ [Risk Profile] Профиль риска на этот цикл: {profile}")
@@ -452,7 +451,7 @@ class TradingPipeline:
                 
             self.services.logger.info(f"[Stage 5] Risk Manager ({profile}) проверяет параметры сделки для {symbol}...")
             portfolio_data["active_positions"] = self.services.trading_service.active_positions
-            risk_verdict = await self.agents.risk.analyze(ceo_verdict, portfolio_data, market_data)
+            risk_verdict = await self.agents.risk.analyze(ceo_verdict, portfolio_data, market_data, effective_profile=profile)
 
             if risk_verdict.get("approved"):
                 self.services.logger.info(f"✅ Status: APPROVED BY RISK MANAGER")

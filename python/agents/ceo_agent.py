@@ -218,6 +218,9 @@ SCHEMA:
         
         net_score = 0
         total_absolute = 0
+        bull_score = 0
+        bear_score = 0
+        
         if isinstance(breakdown, dict):
             for k, v in breakdown.items():
                 try:
@@ -228,23 +231,32 @@ SCHEMA:
                     if "bull" in key: 
                         limit = max_weights["bull_argument"]
                         val = abs(val) # Enforce positive for bull
+                        val = max(-limit, min(limit, val))
+                        bull_score += val
                     elif "bear" in key: 
                         limit = max_weights["bear_argument"]
                         val = -abs(val) # Enforce negative for bear
+                        val = max(-limit, min(limit, val))
+                        bear_score += val
                     elif "mtf" in key or "trend" in key: 
                         limit = max_weights["mtf_trend"]
+                        val = max(-limit, min(limit, val))
                     else: 
                         limit = 20
+                        val = max(-limit, min(limit, val))
                     
-                    val = max(-limit, min(limit, val))
                     net_score += val
                     total_absolute += abs(val)
                 except (ValueError, TypeError):
                     continue
                     
-        # The net_score already accounts for conflict because Bull is positive and Bear is negative.
-        # We don't need a double penalty. Base conviction is simply the absolute net score.
-        conviction = min(100, int(abs(net_score)))
+        # Conflict penalty: If both Bull and Bear have strong arguments, they conflict.
+        # This creates uncertainty regardless of the MTF trend.
+        conflict_penalty = min(abs(bull_score), abs(bear_score))
+        base_conviction = abs(net_score)
+        
+        # Penalize the base conviction by the amount of direct conflict
+        conviction = max(0, min(100, int(base_conviction - conflict_penalty)))
         
         # Prevent math hallucinations
         if decision == "LONG" and net_score < 0:
