@@ -17,7 +17,7 @@ class OIFundingAgent(BaseAgent):
         
         oi_data = market_data.get("derivatives_data", {})
         
-        funding_rate = oi_data.get("funding_rate_decimal", 0.0)
+        funding_rate = float(oi_data.get("funding_rate", oi_data.get("funding_rate_decimal", 0.0)) or 0.0)
         oi_usd = oi_data.get("open_interest_usd", 0.0)
         oi_trend = oi_data.get("open_interest_trend", "neutral")
         

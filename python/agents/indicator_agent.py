@@ -66,18 +66,56 @@ class IndicatorAgent(BaseAgent):
                 bear_score += 1
                 reason_parts.append("Цена ниже EMA-20")
 
-        if bull_score >= 4:
+        # Evaluate algorithmic signals
+        algo_signals = market_data.get("algo_signals", {})
+        if algo_signals:
+            if algo_signals.get("rsi_divergence") == "BULLISH":
+                bull_score += 3
+                reason_parts.append("Обнаружена бычья дивергенция RSI (разворотный сигнал)")
+            elif algo_signals.get("rsi_divergence") == "BEARISH":
+                bear_score += 3
+                reason_parts.append("Обнаружена медвежья дивергенция RSI (разворотный сигнал)")
+                
+            if algo_signals.get("macd_crossover") == "BULLISH":
+                bull_score += 2
+                reason_parts.append("Недавний бычий MACD кроссовер")
+            elif algo_signals.get("macd_crossover") == "BEARISH":
+                bear_score += 2
+                reason_parts.append("Недавний медвежий MACD кроссовер")
+                
+            sweeps = algo_signals.get("liquidity_sweeps", [])
+            bull_sweeps = [s for s in sweeps if s.get("type") == "bullish_sweep"]
+            bear_sweeps = [s for s in sweeps if s.get("type") == "bearish_sweep"]
+            
+            if bull_sweeps:
+                bull_score += min(2, len(bull_sweeps))
+                reason_parts.append(f"Обнаружен сбор ликвидности снизу ({len(bull_sweeps)}x)")
+            if bear_sweeps:
+                bear_score += min(2, len(bear_sweeps))
+                reason_parts.append(f"Обнаружен сбор ликвидности сверху ({len(bear_sweeps)}x)")
+
+        net_score = bull_score - bear_score
+        
+        # If both sides are strong and balanced, it's a technical conflict -> NEUTRAL
+        if bull_score >= 3 and bear_score >= 3 and abs(net_score) < 2:
+            signal = "NEUTRAL"
+            confidence = 50
+            reason_parts.append(f"Противоречивые сигналы индикаторов (Быки: {bull_score}, Медведи: {bear_score}). Нейтралитет.")
+        elif net_score >= 3:
             signal = "BULLISH"
-            confidence = 70 + (bull_score * 5)
-        elif bear_score >= 4:
+            confidence = 70 + min(25, net_score * 5)
+        elif net_score <= -3:
             signal = "BEARISH"
-            confidence = 70 + (bear_score * 5)
-        elif bull_score > bear_score:
+            confidence = 70 + min(25, abs(net_score) * 5)
+        elif net_score > 0:
             signal = "BULLISH"
-            confidence = 55 + (bull_score * 5)
-        elif bear_score > bull_score:
+            confidence = 55 + min(15, net_score * 5)
+        elif net_score < 0:
             signal = "BEARISH"
-            confidence = 55 + (bear_score * 5)
+            confidence = 55 + min(15, abs(net_score) * 5)
+        else:
+            signal = "NEUTRAL"
+            confidence = 50
 
         return {
             "signal": signal,

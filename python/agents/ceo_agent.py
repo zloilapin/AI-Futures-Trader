@@ -62,8 +62,13 @@ class CEOAgent(BaseAgent):
         
         reasoning = llm_response.get("reasoning_en", "")
         
-        self.logger.info(f"[{self.name}] Primary CEO Llama 70B Decision: {decision} (Conf: {conviction}%)")
-        print(f"👔 [CEO Llama 70B] {decision} ({conviction}%)")
+        if decision == "HOLD":
+            conv_str = "N/A"
+        else:
+            conv_str = f"{conviction}%"
+            
+        self.logger.info(f"[{self.name}] Primary CEO Llama 70B Decision: {decision} (Conf: {conv_str})")
+        print(f"👔 [CEO Llama 70B] {decision} ({conv_str})")
         
         final_hold_category = "NONE"
         
@@ -142,8 +147,9 @@ SCHEMA:
                 # Consensus Check logic
                 if gemini_decision == primary_decision:
                     decision = gemini_decision
-                    conviction = gemini_conviction
-                    print(f"🤝 [Consensus] Модели пришли к согласию! Подтвержден {decision}.")
+                    # Calculate weighted average instead of just taking Gemini's conviction
+                    conviction = int((primary_conviction * 0.6) + (gemini_conviction * 0.4))
+                    print(f"🤝 [Consensus] Модели пришли к согласию! Подтвержден {decision}. Уверенность: {conviction}% (Llama: {primary_conviction}%, Gemini: {gemini_conviction}%)")
                 else:
                     print(f"⚔️ [Conflict] Llama ({primary_decision}) и Gemini ({gemini_decision}) разошлись во мнениях. Итог: HOLD.")
                     decision = "HOLD"
@@ -236,11 +242,9 @@ SCHEMA:
                 except (ValueError, TypeError):
                     continue
                     
-        # Fix HIGH #5: Penalty for highly conflicting signals
-        # If Bull=50 and Bear=-50, total_absolute=100, abs(net_score)=0, conflict=50. Conviction = 0.
-        conflict_penalty = max(0, (total_absolute - abs(net_score)) / 2.0)
-        conviction = max(0, int(abs(net_score) - conflict_penalty))
-        conviction = min(100, conviction)
+        # The net_score already accounts for conflict because Bull is positive and Bear is negative.
+        # We don't need a double penalty. Base conviction is simply the absolute net score.
+        conviction = min(100, int(abs(net_score)))
         
         # Prevent math hallucinations
         if decision == "LONG" and net_score < 0:

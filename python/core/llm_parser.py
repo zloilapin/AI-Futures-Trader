@@ -40,6 +40,7 @@ class LLMStructuredOutputParser:
             if start_idx != -1 and end_idx != -1:
                 clean_text = clean_text[start_idx:end_idx+1]
             else:
+                print(f"\n[DEBUG LLM_PARSER] Failed to find {{...}}. RAW RESPONSE: {repr(clean_text)}\n")
                 raise ValueError("No JSON object '{...}' found in the LLM response.")
 
         # Парсинг

@@ -369,7 +369,11 @@ class NadoTradingService(BaseTradingService):
             try:
                 res = await asyncio.to_thread(self.client.market.place_order, params)
             except Exception as e:
-                logger.error(f"[NadoTradingService] ❌ Order placement failed: {e}")
+                err_str = str(e)
+                if "2070" in err_str and "maximum open interest" in err_str:
+                    logger.warning(f"[NadoTradingService] ⚠️ Market OI limit reached for {symbol} (Testnet limitation). Order rejected.")
+                else:
+                    logger.error(f"[NadoTradingService] ❌ Order placement failed: {e}")
                 return False
                 
             digest = res.data.digest if res.data else None

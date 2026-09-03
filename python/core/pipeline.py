@@ -93,12 +93,14 @@ class TradingPipeline:
                 return
 
         if hasattr(self.services.trading_service, "recent_streak") and len(self.services.trading_service.recent_streak) >= 3 and self.services.trading_service.recent_streak[-3:] == ["LOSS", "LOSS", "LOSS"]:
-            self.services.trading_service.cooldown_until = time.time() + 3600
-            self.services.trading_service.recent_streak.clear()
-            print(f"🛑 [Cooldown Activated] Зафиксировано 3 убытка подряд! Торговля приостановлена на 1 час.")
-            self.services.logger.info("[System_Core] 3 consecutive losses detected. 1 hour cooldown activated.")
-            if not force_scan:
-                return
+            # Only trigger cooldown once per 3-loss streak, preserving streak memory for RiskManager
+            if getattr(self.services.trading_service, "_last_cooldown_processed_len", 0) != len(self.services.trading_service.recent_streak):
+                self.services.trading_service.cooldown_until = time.time() + 3600
+                self.services.trading_service._last_cooldown_processed_len = len(self.services.trading_service.recent_streak)
+                print(f"🛑 [Cooldown Activated] Зафиксировано 3 убытка подряд! Торговля приостановлена на 1 час.")
+                self.services.logger.info("[System_Core] 3 consecutive losses detected. 1 hour cooldown activated.")
+                if not force_scan:
+                    return
 
         # СТАДИЯ 0: REGIME DETECTION (Адаптивный профиль риска)
         self.services.logger.info("[Stage 0] Regime Agent определяет фазу рынка (BTC/ETH)...")
@@ -280,11 +282,17 @@ class TradingPipeline:
             # --- PRE-CEO FILTER ---
             # Экономим токены Llama 70B: если все базовые агенты нейтральны, пропускаем актив
             has_directional_signal = False
-            for report in valid_reports:
-                signal = str(report.get("signal", "NEUTRAL")).upper()
-                if signal in ["BULLISH", "BEARISH", "LONG", "SHORT"]:
-                    has_directional_signal = True
-                    break
+            mtf_alignment = market_data.get("multi_timeframe", {}).get("mtf_alignment")
+            
+            if mtf_alignment == "FULL_ALIGNMENT":
+                has_directional_signal = True
+                self.services.logger.info(f"[System_Core] Pre-CEO Filter bypassed for {symbol} due to FULL_ALIGNMENT MTF trend.")
+            else:
+                for report in valid_reports:
+                    signal = str(report.get("signal", "NEUTRAL")).upper()
+                    if signal in ["BULLISH", "BEARISH", "LONG", "SHORT"]:
+                        has_directional_signal = True
+                        break
 
             if not has_directional_signal:
                 msg = f"⏸️ Пропуск {symbol}. Причина: Нет базовых сигналов (Pre-CEO Filter)."
@@ -340,13 +348,15 @@ class TradingPipeline:
 
             decision = str(ceo_verdict.get("decision", "HOLD")).upper()
             conviction = ceo_verdict.get("conviction", 0)
+            
+            conv_str = "N/A" if decision == "HOLD" else f"{conviction}%"
 
-            print(f"⚖️ Решение CEO [{symbol}]: {decision} (Уверенность: {conviction}%)")
+            print(f"⚖️ Решение CEO [{symbol}]: {decision} (Уверенность: {conv_str})")
 
-            min_conv = 70 if profile == "AGGRESSIVE" else (85 if profile == "CONSERVATIVE" else 80)
+            min_conv = 65 if profile == "AGGRESSIVE" else (80 if profile == "CONSERVATIVE" else 70)
 
             if decision not in ["LONG", "SHORT"] or conviction < min_conv:
-                print(f"⏸️ Пропуск {symbol}. Решение: {decision}, Уверенность: {conviction}% (Требуется LONG/SHORT и >= {min_conv}%).")
+                print(f"⏸️ Пропуск {symbol}. Решение: {decision}, Уверенность: {conv_str} (Требуется LONG/SHORT и >= {min_conv}%).")
                 scanner_status = "⚠️ ЗАБЛОКИРОВАН СКАНЕРОМ" if scanner_blocked else "✅ OK"
                 asset_summary = {
                     "symbol": symbol,
@@ -456,7 +466,7 @@ class TradingPipeline:
                     notional_usd=risk_verdict.get("notional_size_usd", 0),
                     tp_price=risk_verdict.get("take_profit_price", 0),
                     sl_price=risk_verdict.get("stop_loss_price", 0),
-                    leverage=config.LEVERAGE,
+                    leverage=risk_verdict.get("leverage", 10),
                     original_thesis=ceo_verdict.get("reasoning_en", ""),
                     contracts=risk_verdict.get("contracts", 0.0)
                 )

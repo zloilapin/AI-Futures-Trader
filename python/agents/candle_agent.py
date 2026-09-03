@@ -67,7 +67,7 @@ class CandleAgent(BaseAgent):
         
         if total_range1 > 0:
             # 1. Sweep (Pin Bar / Hammer)
-            if lower_wick1 > body1 * 2 and lower_wick1 > upper_wick1 * 2 and is_bullish1:
+            if lower_wick1 > body1 * 2 and lower_wick1 > upper_wick1 * 2 and is_bullish1 and (lower_wick1 / total_range1) > 0.5:
                 if total_range1 > 0.75 * atr_14 and v1 > avg_volume_10:
                     signal = "BULLISH"
                     confidence = 80
@@ -79,7 +79,7 @@ class CandleAgent(BaseAgent):
                     reasoning = "Слабое отклонение снизу, недостаточный объем или волатильность."
                     pattern = "Weak Bullish Rejection"
                 
-            elif upper_wick1 > body1 * 2 and upper_wick1 > lower_wick1 * 2 and is_bearish1:
+            elif upper_wick1 > body1 * 2 and upper_wick1 > lower_wick1 * 2 and is_bearish1 and (upper_wick1 / total_range1) > 0.5:
                 if total_range1 > 0.75 * atr_14 and v1 > avg_volume_10:
                     signal = "BEARISH"
                     confidence = 80
@@ -104,17 +104,19 @@ class CandleAgent(BaseAgent):
                 reasoning = "Медвежье поглощение. Тело текущей свечи полностью перекрывает тело предыдущей."
                 pattern = "Bearish Engulfing"
                 
-            # 3. Breakout
-            elif is_bullish1 and is_bearish2 and c1 > h2:
+            # 3. Breakout (Reversal or Continuation)
+            elif is_bullish1 and c1 > h2:
                 signal = "BULLISH"
-                confidence = 70
-                reasoning = "Бычий пробой. Закрытие выше максимума предыдущей медвежьей свечи."
+                confidence = 75 if is_bearish2 else 70
+                continuation_str = "после отката" if is_bearish2 else "продолжение тренда"
+                reasoning = f"Бычий пробой ({continuation_str}). Закрытие выше максимума предыдущей свечи."
                 pattern = "Bullish Breakout"
                 
-            elif is_bearish1 and is_bullish2 and c1 < l2:
+            elif is_bearish1 and c1 < l2:
                 signal = "BEARISH"
-                confidence = 70
-                reasoning = "Медвежий пробой. Закрытие ниже минимума предыдущей бычьей свечи."
+                confidence = 75 if is_bullish2 else 70
+                continuation_str = "после отката" if is_bullish2 else "продолжение тренда"
+                reasoning = f"Медвежий пробой ({continuation_str}). Закрытие ниже минимума предыдущей свечи."
                 pattern = "Bearish Breakout"
 
         return {

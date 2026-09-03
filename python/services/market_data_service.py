@@ -709,12 +709,13 @@ class MarketDataService:
                 "symbol": symbol,
                 "open_interest": open_interest,
                 "open_interest_trend": oi_trend,
+                "funding_rate": round(funding_rate, 8),
                 "funding_rate_decimal": round(funding_rate, 8)
             }
         except Exception as e:
             self._log(f"⚠️ [MarketDataService] Failed to fetch Nado OI/Funding for {symbol}: {e}")
             
-        return {"symbol": symbol, "open_interest": 0.0, "open_interest_trend": "neutral", "funding_rate": 0.0001}
+        return {"symbol": symbol, "open_interest": 0.0, "open_interest_trend": "neutral", "funding_rate": 0.0001, "funding_rate_decimal": 0.0001}
 
     async def fetch_margin_requirements(self, symbol: str) -> Dict[str, Any]:
         """Fetches real maintenance margin parameters and size limits from Nado DEX SDK."""
