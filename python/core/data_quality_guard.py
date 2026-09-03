@@ -79,7 +79,7 @@ class DataQualityGuard:
             o, h, l, cl, v, ts = c.get("open"), c.get("high"), c.get("low"), c.get("close"), c.get("volume"), c.get("timestamp")
             
             # Finite checks
-            if any(val is None or not math.isfinite(val) for val in [o, h, l, cl, v, ts]):
+            if any(val is None or not math.isfinite(val) for val in [o, h, l, cl, v]):
                 return False, "NON_FINITE_OHLCV_DATA"
                 
             # Logic checks
@@ -87,15 +87,19 @@ class DataQualityGuard:
                 return False, "CORRUPTED_OHLCV_CANDLE_LOGIC"
                 
             # Gap detection and monotonicity
-            if prev_ts is not None:
-                if ts <= prev_ts:
-                    return False, "NON_MONOTONIC_OHLCV_TIMESTAMP"
+            if ts is not None:
+                if not math.isfinite(ts):
+                    return False, "NON_FINITE_TIMESTAMP"
                     
-                gap = ts - prev_ts
-                if gap > interval_ms * 1.5:
-                    return False, "OHLCV_GAP_DETECTED"
-                    
-            prev_ts = ts
+                if prev_ts is not None:
+                    if ts <= prev_ts:
+                        return False, "NON_MONOTONIC_OHLCV_TIMESTAMP"
+                        
+                    gap = ts - prev_ts
+                    if gap > interval_ms * 1.5:
+                        return False, "OHLCV_GAP_DETECTED"
+                        
+                prev_ts = ts
             
         last_candle_ts = candles_15m[-1].get("timestamp")
         if last_candle_ts:
