@@ -1,5 +1,5 @@
 {
-    "total_scans": 497,
+    "total_scans": 504,
     "trades_executed": 4,
     "execution_failed": 2,
     "rejections": {
@@ -15,6 +15,6 @@
         "LOW_EDGE": 81,
         "ANALYST_DISAGREEMENT": 25,
         "MIN_SIZE": 27,
-        "DATA_INVALID": 31
+        "DATA_INVALID": 38
     }
 }

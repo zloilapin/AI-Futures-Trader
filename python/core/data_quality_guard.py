@@ -118,7 +118,7 @@ class DataQualityGuard:
         
         # Open Interest
         if oi is not None:
-            if not math.isfinite(oi) or oi <= 0:
+            if not math.isfinite(oi) or oi < 0:
                 return False, "INVALID_OPEN_INTEREST"
                 
         # Funding Rate Normalize & Sanity
