@@ -27,6 +27,7 @@ from services.market_data_service import MarketDataService
 from services.telegram_service import TelegramService
 from core.interfaces import BaseTradingService
 from core.logger import TradeLogger
+from core.data_quality_guard import DataQualityGuard
 
 @dataclass
 class AgentRegistry:
@@ -66,6 +67,7 @@ class TradingPipeline:
         self.agents = agents
         self.services = services
         self.exchange_name = exchange_name
+        self.data_guard = DataQualityGuard(self.services.logger)
 
     async def run_cycle(self, cycle_number: int, force_scan: bool = False, skip_new_trades: bool = False):
         is_rest, time_str = get_msk_status()
@@ -214,6 +216,15 @@ class TradingPipeline:
                 print(f"❌ Ошибка загрузки данных для {symbol}: {e}. Пропускаем.")
                 scan_summaries.append({"symbol": symbol, "status": "⏭ Пропуск", "reason": str(e)})
                 tracker.record_rejection("FETCH_ERROR")
+                continue
+
+            # 2.1 DATA QUALITY GUARD (Strict Deterministic VETO)
+            is_valid, dq_reason = self.data_guard.validate(symbol, market_data)
+            if not is_valid:
+                print(f"🛑 Data Quality Guard забраковал данные {symbol}. Причина: {dq_reason}")
+                self.services.logger.warning(f"[System_Core] DATA QUALITY VETO | {symbol} | {dq_reason}")
+                scan_summaries.append({"symbol": symbol, "status": "⛔ DATA INVALID", "reason": dq_reason})
+                tracker.record_rejection("DATA_INVALID")
                 continue
 
             current_price = market_data.get("price_data", {}).get("current_price", 0)
