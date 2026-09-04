@@ -219,7 +219,11 @@ class TradingPipeline:
                 continue
 
             # 2.1 DATA QUALITY GUARD (Strict Deterministic VETO)
-            is_valid, dq_reason = self.data_guard.validate(symbol, market_data)
+            try:
+                is_valid, dq_reason = self.data_guard.validate(symbol, market_data)
+            except Exception as e:
+                is_valid, dq_reason = False, f"DATA_GUARD_EXCEPTION: {e}"
+
             if not is_valid:
                 print(f"🛑 Data Quality Guard забраковал данные {symbol}. Причина: {dq_reason}")
                 self.services.logger.warning(f"[System_Core] DATA QUALITY VETO | {symbol} | {dq_reason}")
