@@ -288,20 +288,31 @@ Provide a JSON strictly matching this schema:
 
         # 1. Direct indicators / news_data
         indicators = data.get("indicators") or data.get("market_data", {}).get("indicators", {})
-        if isinstance(indicators, dict) and "rsi_14" in indicators:
-            try:
-                rsi = float(indicators["rsi_14"])
-            except (ValueError, TypeError):
-                pass
+        if isinstance(indicators, dict):
+            for k in ["rsi_14", "rsi", "RSI", "RSI_14"]:
+                if k in indicators and indicators[k] is not None:
+                    try:
+                        rsi = float(indicators[k])
+                        break
+                    except (ValueError, TypeError):
+                        pass
                 
         news_data = data.get("news_data") or data.get("market_data", {}).get("news_data", {})
         if isinstance(news_data, dict):
-            fg = news_data.get("fear_and_greed_index")
-            if fg is not None:
-                try:
-                    fear_greed = float(fg)
-                except (ValueError, TypeError):
-                    pass
+            for k in ["fear_and_greed_index", "sentiment_score", "fear_greed", "fng_index", "fng"]:
+                if k in news_data and news_data[k] is not None:
+                    try:
+                        fear_greed = float(news_data[k])
+                        break
+                    except (ValueError, TypeError):
+                        pass
+            if fear_greed is None and "latest_event" in news_data:
+                m_ev = re.search(r'Fear\s*(?:&|and)\s*Greed\s*Index\s*:\s*(\d+)', str(news_data["latest_event"]), re.IGNORECASE)
+                if m_ev:
+                    try:
+                        fear_greed = float(m_ev.group(1))
+                    except (ValueError, TypeError):
+                        pass
                     
         # Direct top-level rsi or fear_greed (useful in tests/payloads)
         if rsi is None and "rsi" in data:

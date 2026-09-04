@@ -378,8 +378,24 @@ class TradingPipeline:
 
             min_conv = 65 if profile == "AGGRESSIVE" else (80 if profile == "CONSERVATIVE" else 70)
 
-            if decision not in ["LONG", "SHORT"] or conviction < min_conv:
-                print(f"⏸️ Пропуск {symbol}. Решение: {decision}, Уверенность: {conv_str} (Требуется LONG/SHORT и >= {min_conv}%).")
+            # Execution Gate: Checks directional signal, conviction threshold, and WAIT_FOR_PULLBACK action
+            if decision not in ["LONG", "SHORT"] or conviction < min_conv or trade_action == "WAIT_FOR_PULLBACK":
+                if trade_action == "WAIT_FOR_PULLBACK":
+                    msg = f"⏸️ Пропуск {symbol}. Действие: WAIT_FOR_PULLBACK (Рынок перегрет, качество входа {entry_qual}% < 70% при уверенности тренда {directional_conf}%)."
+                    print(msg)
+                    risk_reason = f"WAIT_FOR_PULLBACK: Перекупленность/перепроданность (Качество входа {entry_qual}% < 70%)"
+                    rejection_tag = "WAIT_FOR_PULLBACK"
+                elif decision not in ["LONG", "SHORT"]:
+                    msg = f"⏸️ Пропуск {symbol}. Решение: {decision} (Требуется LONG/SHORT)."
+                    print(msg)
+                    risk_reason = f"Пропущен из-за решения CEO ({decision})"
+                    rejection_tag = ceo_verdict.get("hold_category", "CEO_HOLD") if decision == "HOLD" else "NO_SIGNAL"
+                else:
+                    msg = f"⏸️ Пропуск {symbol}. Решение: {decision}, Уверенность: {conv_str} (Требуется >= {min_conv}% для профиля {profile})."
+                    print(msg)
+                    risk_reason = f"Пропущен из-за фильтра CEO (Уверенность {conviction}% < {min_conv}%)"
+                    rejection_tag = "LOW_CONFIDENCE"
+
                 scanner_status = "⚠️ ЗАБЛОКИРОВАН СКАНЕРОМ" if scanner_blocked else "✅ OK"
                 asset_summary = {
                     "symbol": symbol,
@@ -388,21 +404,12 @@ class TradingPipeline:
                     "scanner_status": scanner_status,
                     "scanner_reason": scanner_reason if scanner_blocked else None,
                     "risk_approved": False,
-                    "risk_reason": f"Пропущен из-за фильтра CEO (HOLD или Уверенность < {min_conv})",
-                    "ceo_reasoning": ceo_verdict.get("reasoning", ""),
+                    "risk_reason": risk_reason,
+                    "ceo_reasoning": ceo_verdict.get("reasoning_en", ceo_verdict.get("reasoning", "")),
                     "status": "⏸️ НЕТ СИГНАЛА"
                 }
                 scan_summaries.append(asset_summary)
-
-                if decision == "HOLD":
-                    hold_cat = ceo_verdict.get("hold_category", "CEO_HOLD")
-                    tracker.record_rejection(hold_cat)
-                elif conviction < min_conv:
-                    tracker.record_rejection("LOW_CONFIDENCE")
-                else:
-                    # Если решение не LONG/SHORT и не HOLD (например, LLM выдал "NEUTRAL" или "NO_SIGNAL")
-                    tracker.record_rejection("NO_SIGNAL")
-
+                tracker.record_rejection(rejection_tag)
                 continue
 
             # (Stage 4.5 Correlation Filter moved to RiskManager)

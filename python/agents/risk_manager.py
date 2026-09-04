@@ -104,6 +104,7 @@ class RiskManager(BaseAgent):
         
         decision = ceo_decision.get("decision", "HOLD")
         conviction = ceo_decision.get("conviction", 0)
+        trade_action = ceo_decision.get("trade_action", "ENTER")
         
         price_data = market_data.get("price_data", {})
         current_price = float(price_data.get("current_price", 1.0) or 1.0)
@@ -127,11 +128,18 @@ class RiskManager(BaseAgent):
         tp_price = 0.0
         rr_ratio = 0.0
         liq_price = 0.0
+        leverage = 1.0
         
         if total_balance <= 0:
             self.logger.warning(f"[{self.name}] ❌ INSUFFICIENT BALANCE: Total balance is {total_balance}. Blocking trade.")
             approved = False
             veto_category = "INSUFFICIENT_BALANCE"
+        elif trade_action == "WAIT_FOR_PULLBACK":
+            msg = f"CEO recommended WAIT_FOR_PULLBACK (Overheated market condition). Blocking trade execution."
+            self.logger.warning(f"[{self.name}] 🚫 WAIT_FOR_PULLBACK VETO: {msg}")
+            approved = False
+            veto_category = "WAIT_FOR_PULLBACK"
+            veto_reason = msg
         elif decision in ["LONG", "SHORT"] and conviction >= min_conviction:
             
             # --- Portfolio Correlated Exposure Check ---
@@ -186,6 +194,16 @@ class RiskManager(BaseAgent):
                     )
                     min_conviction = min(95, min_conviction + 5)
                     base_risk *= penalty_factor
+            
+            trade_action = ceo_decision.get("trade_action", "ENTER")
+            if trade_action == "WAIT_FOR_PULLBACK":
+                msg = f"CEO recommended WAIT_FOR_PULLBACK (Overheated market condition). Blocking trade execution."
+                self.logger.warning(f"[{self.name}] 🚫 WAIT_FOR_PULLBACK VETO: {msg}")
+                return {
+                    "approved": False,
+                    "veto_category": "WAIT_FOR_PULLBACK",
+                    "reasoning": msg
+                }
                     
             if conviction < min_conviction:
                 return {
@@ -223,20 +241,18 @@ class RiskManager(BaseAgent):
                 self.logger.warning(f"[{self.name}] 🚫 REGIME VETO: {msg}")
                 return {
                     "approved": False,
-                    "veto_category": "REGIME_VETO",
+                    "veto_category": "REGIME",
                     "reasoning": msg
                 }
-            elif mtf_alignment == "FULL_ALIGNMENT":
-                regime_mult = 1.0
-            elif mtf_alignment == "COUNTER_TREND_WARNING":
-                regime_mult = 0.8  # Pullback in prevailing 1h/4h trend
-            else:
-                regime_mult = 0.8
-
-            # --- Multi-Factor Signal Quality ---
-            # 1. Volume Confirmation: Current volume vs 10-period SMA
+            
+            regime_mult = 1.0
+            if mtf_alignment == "PARTIAL":
+                regime_mult = 0.70
+                self.logger.info(f"[{self.name}] Partial MTF alignment. Scaling down risk (x0.70).")
+                
+            # Volume & Spread Quality Multiplier
             volume_mult = 1.0
-            ohlcv = price_data.get("candles_20", [])
+            ohlcv = market_data.get("price_data", {}).get("ohlcv_1h", [])
             if len(ohlcv) >= 10:
                 avg_volume_10 = sum(float(c.get("volume", 0)) for c in ohlcv[-10:]) / 10
                 v1 = float(ohlcv[-1].get("volume", 0))
@@ -258,10 +274,11 @@ class RiskManager(BaseAgent):
 
             # --- Dynamic Risk Calculation ---
             conf_mult = self._get_conviction_multiplier(min_conviction, conviction)
-            dynamic_risk_pct = base_risk * conf_mult * regime_mult * quality_mult * dd_mult
+            action_mult = 0.75 if trade_action == "REDUCE_SIZE" else 1.0
+            dynamic_risk_pct = base_risk * conf_mult * regime_mult * quality_mult * dd_mult * action_mult
             dynamic_risk_pct = min(dynamic_risk_pct, risk_cap)
             
-            self.logger.info(f"[{self.name}] Final Risk: {dynamic_risk_pct*100:.2f}% (Base: {base_risk*100}%, Conf: x{conf_mult}, Regime: x{regime_mult}, Quality: x{quality_mult:.2f}, DD: x{dd_mult}, Cap: {risk_cap*100}%)")
+            self.logger.info(f"[{self.name}] Final Risk: {dynamic_risk_pct*100:.2f}% (Base: {base_risk*100}%, Conf: x{conf_mult}, Regime: x{regime_mult}, Quality: x{quality_mult:.2f}, DD: x{dd_mult}, Action: x{action_mult}, Cap: {risk_cap*100}%)")
             
             # --- 1. Finalize SL ---
             # NOTE: Removed standalone liquidation price calculation.
@@ -449,7 +466,14 @@ class RiskManager(BaseAgent):
             
             if approved is not False: # If not vetoed earlier
                 approved = True
-            
+        else:
+            approved = False
+            if decision not in ["LONG", "SHORT"]:
+                veto_category = "NO_SIGNAL"
+                veto_reason = f"Decision is {decision}"
+            else:
+                veto_category = "LOW_CONFIDENCE"
+                veto_reason = f"Conviction {conviction} is below profile threshold {min_conviction}"
             
         final_reasoning = f"Math calculated based on {profile_name} profile. SL={sl_price}, TP={tp_price}, RR={rr_ratio}"
         if not approved and veto_reason:
@@ -458,6 +482,7 @@ class RiskManager(BaseAgent):
         parsed_res = {
             "approved": approved if approved is not None else False,
             "veto_category": veto_category,
+            "trade_action": trade_action,
             "reasoning": final_reasoning,
             # ═══ Canonical fields (unambiguous) ═══
             "risk_amount_usd": risk_amount_usd,     # Max USD willing to lose
