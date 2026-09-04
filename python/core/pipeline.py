@@ -356,14 +356,23 @@ class TradingPipeline:
                 "bear_thesis": bear_verdict,
                 "subordinate_analyst_reports": valid_reports,
                 "historical_context": historical_context,
-                "past_lessons_learned": recent_lessons
+                "past_lessons_learned": recent_lessons,
+                "indicators": market_data.get("indicators", {}),
+                "news_data": market_data.get("news_data", {}),
+                "market_data": market_data
             }
             ceo_verdict = await self.agents.ceo.analyze(ceo_payload)
 
             decision = str(ceo_verdict.get("decision", "HOLD")).upper()
             conviction = ceo_verdict.get("conviction", 0)
+            directional_conf = ceo_verdict.get("directional_confidence", conviction)
+            entry_qual = ceo_verdict.get("entry_quality", conviction)
+            trade_action = ceo_verdict.get("trade_action", "ENTER" if conviction >= 70 else "HOLD")
             
-            conv_str = "N/A" if decision == "HOLD" else f"{conviction}%"
+            if decision == "HOLD":
+                conv_str = "N/A"
+            else:
+                conv_str = f"{conviction}% (DirConf: {directional_conf}%, EntryQuality: {entry_qual}%, Action: {trade_action})"
 
             print(f"⚖️ Решение CEO [{symbol}]: {decision} (Уверенность: {conv_str})")
 
