@@ -24,7 +24,8 @@ class SentinelAgent(BaseAgent):
         market_data = data.get("market_data", {})
         original_thesis = data.get("original_thesis", "")
 
-        self.logger.info(f"[{self.name}] Checking health of active {position_details.get('direction', '')} position on {symbol}...")
+        if hasattr(self.logger, "debug"):
+            self.logger.debug(f"[{self.name}] Checking health of active {position_details.get('direction', '')} position on {symbol}...")
         
         payload = {
             "target_symbol": symbol,

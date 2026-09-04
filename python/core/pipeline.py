@@ -632,12 +632,13 @@ class TradingPipeline:
                 self.services.logger.error(f"[ReflectorAgent] Error during background reflection: {e}")
 
         if hasattr(self.services.trading_service, "sync_with_exchange"):
-            self.services.logger.info("[Stage 1.5] Синхронизация состояний позиций с биржей...")
+            if hasattr(self.services.logger, "debug"):
+                self.services.logger.debug("[Stage 1.5] Синхронизация состояний позиций с биржей...")
             await self.services.trading_service.sync_with_exchange()
 
         active_symbols = list(self.services.trading_service.active_positions.keys())
-        if active_symbols:
-            self.services.logger.info("[Stage 1.5] Keeper проверяет TP/SL для открытых позиций...")
+        if active_symbols and hasattr(self.services.logger, "debug"):
+            self.services.logger.debug("[Stage 1.5] Keeper проверяет TP/SL для открытых позиций...")
         for symbol in active_symbols:
             try:
                 market_data = await self.services.fetcher.fetch_all_market_data(symbol)
@@ -666,13 +667,14 @@ class TradingPipeline:
                     now = time.time()
                     if not hasattr(self, "_sentinel_last_run"):
                         self._sentinel_last_run = {}
-                    cooldown = getattr(config, "SENTINEL_COOLDOWN_SECONDS", 180)
+                    cooldown = getattr(config, "SENTINEL_COOLDOWN_SECONDS", 600)
                     if now - self._sentinel_last_run.get(symbol, 0) < cooldown:
                         continue
                     self._sentinel_last_run[symbol] = now
 
                     pos = self.services.trading_service.active_positions[symbol]
-                    self.services.logger.info(f"[Stage 1.6] Sentinel Agent оценивает актуальность тезиса для {symbol}...")
+                    if hasattr(self.services.logger, "debug"):
+                        self.services.logger.debug(f"[Stage 1.6] Sentinel Agent оценивает актуальность тезиса для {symbol}...")
                     
                     safe_pos = {k: str(v) if not isinstance(v, (int, float, str, bool, type(None))) else v for k, v in pos.items()}
                     
@@ -712,7 +714,8 @@ class TradingPipeline:
                         self.services.logger.error(f"❌ [Sentinel] SENTINEL_UNAVAILABLE: {sentinel_verdict.get('reasoning_en')}")
                     else:
                         self._pending_sentinel_closes[symbol] = 0
-                        self.services.logger.info(f"[Sentinel] Thesis intact for {symbol}.")
+                        if hasattr(self.services.logger, "debug"):
+                            self.services.logger.debug(f"[Sentinel] Thesis intact for {symbol}.")
                         
                         
             except Exception as e:

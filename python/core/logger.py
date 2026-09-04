@@ -75,6 +75,26 @@ class TradeLogger:
         """
         self.log_decision("System_Warning", message, level="warning", **kwargs)
 
+    def debug(self, message: str, **kwargs):
+        """
+        Silent debug logging method for routine heartbeats.
+        Records to JSONL without console output.
+        """
+        try:
+            log_dir = self._get_hierarchical_path()
+            file_path = os.path.join(log_dir, "decisions.jsonl")
+            log_data = {
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "agent": "System_Core",
+                "message": message,
+                "level": "debug",
+                **kwargs
+            }
+            with open(file_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(log_data, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
 if __name__ == "__main__":
     logger = TradeLogger()
     logger.info("System initialized for Nado DEX monitoring.")
