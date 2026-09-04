@@ -250,20 +250,22 @@ SCHEMA:
                 except (ValueError, TypeError):
                     continue
                     
-        # Conflict penalty: If both Bull and Bear have strong arguments, they conflict.
-        # This creates uncertainty regardless of the MTF trend.
-        conflict_penalty = min(abs(bull_score), abs(bear_score))
+        # The net_score already accounts for debate conflict because Bull is positive (+B)
+        # and Bear is negative (-M), yielding net_score = Bull - Bear + MTF.
+        # Additional double subtraction of min(Bull, Bear) artificially crushed conviction to <= 35%.
         base_conviction = abs(net_score)
-        
-        # Penalize the base conviction by the amount of direct conflict
-        conviction = max(0, min(100, int(base_conviction - conflict_penalty)))
+        conviction = max(0, min(100, int(base_conviction)))
         
         # Prevent math hallucinations
         if decision == "LONG" and net_score < 0:
             self.logger.warning(f"[{self.name}] Math hallucination: Decision is LONG but net_score is {net_score}. Overriding to HOLD.")
             decision = "HOLD"
+            conviction = 0
         elif decision == "SHORT" and net_score > 0:
             self.logger.warning(f"[{self.name}] Math hallucination: Decision is SHORT but net_score is {net_score}. Overriding to HOLD.")
             decision = "HOLD"
+            conviction = 0
+        elif decision == "HOLD":
+            conviction = 0
             
         return decision, conviction
