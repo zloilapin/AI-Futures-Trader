@@ -662,6 +662,15 @@ class TradingPipeline:
                 
                 # СТАДИЯ 1.6: SENTINEL AGENT (PHASE 2) - SIGNAL EVOLUTION TRACKING
                 if symbol in self.services.trading_service.active_positions:
+                    import time
+                    now = time.time()
+                    if not hasattr(self, "_sentinel_last_run"):
+                        self._sentinel_last_run = {}
+                    cooldown = getattr(config, "SENTINEL_COOLDOWN_SECONDS", 180)
+                    if now - self._sentinel_last_run.get(symbol, 0) < cooldown:
+                        continue
+                    self._sentinel_last_run[symbol] = now
+
                     pos = self.services.trading_service.active_positions[symbol]
                     self.services.logger.info(f"[Stage 1.6] Sentinel Agent оценивает актуальность тезиса для {symbol}...")
                     

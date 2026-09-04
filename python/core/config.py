@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     STARTING_BALANCE: float = Field(default=60.0)
     SCAN_INTERVAL_MINUTES: int = Field(default=30, ge=1)
     SENTINEL_INTERVAL_SECONDS: int = Field(default=10, ge=5)
+    SENTINEL_COOLDOWN_SECONDS: int = Field(default=180, ge=10)
     
     # Настройки времени сна
     TIMEZONE_OFFSET: int = Field(default=3)

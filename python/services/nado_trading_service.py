@@ -64,6 +64,7 @@ class NadoTradingService(BaseTradingService):
                 if p.product_id in perp_ids:
                     base_symbol = p.symbol.split('-')[0].upper()
                     self.product_map[base_symbol] = p.product_id
+                    self.product_map[f"{base_symbol}-USD"] = p.product_id
                 
             from nado_protocol.utils.bytes32 import subaccount_to_hex
             self.default_subaccount_id = subaccount_to_hex(self.wallet.get_address(), "default")
@@ -149,8 +150,13 @@ class NadoTradingService(BaseTradingService):
                 
         active_list = []
         try:
-            # Reverse map for product_id -> symbol
-            id_to_symbol = {v: k for k, v in self.product_map.items()}
+            # Reverse map for product_id -> symbol (prefer canonical pair format BASE-USD)
+            id_to_symbol = {}
+            for k, v in self.product_map.items():
+                if '-' in k:
+                    id_to_symbol[v] = k
+                elif v not in id_to_symbol:
+                    id_to_symbol[v] = f"{k}-USD"
             
             # Fetch fresh market cache for accurate PnL pricing
             try:
@@ -180,7 +186,9 @@ class NadoTradingService(BaseTradingService):
                         continue # Ignore zero or dust positions
                         
                     product_id = pos.product_id
-                    symbol = id_to_symbol.get(product_id, f"UNKNOWN-{product_id}")
+                    raw_sym = id_to_symbol.get(product_id, f"UNKNOWN-{product_id}")
+                    base_sym = raw_sym.split('-')[0].upper()
+                    symbol = f"{base_sym}-USD" if not raw_sym.startswith("UNKNOWN") else raw_sym
                     # Usually oracle_price_x18 is in perp_product or we can fall back to local_pos
                     # but if we don't have oracle price readily available in perp_balances, we can use a fallback
                     # In Vertex/Nado, perp_balances doesn't include oracle_price directly unless we fetch markets
@@ -199,7 +207,7 @@ class NadoTradingService(BaseTradingService):
                     direction = "LONG" if base_amount > 0 else "SHORT"
                     
                     # Merge with local cache for TP/SL and Entry
-                    local_pos = self.active_positions.get(symbol, {})
+                    local_pos = self.active_positions.get(symbol) or self.active_positions.get(base_sym) or {}
                     try:
                         v_quote = float(pos.balance.v_quote_balance) / 1e18
                         real_entry = abs(v_quote) / abs(base_amount) if abs(base_amount) > 0 else current_price
@@ -606,7 +614,8 @@ class NadoTradingService(BaseTradingService):
             target_pnl = 0.0
             
             for p in positions:
-                if p["symbol"] == base_symbol:
+                p_base = p["symbol"].split('-')[0].upper()
+                if p_base == base_symbol:
                     still_open = True
                     break
                     
@@ -680,7 +689,11 @@ class NadoTradingService(BaseTradingService):
                 else:
                     target_pnl = (entry_price - exit_price) / entry_price * size_usd
                     
-                del self.active_positions[symbol]
+                if symbol in self.active_positions:
+                    del self.active_positions[symbol]
+                alias_key = base_symbol if '-' in symbol else f"{base_symbol}-USD"
+                if alias_key in self.active_positions:
+                    del self.active_positions[alias_key]
                 
                 if target_pnl > 0:
                     self.win_count += 1
@@ -729,7 +742,7 @@ class NadoTradingService(BaseTradingService):
             for attempt in range(max_retries):
                 # CRITICAL-5: Always fetch active positions to capture realized PnL prior to close
                 positions = await self.get_active_positions(bypass_cache=True)
-                target_pos = next((p for p in positions if p["symbol"] == base_symbol), None)
+                target_pos = next((p for p in positions if p["symbol"].split('-')[0].upper() == base_symbol), None)
                         
                 if not target_pos:
                     if not bypass_check:
@@ -750,6 +763,9 @@ class NadoTradingService(BaseTradingService):
                     # Clean up local cache and update stats
                     if symbol in self.active_positions:
                         del self.active_positions[symbol]
+                    alias_key = base_symbol if '-' in symbol else f"{base_symbol}-USD"
+                    if alias_key in self.active_positions:
+                        del self.active_positions[alias_key]
                         
                     pnl = target_pos["pnl"] if target_pos else 0.0
                     if pnl > 0:
@@ -831,83 +847,105 @@ class NadoTradingService(BaseTradingService):
             return
             
         try:
+            # Clean up any legacy duplicate base symbols (e.g. "BCH" when "BCH-USD" exists)
+            to_remove = []
+            for k in list(self.active_positions.keys()):
+                if '-' not in k:
+                    canonical = f"{k}-USD"
+                    if canonical in self.active_positions:
+                        to_remove.append(k)
+            for k in to_remove:
+                logger.info(f"[NadoTradingService] 🧹 Removed duplicate key '{k}' in favor of '{k}-USD'")
+                del self.active_positions[k]
+
             positions = await self.get_active_positions(bypass_cache=True)
             restored = 0
             for pos in positions:
                 symbol = pos["symbol"]
-                if symbol not in self.active_positions:
-                    logger.info(f"[NadoTradingService] ♻️ Restored active position on {symbol} after restart.")
-                    
-                    entry = pos["entry_price"]
-                    direction = pos["direction"]
-                    base_symbol = symbol.split('-')[0].upper()
-                    product_id = self.product_map.get(base_symbol)
-                    
-                    tp_price = 0.0
-                    sl_price = 0.0
-                    
-                    try:
-                        # In Nado/Vertex, trigger orders are fetched via indexer
-                        # CRITICAL-7: Retry logic for network failures
-                        res = None
-                        for attempt in range(3):
-                            try:
-                                res = await asyncio.to_thread(self.client.indexer.get_trigger_orders, {"subaccount": self.default_subaccount_id, "product_id": product_id, "pending": True})
-                                break
-                            except Exception as e:
-                                if attempt == 2:
-                                    raise e
-                                await asyncio.sleep(2)
-                                
-                        if res and hasattr(res, 'orders'):
-                            for o in res.orders:
-                                # Safely extract trigger price
-                                t_price = 0.0
-                                if hasattr(o, 'order') and hasattr(o.order, 'trigger_price_x18'):
-                                    t_price = float(o.order.trigger_price_x18) / 1e18
-                                elif hasattr(o, 'trigger_price_x18'):
-                                    t_price = float(o.trigger_price_x18) / 1e18
-                                    
-                                if t_price > 0:
-                                    if direction == "LONG":
-                                        if t_price > entry:
-                                            tp_price = t_price
-                                        else:
-                                            sl_price = t_price
-                                    else:
-                                        if t_price < entry:
-                                            tp_price = t_price
-                                        else:
-                                            sl_price = t_price
-                        
-                        if tp_price == 0.0 or sl_price == 0.0:
-                            logger.error(f"[NadoTradingService] ❌ Missing real TP/SL for restored position {symbol}. Emergency close triggered!")
-                            await self.force_close_position(symbol)
-                            continue
+                base_symbol = symbol.split('-')[0].upper()
+                canonical_symbol = f"{base_symbol}-USD"
+                
+                # Check if position is already tracked (under either canonical or base symbol)
+                is_already_tracked = any(
+                    k == canonical_symbol or k == base_symbol or k.split('-')[0].upper() == base_symbol
+                    for k in self.active_positions
+                )
+                if is_already_tracked:
+                    continue
+
+                logger.info(f"[NadoTradingService] ♻️ Restored active position on {canonical_symbol} after restart.")
+                
+                entry = pos["entry_price"]
+                direction = pos["direction"]
+                product_id = self.product_map.get(base_symbol) or self.product_map.get(canonical_symbol)
+                
+                tp_price = 0.0
+                sl_price = 0.0
+                
+                try:
+                    # In Nado/Vertex, trigger orders are fetched via indexer
+                    # CRITICAL-7: Retry logic for network failures
+                    res = None
+                    for attempt in range(3):
+                        try:
+                            res = await asyncio.to_thread(self.client.indexer.get_trigger_orders, {"subaccount": self.default_subaccount_id, "product_id": product_id, "pending": True})
+                            break
+                        except Exception as e:
+                            if attempt == 2:
+                                raise e
+                            await asyncio.sleep(2)
                             
-                    except Exception as e:
-                        logger.warning(f"[NadoTradingService] ⚠️ Failed to fetch real trigger orders for {symbol} ({e}). Marking UNVERIFIED.")
-                        self.active_positions[symbol] = {
-                            "direction": direction,
-                            "entry_price": entry,
-                            "size_usd": pos.get("size_usd", 0.0),
-                            "tp_price": tp_price,
-                            "sl_price": sl_price,
-                            "leverage": pos.get("leverage", 1),
-                            "unverified_triggers": True
-                        }
-                        restored += 1
-                        continue
+                    if res and hasattr(res, 'orders'):
+                        for o in res.orders:
+                            # Safely extract trigger price
+                            t_price = 0.0
+                            if hasattr(o, 'order') and hasattr(o.order, 'trigger_price_x18'):
+                                t_price = float(o.order.trigger_price_x18) / 1e18
+                            elif hasattr(o, 'trigger_price_x18'):
+                                t_price = float(o.trigger_price_x18) / 1e18
+                                
+                            if t_price > 0:
+                                if direction == "LONG":
+                                    if t_price > entry:
+                                        tp_price = t_price
+                                    else:
+                                        sl_price = t_price
+                                else:
+                                    if t_price < entry:
+                                        tp_price = t_price
+                                    else:
+                                        sl_price = t_price
                     
-                    self.active_positions[symbol] = {
+                    if tp_price == 0.0 or sl_price == 0.0:
+                        logger.error(f"[NadoTradingService] ❌ Missing real TP/SL for restored position {canonical_symbol}. Emergency close triggered!")
+                        await self.force_close_position(canonical_symbol)
+                        continue
+                        
+                except Exception as e:
+                    logger.warning(f"[NadoTradingService] ⚠️ Failed to fetch real trigger orders for {canonical_symbol} ({e}). Marking UNVERIFIED.")
+                    self.active_positions[canonical_symbol] = {
                         "direction": direction,
                         "entry_price": entry,
                         "size_usd": pos.get("size_usd", 0.0),
                         "tp_price": tp_price,
                         "sl_price": sl_price,
-                        "leverage": pos.get("leverage", 1)
+                        "leverage": pos.get("leverage", 1),
+                        "original_thesis": f"Restored on-chain position for {canonical_symbol}",
+                        "unverified_triggers": True
                     }
                     restored += 1
+                    continue
+                
+                self.active_positions[canonical_symbol] = {
+                    "direction": direction,
+                    "entry_price": entry,
+                    "size_usd": pos.get("size_usd", 0.0),
+                    "tp_price": tp_price,
+                    "sl_price": sl_price,
+                    "leverage": pos.get("leverage", 1),
+                    "original_thesis": f"Restored on-chain position for {canonical_symbol}"
+                }
+                restored += 1
             if restored > 0:
                 logger.info(f"[NadoTradingService] ♻️ Successfully synced {restored} positions from Nado.")
         except Exception as e:

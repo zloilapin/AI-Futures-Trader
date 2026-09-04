@@ -53,9 +53,10 @@ def test_string_numbers_handled_safely():
 def test_float_rounding_epsilon_in_candles():
     guard = DataQualityGuard()
     data = get_valid_mock_market_data()
-    # High is slightly smaller than open by float rounding epsilon (1e-12)
-    data["price_data"]["candles_20"][0]["open"] = 2500.000000000001
+    # High is slightly smaller than open by float rounding epsilon (1e-12), close is within bounds
+    data["price_data"]["candles_20"][0]["close"] = 2495.0
     data["price_data"]["candles_20"][0]["high"] = 2500.0
+    data["price_data"]["candles_20"][0]["open"] = 2500.000000000001
     valid, reason = guard.validate("ETH-USD", data)
     assert valid is True
 
