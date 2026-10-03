@@ -1,0 +1,72 @@
+{
+    "symbol": "ETH-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0081%) и волатилен (ATR 0.2049%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "BULLISH",
+            "confidence": 80,
+            "reasoning": "Длинная нижняя тень. Сбор ликвидности (стопов) снизу и агрессивный откуп.",
+            "pattern_detected": "Bullish Liquidity Sweep",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.2000. Значительный перевес покупателей (imbalance: 0.89). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (-0.0000%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 60,
+            "reasoning": "The Fear & Greed Index is 69, indicating Neutral sentiment. Expect choppy, range-bound price action without strong conviction.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (63.0). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 74,
+        "reasoning_en": "[Primary CEO: The Candle_Agent and Order_Book_Agent report bullish signals with high confidence, while the Indicator_Agent also reports a bullish signal. The News_Agent reports neutral sentiment. The 1H and 4H trends are bullish, aligning with the Macro Trend Override rule. The score breakdown is as follows: candle (16), orderbook (12), derivatives (18), indicators (13), news (-2), and mtf (17). The total score is 74, indicating a strong bullish signal. The historical trade memory and past lessons learned do not indicate any warning signs for this trade. Therefore, the decision is to go LONG.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the LONG decision on ETH-USD. Both 1H and 4H macro timeframes show clear bullish momentum and structure. The 15M consolidation near the local highs is accompanied by a bullish liquidity sweep and substantial order book bid imbalance (0.89), demonstrating robust buyer interest and support beneath current prices. Key technical indicators (price maintaining above EMA-20, RSI at 63) reinforce upward continuation without overextension risks.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Confluence: Candle, Order Book, and Indicator Agents Align",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE",
+        "primary_conviction": 74,
+        "escalated": true
+    },
+    "risk_assessment": {
+        "approved": true,
+        "veto_category": null,
+        "reasoning": "Math calculated based on AGGRESSIVE profile. SL=2413.0275, TP=2660.5175, RR=2.85",
+        "risk_amount_usd": 23.71,
+        "notional_size_usd": 947.89,
+        "margin_usd": 94.79,
+        "leverage": 10,
+        "contracts": 0.383,
+        "margin_pct": 19.99,
+        "entry_price": 2474.9,
+        "take_profit_price": 2660.5175,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 2413.0275,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.85,
+        "liquidation_price": 0.0,
+        "position_size_pct": 19.99
+    },
+    "status": "APPROVED"
+}

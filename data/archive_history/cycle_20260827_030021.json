@@ -1,0 +1,70 @@
+{
+    "symbol": "BNB-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0014%) и волатилен (ATR 0.2633%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.0100. Значительный перевес покупателей (imbalance: 0.92). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Market Sentiment: Greed (Fear & Greed Index: 71), no clear contrarian opportunity identified.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (66.1). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 75,
+        "reasoning_en": "[Primary CEO: Based on the provided market data and analyst reports, the trend is bullish across all time frames (15m, 1h, 4h). The Order Book Agent reports a significant imbalance (0.92) with a bullish signal, and the Indicator Agent reports a neutral RSI (66.1) with the price above the EMA-20. However, the Candle Agent and News Agent report neutral signals. Considering the Macro Trend Override rule, we should not fight the 1H/4H trend unless there is extreme capitulation, which is not present in this case. The past lessons learned do not apply to this scenario as the trend is bullish and the RSI is above 50. Therefore, the decision is to go LONG.]\n\n[ESCALATION GEMINI VERDICT: Confirming the Primary CEO's decision to go LONG on BNB-USD. All timeframes (15m, 1h, and 4h) demonstrate strong structural alignment in a robust bullish trend. The order book displays a dominant bid-side imbalance of 0.92, providing substantial buy support. The technical indicators confirm bullish momentum with RSI at a healthy 66.1 above the EMA-20 without signs of blow-off exhaustion. Macro alignment and flow metrics strongly favor continued upside.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Trend with Order Book Imbalance",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 74.77,
+        "margin_usd": 7.48,
+        "leverage": 10,
+        "contracts": 0.105,
+        "margin_pct": 19.13,
+        "entry_price": 712.12,
+        "take_profit_price": 765.529,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 694.317,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 0.0,
+        "position_size_pct": 19.13
+    },
+    "status": "VETOED"
+}

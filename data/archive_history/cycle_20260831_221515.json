@@ -1,0 +1,72 @@
+{
+    "symbol": "SOL-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0193%) и волатилен (ATR 0.2855%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "BULLISH",
+            "confidence": 75,
+            "reasoning": "Бычье поглощение. Сильный импульс (Displacement), перекрывающий предыдущее падение.",
+            "pattern_detected": "Bullish Engulfing",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.0200. Значительный перевес покупателей (imbalance: 0.96). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (-0.0000%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Neutral sentiment (69) means the market lacks a clear narrative. Expect choppy, range-bound price action without strong conviction.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (57.5). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 72,
+        "reasoning_en": "[Primary CEO: The market is showing a bullish trend across all timeframes (15m, 1h, 4h) with a full alignment, indicating a strong upward momentum. The Candle Agent has detected a Bullish Engulfing pattern with 75% confidence, and the Order Book Agent has identified a significant imbalance in favor of buyers with 90% confidence. The Indicator Agent has also reported a neutral RSI (57.5) and a price above the EMA-20, further supporting the bullish case. Although the News Agent and OI Funding Agent have reported neutral sentiment and funding rates, respectively, the overall confluence of signals points towards a bullish direction.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the Primary CEO's LONG thesis. The market demonstrates full multi-timeframe alignment across 15m, 1h, and 4h charts. This bullish structure is strongly corroborated by an exceptional 0.96 order book imbalance favoring buyers and recent bullish engulfing displacement on the 15m timeframe. RSI at 57.5 and neutral funding indicate ample headroom for upward expansion without overbought exhaustion or crowded long risk.]",
+        "reasoning_ru": "",
+        "consensus_summary": "",
+        "mtf_validation": "",
+        "hold_category": "NONE",
+        "primary_conviction": 75,
+        "escalated": true
+    },
+    "risk_assessment": {
+        "approved": true,
+        "veto_category": null,
+        "reasoning": "Math calculated based on AGGRESSIVE profile. SL=101.2245, TP=111.6065, RR=2.84",
+        "risk_amount_usd": 24.67,
+        "notional_size_usd": 986.29,
+        "margin_usd": 98.63,
+        "leverage": 10,
+        "contracts": 9.5,
+        "margin_pct": 19.99,
+        "entry_price": 103.82,
+        "take_profit_price": 111.6065,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 101.2245,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.84,
+        "liquidation_price": 0.0,
+        "position_size_pct": 19.99
+    },
+    "status": "APPROVED"
+}

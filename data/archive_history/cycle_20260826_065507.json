@@ -1,0 +1,70 @@
+{
+    "symbol": "BNB-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0014%) и волатилен (ATR 0.3534%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.0100. Значительный перевес покупателей (imbalance: 2.80). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Market Sentiment: Greed (Fear & Greed Index: 65), sentiment score is within the 'Choppy Middle' range (40-60)",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 60,
+            "reasoning": "RSI нейтрален (51.0). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 75,
+        "reasoning_en": "[Primary CEO: The current market trend is bullish on both the 1H and 4H timeframes. The Order Book Agent reports a bullish signal with a confidence of 90%, indicating a significant imbalance in favor of buyers. The Indicator Agent also reports a bullish signal with a confidence of 60%. Although the Candle Agent and News Agent report neutral signals, the overall confluence of signals from the Order Book Agent and Indicator Agent supports a long position.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the LONG proposal on BNB-USD. Higher timeframes (1H and 4H) maintain a solid bullish market structure with clear higher lows. The 15m timeframe is concluding a healthy pullback consolidation from the 707.93 local high, resetting RSI to a neutral 51.0 while holding firmly above key EMA support around 697-700. Order book analytics show an overwhelming buyer imbalance of 2.80 with substantial support bids underpinning current levels. Risk-reward for trend continuation to retest the 708-715 resistance band is highly favorable.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish confluence across Order Book and Indicators",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 77.04,
+        "margin_usd": 7.7,
+        "leverage": 10,
+        "contracts": 0.11,
+        "margin_pct": 19.69,
+        "entry_price": 700.36,
+        "take_profit_price": 752.887,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 682.851,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 0.0,
+        "position_size_pct": 19.69
+    },
+    "status": "VETOED"
+}

@@ -1,0 +1,20 @@
+{
+    "total_scans": 1809,
+    "trades_executed": 40,
+    "execution_failed": 63,
+    "rejections": {
+        "MARKET_CHOPPY": 14,
+        "CEO_HOLD": 39,
+        "SPREAD_TOO_HIGH": 16,
+        "LOW_CONFIDENCE": 754,
+        "MIN_NOTIONAL": 10,
+        "LOW_EDGE": 55,
+        "FETCH_ERROR": 34,
+        "EXCESSIVE_RISK": 2,
+        "ANALYST_DISAGREEMENT": 77,
+        "INSUFFICIENT_BALANCE": 6,
+        "LOW_VOLATILITY": 310,
+        "NO_SIGNAL": 376,
+        "WAIT_FOR_PULLBACK": 2
+    }
+}

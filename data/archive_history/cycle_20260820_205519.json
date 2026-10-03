@@ -1,0 +1,70 @@
+{
+    "symbol": "ZEC",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.063%) и волатилен (ATR 0.8841%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "BULLISH",
+            "confidence": 75,
+            "reasoning": "Бычье поглощение. Сильный импульс (Displacement), перекрывающий предыдущее падение.",
+            "pattern_detected": "Bullish Engulfing",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Спред 0.3600. Баланс покупателей и продавцов нейтрален (imbalance: 0.00)",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 80,
+            "reasoning": "Фандинг сильно негативный (-0.0283%). Шорты перегружены, риск шорт-сквиза",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 80,
+            "reasoning": "The Fear & Greed Index is at 72 (Extreme Greed), indicating a high risk of a severe correction. However, no other market sentiment data is provided to confirm the presence of retail panic or institutional accumulation, so a cautious NEUTRAL stance is taken for now.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 60,
+            "reasoning": "RSI нейтрален (50.3). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 77,
+        "reasoning_en": "[Primary CEO: The multi-timeframe context shows a bullish trend across the 15m, 1h, and 4h timeframes, with full alignment. The Candle_Agent reports a bullish engulfing pattern with 75% confidence. The OI_Funding_Agent reports a bullish signal with 80% confidence, indicating a strong negative funding rate. The Indicator_Agent reports a neutral RSI signal. The News_Agent reports a neutral signal due to extreme greed in the Fear & Greed Index. The Order_Book_Agent reports a neutral signal with 50% confidence. Considering the strong bullish signals from the Candle_Agent and OI_Funding_Agent, and the bullish trend alignment across timeframes, the decision is to go LONG.]\n\n[ESCALATION GEMINI VERDICT: Confirming the Primary CEO's LONG proposal. Multi-timeframe trend structure exhibits full bullish alignment across 15m, 1h, and 4h charts. A significantly negative funding rate (-0.0283%) indicates heavy short overcrowding primed for a squeeze against structural trend continuation. Price is holding above key EMAs with neutral RSI (50.3) leaving ample headroom for upside expansion following 15m bullish displacement.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Engulfing + Negative Funding Rate + Bullish Trend Alignment",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": true,
+        "veto_category": null,
+        "reasoning": "Math calculated based on AGGRESSIVE profile. SL=557.4075, TP=614.5775, RR=0.84",
+        "risk_amount_usd": 5.84,
+        "notional_size_usd": 234.4,
+        "margin_usd": 23.44,
+        "leverage": 10,
+        "contracts": 0.41,
+        "margin_pct": 20.06,
+        "entry_price": 571.7,
+        "take_profit_price": 614.5775,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 557.4075,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 0.84,
+        "liquidation_price": 525.964,
+        "position_size_pct": 20.06
+    },
+    "status": "APPROVED"
+}

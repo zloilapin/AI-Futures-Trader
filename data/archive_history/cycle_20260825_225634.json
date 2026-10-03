@@ -1,0 +1,70 @@
+{
+    "symbol": "HYPE-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0012%) и волатилен (ATR 0.6769%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 89,
+            "reasoning": "Спред 0.0010. Значительный перевес покупателей (imbalance: 0.59). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 70,
+            "reasoning": "Market Sentiment at Neutral (40-60), no Extreme Fear or Greed detected. Latest event: Market Sentiment: Greed (Fear & Greed Index: 65)",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (64.2). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 75,
+        "reasoning_en": "[Primary CEO: The current market trend is bullish across all timeframes (15m, 1h, 4h), with the Order Book Agent reporting a significant imbalance (0.59) in favor of buyers. The Indicator Agent also reports a bullish signal with RSI (64.2) and price above EMA-20. However, the Candle Agent and News Agent are neutral. Given the strong bullish trend alignment and supportive indicators, the decision is to go LONG.]\n\n[ESCALATION GEMINI VERDICT: Escalation review fully validates and upgrades conviction on the LONG proposal. Multi-timeframe structure exhibits complete bullish alignment across 15m, 1h, and 4h horizons. On the 15m chart, an aggressive high-volume impulse pushed through resistance to 83.085, followed by a healthy, low-volume consolidation at 82.524. Order book depth shows strong buyer dominance with a 0.59 positive imbalance and supportive bid walls. With RSI sitting in prime momentum territory (64.2) and neutral funding rates (0.0001%), the market shows no signs of overheating, offering an optimal risk/reward continuation entry.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Trend Alignment with Supportive Indicators",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 74.27,
+        "margin_usd": 7.43,
+        "leverage": 10,
+        "contracts": 0.9,
+        "margin_pct": 19.0,
+        "entry_price": 82.524,
+        "take_profit_price": 88.7133,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 80.4609,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 0.0,
+        "position_size_pct": 19.0
+    },
+    "status": "VETOED"
+}

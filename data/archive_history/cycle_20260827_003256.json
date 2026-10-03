@@ -1,0 +1,70 @@
+{
+    "symbol": "BTC-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0013%) и волатилен (ATR 0.1905%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "BULLISH",
+            "confidence": 75,
+            "reasoning": "Бычье поглощение. Сильный импульс (Displacement), перекрывающий предыдущее падение.",
+            "pattern_detected": "Bullish Engulfing",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 1.0000. Значительный перевес покупателей (imbalance: 0.79). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 60,
+            "reasoning": "Neutral sentiment (Fear & Greed Index: 71) indicates a lack of conviction, expecting choppy, range-bound price action.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 60,
+            "reasoning": "RSI нейтрален (54.1). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 74,
+        "reasoning_en": "[Primary CEO: The Candle_Agent and Order_Book_Agent report bullish signals with high confidence, while the OI_Funding_Agent and News_Agent report neutral signals. The Indicator_Agent reports a bullish signal. The 4H trend is bullish, but the 1H trend is neutral. The MTF alignment is mixed. The score breakdown is as follows: candle (16), orderbook (12), derivatives (18), indicators (13), news (-2), and mtf (17). The total score is 74. The decision is to go LONG.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the LONG proposal on BTC-USD. The higher timeframe (4H) trend remains solidly bullish while the lower timeframes (15m/1h) show healthy consolidation without aggressive distribution. Order book data demonstrates significant buyer support with a 0.79 bid-side imbalance and strong absorption walls. Neutral funding (0.0001%) indicates no excessive speculative leverage buildup, and momentum indicators (RSI 54.1, price holding above 20 EMA) support upward continuation.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish signals from multiple agents, with a bullish 4H trend and mixed MTF alignment",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 74.88,
+        "margin_usd": 7.49,
+        "leverage": 10,
+        "contracts": 0.00095,
+        "margin_pct": 19.15,
+        "entry_price": 78819.0,
+        "take_profit_price": 84730.425,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 76848.525,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 0.0,
+        "position_size_pct": 19.15
+    },
+    "status": "VETOED"
+}

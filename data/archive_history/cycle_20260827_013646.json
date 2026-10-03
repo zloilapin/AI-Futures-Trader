@@ -1,0 +1,70 @@
+{
+    "symbol": "HYPE-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0012%) и волатилен (ATR 0.5293%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.0010. Значительный перевес покупателей (imbalance: 1.88). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Market Sentiment: Greed (Fear & Greed Index: 71) falls within the neutral range of 40-60. The market lacks a clear narrative, and price action is expected to be choppy and range-bound.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (64.0). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 74,
+        "reasoning_en": "[Primary CEO: The multi-timeframe context indicates a bullish trend across the 15m, 1h, and 4h timeframes. The Order Book Agent reports a significant imbalance (1.88) in favor of buyers, and the Indicator Agent notes a neutral RSI (64.0). The News Agent reports a neutral market sentiment. The historical trade memory shows a mix of winning and losing trades, but no recent trades in the HYPE symbol. The past lessons learned do not apply to this scenario as the 4H trend is bullish and the RSI is above 50.]\n\n[ESCALATION GEMINI VERDICT: Supreme Escalation AI approves the Primary CEO's LONG recommendation. The multi-timeframe structure exhibits complete bullish alignment across 15m, 1h, and 4h timeframes, supported by substantial volume expansion on the latest 15m and 1h candles. Order book microstructure displays strong buyer dominance with an imbalance ratio of 1.88 and solid bid depth. Momentum indicators remain healthy with RSI at 64.0 and price comfortably positioned above the EMA-20, leaving ample runway before reaching overbought extremes. Derivatives funding is neutral (0.0001%), minimizing liquidation overhang.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Trend with Buyer Imbalance",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 74.01,
+        "margin_usd": 7.4,
+        "leverage": 10,
+        "contracts": 0.9,
+        "margin_pct": 18.92,
+        "entry_price": 82.231,
+        "take_profit_price": 88.398325,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 80.175225,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 0.0,
+        "position_size_pct": 18.92
+    },
+    "status": "VETOED"
+}

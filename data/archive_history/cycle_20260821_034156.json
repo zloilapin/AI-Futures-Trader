@@ -1,0 +1,70 @@
+{
+    "symbol": "SOL",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0219%) и волатилен (ATR 0.9127%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "BULLISH",
+            "confidence": 80,
+            "reasoning": "Длинная нижняя тень. Сбор ликвидности (стопов) снизу и агрессивный откуп.",
+            "pattern_detected": "Bullish Liquidity Sweep",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Спред 0.0200. Баланс покупателей и продавцов нейтрален (imbalance: 0.00)",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0026%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 8,
+            "reasoning": "Greed index at 72, suggesting retail is bragging about gains, potentially running out of marginal buyers.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (55.9). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 74,
+        "reasoning_en": "[Primary CEO: The current market analysis indicates a bullish trend in the 1H and 4H timeframes, with the Candle_Agent reporting a bullish liquidity sweep and the Indicator_Agent suggesting a neutral RSI. The Order_Book_Agent reports a neutral imbalance, and the News_Agent indicates a potential lack of marginal buyers. The OI_Funding_Agent reports a neutral funding rate. Considering the bullish trend and the bullish signals from the Candle_Agent and Indicator_Agent, the decision is to go LONG. The score breakdown is as follows: candle (16), orderbook (12), derivatives (18), indicators (13), news (-2), and mtf (17). The mtf validation is verified, and the consensus summary is a perfect storm of liquidity sweep, short squeeze, and divergence.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the Primary CEO's LONG decision. The higher timeframes (1H and 4H) remain solidly bullish with strong upward momentum following the breakout above 90.00. The 15M pullback saw a rapid liquidity sweep down to 90.28 which was aggressively bought back, forming a strong lower absorption wick. With RSI holding above 55 and funding remaining neutral/healthy, the risk/reward heavily favors trend continuation toward the recent highs at 93.40+.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Perfect Storm: Liquidity Sweep + Short Squeeze + Divergence",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": "INSUFFICIENT_BALANCE",
+        "reasoning": "Math calculated based on AGGRESSIVE profile. SL=0.0, TP=0.0, RR=0.0",
+        "risk_amount_usd": 0.0,
+        "notional_size_usd": 0.0,
+        "margin_usd": 0.0,
+        "leverage": 10,
+        "contracts": 0.0,
+        "margin_pct": 0.0,
+        "entry_price": 91.32,
+        "take_profit_price": 0.0,
+        "take_profit_pct": 100.0,
+        "stop_loss_price": 0.0,
+        "stop_loss_pct": 100.0,
+        "risk_reward_ratio": 0.0,
+        "liquidation_price": 0.0,
+        "position_size_pct": 0.0
+    },
+    "status": "VETOED"
+}

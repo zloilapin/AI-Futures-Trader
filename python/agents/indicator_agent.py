@@ -67,19 +67,21 @@ class IndicatorAgent(BaseAgent):
                 reason_parts.append("Цена ниже EMA-20")
 
         # Evaluate algorithmic signals
-        algo_signals = market_data.get("algo_signals", {})
+        algo_signals = indicators.get("algo_signals", {})
         if algo_signals:
-            if algo_signals.get("rsi_divergence") == "BULLISH":
+            rsi_div = str(algo_signals.get("rsi_divergence", "")).upper()
+            if rsi_div == "BULLISH":
                 bull_score += 3
                 reason_parts.append("Обнаружена бычья дивергенция RSI (разворотный сигнал)")
-            elif algo_signals.get("rsi_divergence") == "BEARISH":
+            elif rsi_div == "BEARISH":
                 bear_score += 3
                 reason_parts.append("Обнаружена медвежья дивергенция RSI (разворотный сигнал)")
                 
-            if algo_signals.get("macd_crossover") == "BULLISH":
+            macd_cross = str(algo_signals.get("macd_crossover", "")).upper()
+            if macd_cross == "BULLISH":
                 bull_score += 2
                 reason_parts.append("Недавний бычий MACD кроссовер")
-            elif algo_signals.get("macd_crossover") == "BEARISH":
+            elif macd_cross == "BEARISH":
                 bear_score += 2
                 reason_parts.append("Недавний медвежий MACD кроссовер")
                 

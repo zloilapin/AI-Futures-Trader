@@ -1,0 +1,70 @@
+{
+    "symbol": "ZEC-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0063%) и волатилен (ATR 0.6825%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.0500. Значительный перевес покупателей (imbalance: 1.00). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Market Sentiment: Greed (Fear & Greed Index: 71), indicating neutral sentiment, the market lacks a clear narrative, and expect choppy, range-bound price action without strong conviction.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (59.8). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 75,
+        "reasoning_en": "[Primary CEO: The current market trend is bullish across all timeframes (15m, 1h, 4h), with a full alignment of trends. The Order Book Agent reports a significant imbalance (1.00) with a notable purchase order, indicating a potential buying pressure. The Indicator Agent reports a neutral RSI (59.8) but notes that the price is above the EMA-20, which could be a bullish sign. However, the Candle Agent and News Agent report neutral signals. Considering the primary signals from Price Action and Derivatives, along with the confirmation from the Order Book and Indicators, the overall score leans towards a bullish direction. The past lessons learned do not indicate a direct warning against this setup. Therefore, the decision is to go LONG.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the Primary CEO's recommendation to enter a LONG position on ZEC-USD. The asset demonstrates strong multi-timeframe bullish alignment across 15m, 1h, and 4h intervals. Order book dynamics show significant buyer dominance with an imbalance of 1.00 and strong bid-side liquidity. Momentum indicators are healthy with an RSI of 59.8 and price sustaining comfortably above the EMA-20, while funding remains neutral (0.0001%), indicating ample upside room without excessive leverage overheating.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Trend Alignment with Buying Pressure",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 71.42,
+        "margin_usd": 7.14,
+        "leverage": 10,
+        "contracts": 0.09,
+        "margin_pct": 18.26,
+        "entry_price": 793.59,
+        "take_profit_price": 853.10925,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 773.75025,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 0.0,
+        "position_size_pct": 18.26
+    },
+    "status": "VETOED"
+}

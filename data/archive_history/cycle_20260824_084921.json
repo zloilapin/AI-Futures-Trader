@@ -1,0 +1,70 @@
+{
+    "symbol": "SOL-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0103%) и волатилен (ATR 0.7814%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.0100. Значительный перевес покупателей (imbalance: 1.16). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "BEARISH",
+            "confidence": 8,
+            "reasoning": "Extreme Greed (76-100), retail bragging about gains, risk of severe correction high.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (58.4). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 72,
+        "reasoning_en": "[Primary CEO: The current market trend is BULLISH across all timeframes (15m, 1h, 4h). The Order Book Agent reports a significant imbalance (1.16) in favor of buyers, indicating a potential buying opportunity. The Indicator Agent reports a neutral RSI (58.4), which does not indicate overbought or oversold conditions. However, the News Agent reports extreme greed (76-100) in the market, which could lead to a severe correction. The Candle Agent reports no significant patterns. Given the confluence of bullish trends and buyer imbalance, but also considering the potential risk of correction due to extreme greed, the decision is to go LONG with caution.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the LONG decision. Multi-timeframe trend alignment is fully bullish across 15m, 1h, and 4h timeframes, backed by significant buying volume expansion on the 4H chart. Order book depth shows clear buyer dominance (1.16 imbalance) with active bid support. Derivatives funding remains virtually flat (0.0001%), indicating price action is spot-driven rather than excessively leveraged. RSI at 58.4 leaves ample room for continuation before entering overbought territory.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Trend with Buyer Imbalance",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": "INSUFFICIENT_BALANCE",
+        "reasoning": "Math calculated based on AGGRESSIVE profile. SL=0.0, TP=0.0, RR=0.0",
+        "risk_amount_usd": 0.0,
+        "notional_size_usd": 0.0,
+        "margin_usd": 0.0,
+        "leverage": 10,
+        "contracts": 0.0,
+        "margin_pct": 0.0,
+        "entry_price": 96.67,
+        "take_profit_price": 0.0,
+        "take_profit_pct": 100.0,
+        "stop_loss_price": 0.0,
+        "stop_loss_pct": 100.0,
+        "risk_reward_ratio": 0.0,
+        "liquidation_price": 0.0,
+        "position_size_pct": 0.0
+    },
+    "status": "VETOED"
+}

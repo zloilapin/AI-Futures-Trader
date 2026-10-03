@@ -1,0 +1,72 @@
+{
+    "symbol": "SOL-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0095%) и волатилен (ATR 0.2412%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.0100. Значительный перевес покупателей (imbalance: 1.06). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (-0.0000%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Market Sentiment: Greed (Fear & Greed Index: 69) indicates Neutral sentiment, lacking a clear narrative.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (60.0). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 71,
+        "reasoning_en": "[Primary CEO: The current market trend for SOL-USD is bullish on the 1H timeframe and neutral on the 4H timeframe. The Order Book Agent reports a bullish signal with 90% confidence due to a significant imbalance in the order book. The Indicator Agent reports a bullish signal with 65% confidence due to the RSI being neutral and the price being above the EMA-20. However, the Candle Agent and OI Funding Agent report neutral signals. Considering the Macro Trend Override rule, we should not fight the 1H/4H trend unless there is extreme capitulation, which is not present in this case. The score breakdown is as follows: candle (10), order book (18), derivatives (10), indicators (13), news (0), and mtf (15). The total score is 66, indicating a moderately bullish signal.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the Primary CEO's LONG thesis on SOL-USD. Both 15m and 1h timeframes display strong bullish alignment with ascending local structure and steady volume. The Order Book Agent indicates decisive buyer absorption with a 90% confidence score and heavy bid support. Price action remains firmly above the EMA-20 with RSI at 60.0, leaving plenty of headroom before overbought conditions. The 4H timeframe is stabilizing neutrally out of its recent low, making a continuation long toward the 106.50-107.00 resistance zone favorable with defined risk below 104.40.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish signals from Order Book and Indicator Agents, but neutral signals from Candle and OI Funding Agents",
+        "mtf_validation": "1H/4H Trend Alignment NOT VERIFIED",
+        "hold_category": "NONE",
+        "primary_conviction": 63,
+        "escalated": true
+    },
+    "risk_assessment": {
+        "approved": true,
+        "veto_category": null,
+        "reasoning": "Math calculated based on AGGRESSIVE profile. SL=102.726, TP=113.262, RR=2.84",
+        "risk_amount_usd": 23.61,
+        "notional_size_usd": 944.03,
+        "margin_usd": 94.4,
+        "leverage": 10,
+        "contracts": 8.96,
+        "margin_pct": 19.99,
+        "entry_price": 105.36,
+        "take_profit_price": 113.262,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 102.726,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.84,
+        "liquidation_price": 0.0,
+        "position_size_pct": 19.99
+    },
+    "status": "APPROVED"
+}

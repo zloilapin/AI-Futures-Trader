@@ -17,11 +17,11 @@ class RiskManager(BaseAgent):
 
     def _get_profile_rules(self, profile: str) -> dict:
         if profile == "AGGRESSIVE":
-            return {"min_conviction": 65, "base_risk": 0.015, "risk_cap": 0.03, "sl_mult": 1.75, "tp_mult": 3.5, "target_margin_pct": 0.20, "max_margin_pct": 0.45, "max_leverage": 15}
+            return {"min_conviction": 65, "base_risk": 0.015, "risk_cap": 0.015, "sl_mult": 1.75, "tp_mult": 3.5, "target_margin_pct": 0.20, "max_margin_pct": 0.45, "max_leverage": 15, "sentinel_be_atr": 1.2, "sentinel_trail_atr": 2.0, "sentinel_trail_activation_atr": 1.2, "sentinel_trail_distance_atr": 1.0, "sentinel_min_improve_atr": 0.20}
         elif profile == "CONSERVATIVE":
-            return {"min_conviction": 80, "base_risk": 0.005, "risk_cap": 0.01, "sl_mult": 2.0, "tp_mult": 3.0, "target_margin_pct": 0.05, "max_margin_pct": 0.10, "max_leverage": 5}
+            return {"min_conviction": 80, "base_risk": 0.005, "risk_cap": 0.01, "sl_mult": 2.0, "tp_mult": 3.0, "target_margin_pct": 0.05, "max_margin_pct": 0.10, "max_leverage": 5, "sentinel_be_atr": 0.8, "sentinel_trail_atr": 1.2, "sentinel_trail_activation_atr": 1.8, "sentinel_trail_distance_atr": 2.0, "sentinel_min_improve_atr": 0.30}
         else: # BALANCED
-            return {"min_conviction": 70, "base_risk": 0.01, "risk_cap": 0.015, "sl_mult": 1.5, "tp_mult": 2.5, "target_margin_pct": 0.10, "max_margin_pct": 0.20, "max_leverage": 10}
+            return {"min_conviction": 70, "base_risk": 0.01, "risk_cap": 0.015, "sl_mult": 1.5, "tp_mult": 2.5, "target_margin_pct": 0.10, "max_margin_pct": 0.20, "max_leverage": 10, "sentinel_be_atr": 1.0, "sentinel_trail_atr": 1.5, "sentinel_trail_activation_atr": 1.5, "sentinel_trail_distance_atr": 1.5, "sentinel_min_improve_atr": 0.25}
 
     def _get_conviction_multiplier(self, min_conviction: int, conviction: int) -> float:
         """
@@ -78,7 +78,7 @@ class RiskManager(BaseAgent):
 
         return 1.0, "NORMAL"
 
-    async def analyze(self, ceo_decision: Dict[str, Any], portfolio_data: Dict[str, Any], market_data: Dict[str, Any], effective_profile: str = "BALANCED") -> Dict[str, Any]:
+    async def analyze(self, ceo_decision: Dict[str, Any], portfolio_data: Dict[str, Any], market_data: Dict[str, Any], effective_profile: str = "BALANCED", macro_regime: str = "RANGE_CHOPPY") -> Dict[str, Any]:
         """
         Deterministic risk engine. All sizing is math-only, no LLM.
         
@@ -134,12 +134,6 @@ class RiskManager(BaseAgent):
             self.logger.warning(f"[{self.name}] ❌ INSUFFICIENT BALANCE: Total balance is {total_balance}. Blocking trade.")
             approved = False
             veto_category = "INSUFFICIENT_BALANCE"
-        elif trade_action == "WAIT_FOR_PULLBACK":
-            msg = f"CEO recommended WAIT_FOR_PULLBACK (Overheated market condition). Blocking trade execution."
-            self.logger.warning(f"[{self.name}] 🚫 WAIT_FOR_PULLBACK VETO: {msg}")
-            approved = False
-            veto_category = "WAIT_FOR_PULLBACK"
-            veto_reason = msg
         elif decision in ["LONG", "SHORT"] and conviction >= min_conviction:
             
             # --- Portfolio Correlated Exposure Check ---
@@ -151,7 +145,7 @@ class RiskManager(BaseAgent):
             active_positions = portfolio_data.get("active_positions", {})
             for pos_sym, pos in active_positions.items():
                 if isinstance(pos, dict):
-                    pos_notional = float(pos.get("notional_usd", 0.0))
+                    pos_notional = float(pos.get("notional_usd") or pos.get("size_usd") or 0.0)
                     pos_risk = float(pos.get("risk_amount_usd", pos_notional * 0.02))
                     existing_risk_usd += pos_risk
                     
@@ -237,11 +231,20 @@ class RiskManager(BaseAgent):
             mtf_alignment = mtf_data.get("mtf_alignment", "MIXED_CHOP")
             
             if mtf_alignment == "MIXED_CHOP":
-                msg = f"Market regime is MIXED_CHOP (15m: {mtf_data.get('trend_15m')}, 1h: {mtf_data.get('trend_1h')}, 4h: {mtf_data.get('trend_4h')}). Trend-following system cannot trade in chop."
+                msg = f"Asset local MTF alignment is MIXED_CHOP (15m: {mtf_data.get('trend_15m')}, 1h: {mtf_data.get('trend_1h')}). Trend-following system cannot trade in chop."
                 self.logger.warning(f"[{self.name}] 🚫 REGIME VETO: {msg}")
                 return {
                     "approved": False,
                     "veto_category": "REGIME",
+                    "reasoning": msg
+                }
+                
+            if macro_regime == "RANGE_CHOPPY" and mtf_alignment != "FULL_ALIGNMENT":
+                msg = f"Macro Market Regime is RANGE_CHOPPY, but asset only has {mtf_alignment} alignment. Demanding FULL_ALIGNMENT to override global chop."
+                self.logger.warning(f"[{self.name}] 🚫 MACRO REGIME VETO: {msg}")
+                return {
+                    "approved": False,
+                    "veto_category": "MACRO_REGIME_VETO",
                     "reasoning": msg
                 }
             
@@ -330,7 +333,8 @@ class RiskManager(BaseAgent):
             # Target margin based on available margin rather than total balance
             # with a reserve buffer (e.g. max 80% of available margin can be used for target)
             usable_margin = min(available_margin * 0.8, total_balance * max_margin_pct)
-            target_margin_usd = min(total_balance * target_margin_pct, usable_margin)
+            # Scale target margin down if we are in a drawdown (dd_mult) so we don't lock up huge margin at 1x leverage for tiny trades
+            target_margin_usd = min(total_balance * target_margin_pct, usable_margin) * dd_mult
             
             if target_margin_usd > 0:
                 required_leverage = notional_usd / target_margin_usd
@@ -409,7 +413,7 @@ class RiskManager(BaseAgent):
             symbol = ceo_decision.get("symbol", "")
             
             min_size = float(derivatives_data.get("min_size", 0.0))
-            min_notional = float(derivatives_data.get("min_notional", 10.0))
+            min_notional = float(derivatives_data.get("min_notional", 0.0))
             
             # Sanity check: If reported min_size exceeds max possible notional of account, it's a testnet dummy artifact
             if min_size > 0 and (min_size * current_price) > max_notional_usd:
@@ -423,14 +427,11 @@ class RiskManager(BaseAgent):
                 veto_category = "MIN_SIZE"
                 veto_reason = msg
             elif min_size > 0 and contracts < min_size:
-                # Пользователь подтвердил, что биржа по факту не имеет ограничений
-                self.logger.info(f"[{self.name}] ℹ️ Размер ордера ({contracts}) меньше заявленного API минимума ({min_size}). Ограничение игнорируется.")
+                # На Nado DEX нет минимального размера ордера (пользователь подтвердил)
+                self.logger.info(f"[{self.name}] ℹ️ Размер ордера ({contracts}) меньше заявленного API min_size ({min_size}). Ограничение игнорируется.")
             elif min_notional > 0 and notional_usd < min_notional:
-                msg = f"Calculated notional ${notional_usd:.2f} is below exchange minimum notional (${min_notional:.2f}). Blocking trade."
-                self.logger.warning(f"[{self.name}] 🚫 MIN NOTIONAL VETO: {msg}")
-                approved = False
-                veto_category = "MIN_NOTIONAL"
-                veto_reason = msg
+                # На Nado DEX нет минимального номинала (пользователь подтвердил)
+                self.logger.info(f"[{self.name}] ℹ️ Номинал (${notional_usd:.2f}) меньше заявленного API min_notional (${min_notional:.2f}). Ограничение игнорируется.")
             elif notional_usd > max_notional_usd:
                 msg = f"Required notional ${notional_usd:.2f} exceeds max allowed ${max_notional_usd:.2f}."
                 self.logger.warning(f"[{self.name}] 🚫 MAX NOTIONAL VETO: {msg}")

@@ -1,0 +1,70 @@
+{
+    "symbol": "BNB-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0014%) и волатилен (ATR 0.1644%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.0100. Значительный перевес покупателей (imbalance: 0.89). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Market Sentiment Score is at 71, indicating a neutral sentiment, neither extreme fear nor greed. The Fear & Greed Index is 71, which is not a clear contrarian signal.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (59.9). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 75,
+        "reasoning_en": "[Primary CEO: Based on the provided market data, the Candle Agent reports a neutral signal with 50% confidence, while the Order Book Agent reports a bullish signal with 90% confidence. The OI Funding Agent and News Agent report neutral signals. The Indicator Agent reports a bullish signal with 65% confidence. The multi-timeframe context shows a bullish trend on the 15m, 1h, and 4h timeframes. Considering the confluence of these signals and the trend alignment, the decision is to go LONG.]\n\n[ESCALATION GEMINI VERDICT: Full MTF bullish alignment across the 15m, 1h, and 4h charts confirms solid structural strength for BNB-USD. The Order Book displays strong buyer dominance with an 0.89 imbalance and solid bid depth. Indicator momentum is healthy with RSI at 59.9 and price holding firmly above EMA-20 without overbought exhaustion. Derivatives show benign funding rates, minimizing immediate liquidation or squeeze risk. Escalation confirms the LONG position.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish signals from Order Book and Indicator Agents, with a bullish trend on all timeframes",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 77.54,
+        "margin_usd": 7.75,
+        "leverage": 10,
+        "contracts": 0.11,
+        "margin_pct": 19.82,
+        "entry_price": 704.91,
+        "take_profit_price": 757.77825,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 687.28725,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 0.0,
+        "position_size_pct": 19.82
+    },
+    "status": "VETOED"
+}

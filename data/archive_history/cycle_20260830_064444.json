@@ -1,0 +1,72 @@
+{
+    "symbol": "SOL-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0094%) и волатилен (ATR 0.2792%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.0100. Значительный перевес покупателей (imbalance: 1.11). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (-0.0000%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 60,
+            "reasoning": "The Fear & Greed Index is at 69, indicating Neutral sentiment. No extreme fear or greed, and no clear narrative to suggest a strong contrarian opportunity.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BEARISH",
+            "confidence": 65,
+            "reasoning": "RSI перекуплен (80.2). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 75,
+        "reasoning_en": "[Primary CEO: The multi-timeframe context shows a bullish trend across all timeframes (15m, 1h, 4h) with full alignment, indicating a strong upward momentum. The Order Book Agent reports a significant imbalance (1.11) in favor of buyers, suggesting a potential liquidity sweep and short squeeze. However, the Indicator Agent reports an overbought condition (RSI > 80), which could lead to a trend reversal. The News Agent reports a neutral sentiment, and the OI Funding Agent reports a neutral funding rate. Considering the confluence of these signals, the decision is to go LONG, but with caution due to the overbought condition.]\n\n[ESCALATION GEMINI VERDICT: Overriding the Primary CEO's hesitation regarding RSI overbought conditions. Full MTF alignment is confirmed across the 15m, 1h, and 4h intervals, displaying clean upward expansion and consecutive higher highs from 104.50 to 106.85. The Order Book exhibits a strong 1.11 buyer imbalance with significant buy walls supporting the bid. Neutral funding rates mean the rally is not over-leveraged by late perpetual longs, leaving room for further momentum continuation before exhaustion.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Trend with Potential Liquidity Sweep and Short Squeeze",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE",
+        "primary_conviction": 51,
+        "escalated": true
+    },
+    "risk_assessment": {
+        "approved": true,
+        "veto_category": null,
+        "reasoning": "Math calculated based on AGGRESSIVE profile. SL=104.17875, TP=114.86375, RR=2.84",
+        "risk_amount_usd": 23.96,
+        "notional_size_usd": 957.38,
+        "margin_usd": 95.74,
+        "leverage": 10,
+        "contracts": 8.96,
+        "margin_pct": 19.98,
+        "entry_price": 106.85,
+        "take_profit_price": 114.86375,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 104.17875,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.84,
+        "liquidation_price": 0.0,
+        "position_size_pct": 19.98
+    },
+    "status": "APPROVED"
+}

@@ -1,0 +1,70 @@
+{
+    "symbol": "BTC-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0012%) и волатилен (ATR 0.3271%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 1.0000. Значительный перевес покупателей (imbalance: 0.75). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "BEARISH",
+            "confidence": 80,
+            "reasoning": "Extreme Greed (70-75) suggests euphoria; prepare to SHORT, but beware the possibility that a massive narrative (catalyst) could be the reason for sustained 'greed'.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BEARISH",
+            "confidence": 65,
+            "reasoning": "RSI перекуплен (73.8). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 74,
+        "reasoning_en": "[Primary CEO: The current market trend is bullish across all timeframes (15m, 1h, 4h). The Order Book Agent reports a bullish signal with a confidence of 90, indicating a significant imbalance in favor of buyers. However, the News Agent and Indicator Agent report bearish signals, suggesting caution due to extreme greed and overbought conditions. The Candle Agent is neutral. Given the strong bullish trend and the Order Book Agent's signal, we will assign a score of 16 to the candle, 12 to the order book, 18 to the derivatives, 13 to the indicators, -2 to the news, and 17 to the MTF validation.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the Primary CEO's LONG recommendation on BTC-USD. The market demonstrates robust structural bullish alignment across all monitored timeframes (15m, 1h, and 4h). Massive volume expansion accompanied the breakout above $80,000, supported by significant order book bid imbalance (0.75) and active buyer support. While standard oscillators (RSI at 73.8) and sentiment indices point to overbought conditions and extreme greed, these are classic momentum characteristics during clean trend breakouts. Neutral funding rate (0.0001%) confirms the rally is not overleveraged, leaving ample room for upward continuation.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Trend with Order Book Support",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 76.26,
+        "margin_usd": 7.63,
+        "leverage": 10,
+        "contracts": 0.00095,
+        "margin_pct": 19.51,
+        "entry_price": 80272.0,
+        "take_profit_price": 86292.4,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 78265.2,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 0.0,
+        "position_size_pct": 19.51
+    },
+    "status": "VETOED"
+}

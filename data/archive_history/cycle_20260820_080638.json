@@ -1,0 +1,70 @@
+{
+    "symbol": "BTC",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0014%) и волатилен (ATR 0.664%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Спред 1.0000. Баланс покупателей и продавцов нейтрален (imbalance: 0.00)",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (-0.0000%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "The Fear & Greed Index is at 62, indicating Neutral sentiment. There is no clear narrative to indicate a strong bullish or bearish sentiment.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (61.8). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 76,
+        "reasoning_en": "[Primary CEO: The current market trend is bullish across all timeframes (15m, 1h, 4h) with a full alignment, indicating a strong upward momentum. The RSI is neutral, and the Indicator Agent reports a bullish signal with 65% confidence. However, other agents (Candle, Order Book, OI Funding, News) report neutral signals. Given the bullish trend alignment and the Indicator Agent's bullish signal, the decision is to go LONG.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the LONG decision on BTC. All major timeframes (15m, 1h, 4h) demonstrate strong structural alignment in a confirmed bullish regime, breaking past key resistance near $72,000 with high volume on the 4h timeframe. Indicator agent confirms bullish momentum with RSI sitting comfortably at 61.8 (not overbought) while price maintains clean separation above the 20 EMA. Derivatives and funding remain healthy and uncrowded, offering an optimal environment for continuation.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Trend Alignment with Neutral Signals from Most Agents",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": true,
+        "veto_category": null,
+        "reasoning": "Math calculated based on AGGRESSIVE profile. SL=70266.3, TP=77473.1, RR=2.85",
+        "risk_amount_usd": 1.24,
+        "notional_size_usd": 50.45,
+        "margin_usd": 5.04,
+        "leverage": 10,
+        "contracts": 0.0007,
+        "margin_pct": 5.1,
+        "entry_price": 72068.0,
+        "take_profit_price": 77473.1,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 70266.3,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.85,
+        "liquidation_price": 65221.54,
+        "position_size_pct": 5.1
+    },
+    "status": "APPROVED"
+}

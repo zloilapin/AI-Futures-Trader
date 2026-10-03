@@ -1,0 +1,70 @@
+{
+    "symbol": "BTC",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0014%) и волатилен (ATR 0.6779%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Спред 1.0000. Баланс покупателей и продавцов нейтрален (imbalance: 0.00)",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (-0.0000%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 75,
+            "reasoning": "Neutral sentiment (40-60) indicates a lack of clear narrative, expecting choppy, range-bound price action.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (64.6). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 80,
+        "reasoning_en": "[Primary CEO: The multi-timeframe context indicates a bullish trend across the 15m, 1h, and 4h timeframes. The Candle_Agent reports a neutral signal, while the Order_Book_Agent and OI_Funding_Agent also report neutral signals. The Indicator_Agent reports a bullish signal with an RSI of 64.6. The News_Agent reports a neutral sentiment. Given the bullish trend and the bullish signal from the Indicator_Agent, we have a score breakdown of: candle (12), orderbook (10), derivatives (15), indicators (18), news (5), and mtf (20). The total score is 80, indicating a strong bullish signal. The past lessons learned do not indicate any warnings for this specific trade setup.]\n\n[ESCALATION GEMINI VERDICT: Multi-timeframe structure displays complete bullish alignment across 15m, 1h, and 4h timeframes. BTC is consolidating firmly above key moving averages near local highs ($72,400) following sustained volume expansion. Healthy RSI levels (64.6) and flat funding rates indicate strong spot-led momentum without derivatives overextension. Confirming the Primary CEO's LONG proposal.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Trend with Bullish Indicator Signal",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": true,
+        "veto_category": null,
+        "reasoning": "Math calculated based on AGGRESSIVE profile. SL=70595.85, TP=77836.45, RR=2.85",
+        "risk_amount_usd": 5.02,
+        "notional_size_usd": 202.74,
+        "margin_usd": 20.27,
+        "leverage": 10,
+        "contracts": 0.0028,
+        "margin_pct": 20.2,
+        "entry_price": 72406.0,
+        "take_profit_price": 77836.45,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 70595.85,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.85,
+        "liquidation_price": 65527.43,
+        "position_size_pct": 20.2
+    },
+    "status": "APPROVED"
+}

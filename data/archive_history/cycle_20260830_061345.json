@@ -1,0 +1,72 @@
+{
+    "symbol": "ETH-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0041%) и волатилен (ATR 0.1877%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.1000. Значительный перевес покупателей (imbalance: 1.42). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (-0.0000%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 80,
+            "reasoning": "Neutral sentiment at Fear & Greed Index of 69 indicates lack of clear narrative.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (55.7). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 73,
+        "reasoning_en": "[Primary CEO: The current market trend is bullish on the 1H and 4H timeframes, with a bullish signal from the Order Book Agent and a neutral signal from the Candle Agent. The Indicator Agent reports a bullish RSI signal. However, the News Agent reports a neutral sentiment. The score breakdown is as follows: candle (10), orderbook (15), derivatives (0), indicators (10), news (0), mtf (20). The total score is 55. The Macro Trend Override rule does not apply since the 1H and 4H trends are bullish.]\n\n[ESCALATION GEMINI VERDICT: Both the 1H and 4H higher timeframes remain decisively BULLISH, with price trading firmly above key exponential moving averages and establishing consistent higher lows. The 15M BEARISH indication reflects a standard healthy pullback from local highs (2471.3 down to 2463.6), creating an optimal liquidity entry point. Order book dynamics strongly support continuation with a 1.42 buyer imbalance and clear bid wall support. Indicators confirm bullish bias (RSI at 55.7 with constructive headroom). Confirming the LONG execution with heightened conviction.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish trend on 1H and 4H timeframes with supportive signals from Order Book and Indicator Agents",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE",
+        "primary_conviction": 55,
+        "escalated": true
+    },
+    "risk_assessment": {
+        "approved": true,
+        "veto_category": null,
+        "reasoning": "Math calculated based on AGGRESSIVE profile. SL=2402.01, TP=2648.37, RR=2.85",
+        "risk_amount_usd": 23.81,
+        "notional_size_usd": 950.95,
+        "margin_usd": 95.09,
+        "leverage": 10,
+        "contracts": 0.386,
+        "margin_pct": 19.97,
+        "entry_price": 2463.6,
+        "take_profit_price": 2648.37,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 2402.01,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.85,
+        "liquidation_price": 0.0,
+        "position_size_pct": 19.97
+    },
+    "status": "APPROVED"
+}

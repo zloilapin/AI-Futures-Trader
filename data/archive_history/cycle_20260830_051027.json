@@ -1,0 +1,72 @@
+{
+    "symbol": "BTC-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0115%) и волатилен (ATR 0.125%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "BULLISH",
+            "confidence": 75,
+            "reasoning": "Бычье поглощение. Сильный импульс (Displacement), перекрывающий предыдущее падение.",
+            "pattern_detected": "Bullish Engulfing",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Спред 9.0000. Баланс покупателей и продавцов нейтрален (imbalance: 0.25)",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (-0.0000%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 60,
+            "reasoning": "The Fear & Greed Index score of 69 indicates Neutral sentiment, which is consistent with 'The Choppy Middle'. Expect range-bound price action without strong conviction.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (66.4). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 74,
+        "reasoning_en": "[Primary CEO: The current market trend is BULLISH on the 1H and 15M timeframes, with a NEUTRAL trend on the 4H timeframe. The Candle_Agent reports a BULLISH signal with 75% confidence, detecting a Bullish Engulfing pattern. The Indicator_Agent also reports a BULLISH signal with 65% confidence, citing an RSI value of 66.4 and a price above the EMA-20. However, the Order_Book_Agent and OI_Funding_Agent report NEUTRAL signals. The News_Agent reports a NEUTRAL sentiment with a Fear & Greed Index score of 69. Considering the mixed signals, the score breakdown is as follows: candle (16), orderbook (12), derivatives (18), indicators (13), news (-2), and mtf (17). The total score is 74, indicating a moderate BULLISH bias.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the Primary CEO's LONG proposal. Both the 15M and 1H timeframes exhibit strong bullish displacement and breakout structure, closing decisively at session highs (78,352) above the multi-candle consolidation range (78,000-78,200). The 4H timeframe is stabilizing in neutral territory after defending support at ~77,300, reducing higher-timeframe headwinds. Indicators show constructive momentum with RSI at 66.4 and price well above the EMA-20 without signs of exhaustion. Funding remains balanced, indicating an organic spot/orderflow-driven breakout rather than an overheated derivative trap. Executing LONG with standard risk controls.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Mixed Signals: Bullish Engulfing + RSI Above EMA-20 + Neutral Sentiment",
+        "mtf_validation": "1H/4H Trend Alignment PARTIALLY VERIFIED",
+        "hold_category": "NONE",
+        "primary_conviction": 74,
+        "escalated": true
+    },
+    "risk_assessment": {
+        "approved": true,
+        "veto_category": null,
+        "reasoning": "Math calculated based on AGGRESSIVE profile. SL=76393.2, TP=84228.4, RR=2.85",
+        "risk_amount_usd": 5.89,
+        "notional_size_usd": 235.06,
+        "margin_usd": 23.51,
+        "leverage": 10,
+        "contracts": 0.003,
+        "margin_pct": 4.99,
+        "entry_price": 78352.0,
+        "take_profit_price": 84228.4,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 76393.2,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.85,
+        "liquidation_price": 0.0,
+        "position_size_pct": 4.99
+    },
+    "status": "APPROVED"
+}

@@ -1,0 +1,70 @@
+{
+    "symbol": "BNB-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0127%) и волатилен (ATR 0.5126%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.0900. Значительный перевес покупателей (imbalance: 1.08). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "The Fear & Greed Index is at 73, indicating Neutral sentiment. No clear narrative is present.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (55.5). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 75,
+        "reasoning_en": "[Primary CEO: Based on the provided market data and analyst reports, the Candle Agent reports a neutral signal with 50% confidence, while the Order Book Agent reports a bullish signal with 90% confidence. The Indicator Agent reports a bullish signal with 65% confidence. The 1H and 4H trends are both bullish. Considering the confluence of these signals and the trend alignment, the decision is to go LONG.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the LONG setup. Both the 1H and 4H timeframes demonstrate solid bullish market structure with consistent higher highs and higher lows. The recent 15M pullback from the 716.81 spike back to the 707-708 level represents an ideal entry zone retesting prior resistance as support. The Order Book displays strong buy-side absorption with a 1.08 imbalance and dedicated bid walls, while RSI at 55.5 leaves ample room for upside continuation above the EMA-20.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish signals from Order Book and Indicator Agents, with bullish 1H and 4H trends",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": "INSUFFICIENT_BALANCE",
+        "reasoning": "Math calculated based on AGGRESSIVE profile. SL=0.0, TP=0.0, RR=0.0",
+        "risk_amount_usd": 0.0,
+        "notional_size_usd": 0.0,
+        "margin_usd": 0.0,
+        "leverage": 10,
+        "contracts": 0.0,
+        "margin_pct": 0.0,
+        "entry_price": 707.98,
+        "take_profit_price": 0.0,
+        "take_profit_pct": 100.0,
+        "stop_loss_price": 0.0,
+        "stop_loss_pct": 100.0,
+        "risk_reward_ratio": 0.0,
+        "liquidation_price": 0.0,
+        "position_size_pct": 0.0
+    },
+    "status": "VETOED"
+}

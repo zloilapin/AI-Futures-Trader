@@ -1,0 +1,70 @@
+{
+    "symbol": "ZEC-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0046%) и волатилен (ATR 1.3144%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "BULLISH",
+            "confidence": 80,
+            "reasoning": "Длинная нижняя тень. Сбор ликвидности (стопов) снизу и агрессивный откуп.",
+            "pattern_detected": "Bullish Liquidity Sweep",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.0300. Значительный перевес покупателей (imbalance: 1.11). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Neutral sentiment (Fear & Greed Index: 72) indicates the market lacks a clear narrative. Expect choppy, range-bound price action without strong conviction.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (60.0). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 74,
+        "reasoning_en": "[Primary CEO: The Candle_Agent and Order_Book_Agent reports indicate a bullish signal with high confidence, while the OI_Funding_Agent and News_Agent reports are neutral. The Indicator_Agent report also shows a bullish signal. The 1H and 4H trends are bullish, aligning with the Macro Trend Override rule. The score breakdown is as follows: candle (16), orderbook (12), derivatives (18), indicators (13), news (-2), and mtf (17). The total score is 74, which is above the threshold for a long position. Additionally, the historical trade memory and past lessons learned do not indicate any warnings or cautions for this trade.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the LONG decision. The higher timeframe structure on 1H and 4H remains aggressively bullish (+15.13% on 4H). The 15M counter-trend flag represents healthy consolidation and a local liquidity sweep where lower wicks near 650.60 are being absorbed by strong bid imbalance (1.11 buyer wall). With RSI at 60 above EMA-20 and neutral funding avoiding over-leverage squeeze risks, the risk/reward strongly favors trend continuation.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish signals from multiple agents and trend alignment",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 78.64,
+        "margin_usd": 7.86,
+        "leverage": 10,
+        "contracts": 0.12,
+        "margin_pct": 20.1,
+        "entry_price": 655.37,
+        "take_profit_price": 704.52275,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 638.98575,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 596.3867,
+        "position_size_pct": 20.1
+    },
+    "status": "VETOED"
+}

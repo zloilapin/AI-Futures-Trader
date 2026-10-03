@@ -1,0 +1,70 @@
+{
+    "symbol": "HYPE-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0012%) и волатилен (ATR 0.5345%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.0010. Значительный перевес покупателей (imbalance: 0.76). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Neutral sentiment (71) indicates a lack of clear narrative, expecting choppy, range-bound price action without strong conviction.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (61.0). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 74,
+        "reasoning_en": "[Primary CEO: Themulti_timeframe_context indicates a BULLISH trend across all timeframes (15m, 1h, 4h) with FULL_ALIGNMENT, suggesting a strong upwards momentum. The Order_Book_Agent reports a BULLISH signal with 90% confidence due to a significant imbalance (0.76) in favor of buyers, indicating potential for a further price increase. The Indicator_Agent also reports a BULLISH signal with 65% confidence based on the RSI being neutral (61.0) and the price being above the EMA-20, supporting the long position. Given the alignment of these signals and the absence of any direct contrarian indicators from other agents, the decision leans towards leveraging the current bullish trend.]\n\n[ESCALATION GEMINI VERDICT: Supreme Escalation AI CONFIRMS the LONG proposal on HYPE-USD. The multi-timeframe context demonstrates pristine FULL_ALIGNMENT across 15m, 1h, and 4h timeframes with consistent higher lows. The 15m candle structure exhibits a strong bullish breakout accompanied by a massive volume spike (~18.7k vs prior ~1k average). The Order Book confirms intense buyer aggression with a massive 0.76 order book imbalance and supportive bid walls. With RSI in a healthy bullish expansion zone (61.0) and neutral funding rates (0.0001%), the market is not overextended and possesses ample headroom for continuation.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Trend Alignment with Order Book and Indicator Support",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 73.82,
+        "margin_usd": 7.38,
+        "leverage": 10,
+        "contracts": 0.9,
+        "margin_pct": 18.87,
+        "entry_price": 82.017,
+        "take_profit_price": 88.168275,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 79.966575,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 0.0,
+        "position_size_pct": 18.87
+    },
+    "status": "VETOED"
+}

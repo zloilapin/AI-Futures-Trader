@@ -11,6 +11,10 @@ class Settings(BaseSettings):
     GOOGLE_API_KEY: str = Field(default="", validation_alias="GOOGLE_API_KEY")
     GROQ_API_KEY: str = Field(default="", validation_alias="GROQ_API_KEY")
     OPENROUTER_API_KEY: str = Field(default="", validation_alias="OPENROUTER_API_KEY")
+    OPENROUTER_MODEL: str = Field(default="qwen/qwen-2.5-72b-instruct")
+    OPENROUTER_MODEL_CHEAP: str = Field(default="deepseek/deepseek-chat")
+    OPENROUTER_MODEL_CEO: str = Field(default="qwen/qwen-2.5-72b-instruct")
+    OPENROUTER_MODEL_ESCALATION: str = Field(default="z-ai/glm-4-9b-chat")
     KIE_API_KEY: str = Field(default="", validation_alias="KIE_API_KEY")
     KIE_MODEL: str = Field(default="DeepSeek-V3")
     
@@ -33,6 +37,13 @@ class Settings(BaseSettings):
     SENTINEL_INTERVAL_SECONDS: int = Field(default=30, ge=5)
     SENTINEL_COOLDOWN_SECONDS: int = Field(default=600, ge=10)
     
+    # Настройки Sentinel (Risk Control)
+    SENTINEL_BE_ATR: float = Field(default=1.0)
+    SENTINEL_TRAIL_ACTIVATION_ATR: float = Field(default=1.5)
+    SENTINEL_TRAIL_DISTANCE_ATR: float = Field(default=1.5)
+    SENTINEL_MIN_IMPROVE_ATR: float = Field(default=0.25)
+    SENTINEL_FAST_POLL_SEC: int = Field(default=5, ge=1)
+    
     # Настройки времени сна
     TIMEZONE_OFFSET: int = Field(default=3)
     REST_START_TIME: str = Field(default="24:00")
@@ -45,8 +56,8 @@ class Settings(BaseSettings):
     MAX_CONCURRENT_POSITIONS: int = Field(default=2, ge=1)
     
     # Расширенные лимиты Risk Manager
-    MIN_SL_PCT: float = Field(default=0.025)
-    MIN_TP_PCT: float = Field(default=0.075)
+    MIN_SL_PCT: float = Field(default=0.01)    # 1.0% floor (was 2.5% — dominated ATR for stable coins)
+    MIN_TP_PCT: float = Field(default=0.03)    # 3.0% floor (was 7.5%)
     SPREAD_PENALTY_THRESHOLD: float = Field(default=0.4)
     SPREAD_VETO_THRESHOLD: float = Field(default=1.0)
 

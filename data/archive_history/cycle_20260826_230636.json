@@ -1,0 +1,70 @@
+{
+    "symbol": "ETH-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.004%) и волатилен (ATR 0.2982%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.1000. Значительный перевес покупателей (imbalance: 2.03). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 60,
+            "reasoning": "Neutral sentiment with a Greed Index score of 71, indicating a lack of extreme sentiment.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 60,
+            "reasoning": "RSI нейтрален (52.1). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 70,
+        "reasoning_en": "[Primary CEO: Based on the provided market data, the Candle_Agent reports a neutral signal with 50% confidence, indicating no clear pattern detection. The Order_Book_Agent reports a bullish signal with 90% confidence, citing a significant imbalance in the order book. The OI_Funding_Agent reports a neutral signal with 50% confidence, indicating a neutral funding rate. The News_Agent reports a neutral signal with 60% confidence, citing a lack of extreme sentiment. The Indicator_Agent reports a bullish signal with 60% confidence, citing a neutral RSI and a price above the EMA-20. The multi-timeframe context shows a bullish trend on the 4H timeframe and a neutral trend on the 1H timeframe. Considering the confluence of these signals, the decision is to go LONG.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the LONG proposal. The 4H higher-timeframe trend remains decisively bullish (+1.8%) and the 15M structure has rebounded off support at 2480-2484 back to 2492.4. Order book micro-structure shows significant buyer aggression with a 2.03 bid-ask imbalance and strong buy walls defending the immediate support. Indicators confirm an intact bullish regime with price above the EMA-20 and RSI at a healthy 52.1, offering substantial headroom before reaching overbought territory.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish signals from Order Book and Indicators, but neutral signals from Candle, Derivatives, and News",
+        "mtf_validation": "1H/4H Trend Alignment NOT VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 77.26,
+        "margin_usd": 7.73,
+        "leverage": 10,
+        "contracts": 0.031,
+        "margin_pct": 19.76,
+        "entry_price": 2492.4,
+        "take_profit_price": 2679.33,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 2430.09,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 0.0,
+        "position_size_pct": 19.76
+    },
+    "status": "VETOED"
+}

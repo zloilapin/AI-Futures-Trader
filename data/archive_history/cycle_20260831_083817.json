@@ -1,0 +1,72 @@
+{
+    "symbol": "WBTC-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0076%) и волатилен (ATR 0.258%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "BULLISH",
+            "confidence": 80,
+            "reasoning": "Длинная нижняя тень. Сбор ликвидности (стопов) снизу и агрессивный откуп.",
+            "pattern_detected": "Bullish Liquidity Sweep",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 87,
+            "reasoning": "Спред 6.0000. Значительный перевес покупателей (imbalance: 0.54). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0000%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 60,
+            "reasoning": "The Fear & Greed Index is at 62, indicating Neutral sentiment, and missing fundamental narrative information prevents a clear contrarian signal.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (57.6). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 71,
+        "reasoning_en": "[Primary CEO: The multi-timeframe context shows a BULLISH trend on both the 1H and 4H timeframes. The Candle_Agent reports a BULLISH signal with 80% confidence due to a Bullish Liquidity Sweep pattern. The Order_Book_Agent also reports a BULLISH signal with 87% confidence, indicating a significant imbalance in the order book. The Indicator_Agent reports a BULLISH signal with 65% confidence, citing a neutral RSI and a price above the EMA-20. The News_Agent and OI_Funding_Agent report NEUTRAL signals. Given the strong confluence of BULLISH signals across multiple analysts and the alignment of the 1H and 4H trends, the decision is to enter a LONG position.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the Primary CEO's proposed LONG position on WBTC-USD. Both 1H and 4H timeframes remain firmly in a bullish macro regime. The recent dip to 77,775 completed a clean bullish liquidity sweep, followed by aggressive buy absorption and a strong push back above 78,500. Order book depth shows clear buyer imbalance (+0.54) with a supportive bid wall, while RSI remains at a healthy 57.6 with price trading above key moving averages. With funding neutral and sentiment supportive, confluence heavily favors upside continuation.]",
+        "reasoning_ru": "",
+        "consensus_summary": "",
+        "mtf_validation": "",
+        "hold_category": "NONE",
+        "primary_conviction": 60,
+        "escalated": true
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 24.66,
+        "notional_size_usd": 986.46,
+        "margin_usd": 98.65,
+        "leverage": 10,
+        "contracts": 0.012562528653659992,
+        "margin_pct": 20.0,
+        "entry_price": 78524.0,
+        "take_profit_price": 84413.3,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 76560.9,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.85,
+        "liquidation_price": 0.0,
+        "position_size_pct": 20.0
+    },
+    "status": "VETOED"
+}

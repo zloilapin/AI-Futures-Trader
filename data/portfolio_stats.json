@@ -1,1 +1,8 @@
-{"total_pnl_usd": -1.688710625961995, "win_count": 6, "loss_count": 13, "recent_streak": ["LOSS", "LOSS", "LOSS", "WIN", "WIN", "WIN", "WIN", "LOSS", "WIN", "LOSS"], "initial_deposit": 59.536, "net_transfers": 0.0}
+{
+    "total_pnl_usd": 0.0,
+    "win_count": 0,
+    "loss_count": 0,
+    "recent_streak": [],
+    "initial_deposit": 0.0,
+    "net_transfers": 0.0
+}

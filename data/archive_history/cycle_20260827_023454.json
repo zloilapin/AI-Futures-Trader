@@ -1,0 +1,70 @@
+{
+    "symbol": "BTC-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0012%) и волатилен (ATR 0.3247%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 1.0000. Значительный перевес покупателей (imbalance: 0.67). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Fear & Greed Index: 71, indicating Neutral sentiment. No clear catalyst or narrative to suggest a contrarian opportunity.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BEARISH",
+            "confidence": 65,
+            "reasoning": "RSI перекуплен (71.6). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 72,
+        "reasoning_en": "[Primary CEO: The current market trend is bullish across all timeframes (15m, 1h, 4h), with a full alignment in the multi-timeframe context. The Order Book Agent reports a significant imbalance (0.67) in favor of buyers, indicating a potential buying opportunity. However, the Indicator Agent reports an RSI value of 71.6, which is close to overbought levels. The News Agent and OI Funding Agent report neutral signals. Considering the strong bullish trend and the imbalance in the order book, the decision is to go LONG, but with caution due to the overbought RSI levels.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the LONG decision. We have full multi-timeframe alignment across 15m, 1h, and 4h trends, paired with strong spot orderbook buy-side dominance (imbalance 0.67). While RSI is elevated at 71.6, in a strong momentum breakout above 80,000, overbought RSI reflects trend strength rather than immediate exhaustion, supported by neutral funding rates.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Trend with Order Book Imbalance",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 76.19,
+        "margin_usd": 7.62,
+        "leverage": 10,
+        "contracts": 0.00095,
+        "margin_pct": 19.48,
+        "entry_price": 80200.0,
+        "take_profit_price": 86215.0,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 78195.0,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 0.0,
+        "position_size_pct": 19.48
+    },
+    "status": "VETOED"
+}

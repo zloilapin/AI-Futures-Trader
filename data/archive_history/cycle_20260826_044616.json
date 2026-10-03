@@ -1,0 +1,70 @@
+{
+    "symbol": "BNB-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0014%) и волатилен (ATR 0.2964%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.0100. Значительный перевес покупателей (imbalance: 1.91). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "The Fear & Greed Index is at Neutral (65), indicating a lack of clear narrative. Expect choppy, range-bound price action without strong conviction.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (61.7). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 77,
+        "reasoning_en": "[Primary CEO: Based on the provided market data and analyst reports, the trend is bullish across all time frames (15m, 1h, 4h). The Order Book Agent reports a significant imbalance (1.91) with a spike in buy orders, indicating a potential buying opportunity. The Indicator Agent reports a neutral RSI (61.7), which does not contradict the bullish trend. The News Agent reports a neutral Fear & Greed Index (65), indicating a lack of clear narrative. However, the overall trend and order book imbalance suggest a bullish direction.]\n\n[ESCALATION GEMINI VERDICT: Full MTF bullish alignment confirmed across 15m, 1h, and 4h timeframes. The recent impulsive move up to 707.93 broke local consolidation with strong volume, and current consolidation around 703.52 represents a healthy pullback. The Order Book shows strong buyer dominance with a 1.91 imbalance and bid support, while RSI at 61.7 leaves ample room for continuation without being overbought. Confirming the Primary CEO's LONG proposal.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Trend with Order Book Imbalance",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 77.39,
+        "margin_usd": 7.74,
+        "leverage": 10,
+        "contracts": 0.11,
+        "margin_pct": 19.79,
+        "entry_price": 703.52,
+        "take_profit_price": 756.284,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 685.932,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 0.0,
+        "position_size_pct": 19.79
+    },
+    "status": "VETOED"
+}

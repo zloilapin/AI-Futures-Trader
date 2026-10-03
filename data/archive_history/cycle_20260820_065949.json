@@ -1,0 +1,70 @@
+{
+    "symbol": "ZEC",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0704%) и волатилен (ATR 0.8377%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "BULLISH",
+            "confidence": 75,
+            "reasoning": "Бычье поглощение. Сильный импульс (Displacement), перекрывающий предыдущее падение.",
+            "pattern_detected": "Bullish Engulfing",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Спред 0.4000. Баланс покупателей и продавцов нейтрален (imbalance: 0.00)",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 80,
+            "reasoning": "Фандинг сильно негативный (-0.0135%). Шорты перегружены, риск шорт-сквиза",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 80,
+            "reasoning": "Neutral sentiment (40-60) indicates a lack of clear narrative; expect choppy, range-bound price action without strong conviction.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (57.4). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 74,
+        "reasoning_en": "[Primary CEO: The 1H and 4H trends are both BULLISH, indicating a strong uptrend. The Candle_Agent reports a BULLISH signal with 75% confidence due to a Bullish Engulfing pattern. The OI_Funding_Agent also reports a BULLISH signal with 80% confidence, citing a negative funding rate. The Indicator_Agent reports a BULLISH signal with 65% confidence due to a neutral RSI value. The News_Agent reports a NEUTRAL signal with 80% confidence, indicating a lack of clear narrative. The Order_Book_Agent reports a NEUTRAL signal with 50% confidence, citing a balanced order book. The score breakdown reflects the confluence of these signals, with a strong emphasis on the BULLISH trends and the Candle_Agent's pattern detection.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the LONG decision on ZEC. Both higher timeframes (1H and 4H) maintain strong bullish market structure, and the recent 15M pullback held the 560.80 support zone before printing a sharp bullish displacement candle back to 568.27. Crucially, the derivatives landscape shows heavily negative funding (-0.0135%), creating prime conditions for an aggressive short squeeze as short-sellers get trapped on higher-timeframe trend continuation. Indicator RSI at 57.4 leaves ample room for upward expansion without overbought constraints.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Trend Alignment with Support from Multiple Agents",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": "EXCESSIVE_RISK",
+        "reasoning": "❌ ОТКЛОНЕНО (EXCESSIVE_RISK): Actual risk $1.28 exceeds allowed risk $1.23. | Math calculated based on AGGRESSIVE profile. SL=554.06325, TP=610.89025, RR=1.53",
+        "risk_amount_usd": 1.23,
+        "notional_size_usd": 51.14,
+        "margin_usd": 5.11,
+        "leverage": 10,
+        "contracts": 0.09,
+        "margin_pct": 5.21,
+        "entry_price": 568.27,
+        "take_profit_price": 610.89025,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 554.06325,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 1.53,
+        "liquidation_price": 522.8084,
+        "position_size_pct": 5.21
+    },
+    "status": "VETOED"
+}

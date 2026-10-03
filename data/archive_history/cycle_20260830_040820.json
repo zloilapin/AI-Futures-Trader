@@ -1,0 +1,72 @@
+{
+    "symbol": "ETH-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0041%) и волатилен (ATR 0.1356%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "BULLISH",
+            "confidence": 80,
+            "reasoning": "Длинная нижняя тень. Сбор ликвидности (стопов) снизу и агрессивный откуп.",
+            "pattern_detected": "Bullish Liquidity Sweep",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.1000. Значительный перевес покупателей (imbalance: 1.16). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (-0.0000%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Sentiment score of 69 indicates Neutral sentiment (40-60). Expect choppy, range-bound price action without strong conviction.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (59.9). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 77,
+        "reasoning_en": "[Primary CEO: The Candle_Agent and Order_Book_Agent report bullish signals with high confidence, while the Indicator_Agent also reports a bullish signal. The News_Agent and OI_Funding_Agent report neutral signals. The 4H trend is bullish, and the 1H trend is neutral. The MTF alignment is mixed chop. The historical trade memory shows a mix of winning and losing trades, but the overall PNL is positive. The past lessons learned do not apply to this specific trade setup.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the Primary CEO's proposed LONG on ETH-USD. The 15-minute timeframe completed a clear liquidity sweep of local lows at 2452.2 with an aggressive push back to the 2459.9 level. The 4H structural trend remains bullish, and the order book displays significant buyer skew with an imbalance score of 1.16 and tight bid-ask spreads. Price trading above the 20 EMA and neutral funding further support a continuation toward the 2465+ resistance area.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Signals from Multiple Agents",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE",
+        "primary_conviction": 60,
+        "escalated": true
+    },
+    "risk_assessment": {
+        "approved": true,
+        "veto_category": null,
+        "reasoning": "Math calculated based on AGGRESSIVE profile. SL=2398.4025, TP=2644.3925, RR=2.85",
+        "risk_amount_usd": 11.81,
+        "notional_size_usd": 472.3,
+        "margin_usd": 47.23,
+        "leverage": 10,
+        "contracts": 0.192,
+        "margin_pct": 10.0,
+        "entry_price": 2459.9,
+        "take_profit_price": 2644.3925,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 2398.4025,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.85,
+        "liquidation_price": 0.0,
+        "position_size_pct": 10.0
+    },
+    "status": "APPROVED"
+}

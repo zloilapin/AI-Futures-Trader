@@ -1,0 +1,70 @@
+{
+    "symbol": "BNB-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0015%) и волатилен (ATR 0.4535%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.0100. Значительный перевес покупателей (imbalance: 1.86). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "BEARISH",
+            "confidence": 80,
+            "reasoning": "Extreme Greed (Fear & Greed Index: 72) indicates a high risk of a severe correction. Retail is bragging about gains, and the market lacks a clear narrative for a sustained upward trend.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (57.8). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 74,
+        "reasoning_en": "[Primary CEO: The current market trend is bullish across all timeframes (15m, 1h, 4h). The Order Book Agent reports a significant imbalance (1.86) in favor of buyers, indicating a potential buying opportunity. However, the News Agent reports extreme greed (Fear & Greed Index: 72), which could lead to a severe correction. The Indicator Agent reports a neutral RSI (57.8), but the price is above the EMA-20. Considering the bullish trend and the buying opportunity, but also being cautious of the potential correction, the decision is to go LONG with a score breakdown reflecting the mixed signals.]\n\n[ESCALATION GEMINI VERDICT: Strong multi-timeframe alignment across 15m, 1h, and 4h confirms robust bullish momentum for BNB-USD. Order book dynamics exhibit significant buyer support with a 1.86 imbalance ratio and tight spreads. Technical indicators show healthy continuation potential, with RSI at 57.8 remaining well below overbought territory while holding firmly above the 20-EMA. Derivatives data confirms neutral funding (0.0001%), indicating the rally is not overleveraged. While the News Agent flags elevated sentiment (Fear & Greed Index at 72), structural trend strength and order book bid support justify confirming the LONG setup.]",
+        "reasoning_ru": "",
+        "consensus_summary": "",
+        "mtf_validation": "",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 81.54,
+        "margin_usd": 8.15,
+        "leverage": 10,
+        "contracts": 0.12,
+        "margin_pct": 20.84,
+        "entry_price": 679.47,
+        "take_profit_price": 730.43025,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 662.48325,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 618.3177,
+        "position_size_pct": 20.84
+    },
+    "status": "VETOED"
+}

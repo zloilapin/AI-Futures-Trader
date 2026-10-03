@@ -54,7 +54,13 @@ class TradeLogger:
         with open(file_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(log_data, ensure_ascii=False) + "\n")
             
-        print(f"[{agent_name}] {message}")
+        try:
+            print(f"[{agent_name}] {message}")
+        except UnicodeEncodeError:
+            try:
+                print(f"[{agent_name}] {message}".encode("utf-8", errors="replace").decode(sys.stdout.encoding or "utf-8", errors="replace"))
+            except Exception:
+                pass
 
     def info(self, message: str, **kwargs):
         """

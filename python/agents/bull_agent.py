@@ -24,9 +24,15 @@ class BullAgent(BaseAgent):
 
         self.logger.info(f"[{self.name}] Building LONG thesis for {symbol}...")
         
+        # Strip heavy candle arrays to save ~1,500 prompt tokens
+        clean_mtf = dict(mtf_data) if isinstance(mtf_data, dict) else {}
+        for tf_k in ["tf_15m", "tf_1h", "tf_4h"]:
+            if tf_k in clean_mtf and isinstance(clean_mtf[tf_k], dict):
+                clean_mtf[tf_k] = {k: v for k, v in clean_mtf[tf_k].items() if k != "candles_20"}
+
         payload = {
             "target_symbol": symbol,
-            "multi_timeframe_context": mtf_data,
+            "multi_timeframe_context": clean_mtf,
             "analyst_reports": analyst_reports
         }
         

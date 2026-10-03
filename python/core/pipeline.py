@@ -28,6 +28,7 @@ from services.telegram_service import TelegramService
 from core.interfaces import BaseTradingService
 from core.logger import TradeLogger
 from core.data_quality_guard import DataQualityGuard
+from core.llm_client import LLMClient
 
 @dataclass
 class AgentRegistry:
@@ -68,8 +69,39 @@ class TradingPipeline:
         self.services = services
         self.exchange_name = exchange_name
         self.data_guard = DataQualityGuard(self.services.logger)
+        self._cycle_running = False
+        self._effective_profile = getattr(config, "TRADING_PROFILE", "BALANCED")
+
+    @staticmethod
+    def _clean_mtf_for_llm(mtf: Dict[str, Any]) -> Dict[str, Any]:
+        """Strips heavy candle arrays (candles_20) from MTF context to save ~1,500 prompt tokens per LLM call."""
+        if not isinstance(mtf, dict):
+            return {}
+        clean = {
+            "trend_15m": mtf.get("trend_15m", "NEUTRAL"),
+            "trend_1h": mtf.get("trend_1h", "NEUTRAL"),
+            "trend_4h": mtf.get("trend_4h", "NEUTRAL"),
+            "mtf_alignment": mtf.get("mtf_alignment", "MIXED_CHOP")
+        }
+        for tf_key in ["tf_15m", "tf_1h", "tf_4h"]:
+            tf = mtf.get(tf_key)
+            if isinstance(tf, dict):
+                clean[tf_key] = {k: v for k, v in tf.items() if k != "candles_20"}
+        return clean
 
     async def run_cycle(self, cycle_number: int, force_scan: bool = False, skip_new_trades: bool = False):
+        # Fix #5: Prevent overlapping cycles
+        if self._cycle_running and not force_scan:
+            print("⏸️ [Pipeline] Предыдущий цикл ещё выполняется. Пропуск.")
+            return
+        self._cycle_running = True
+        try:
+            await self._run_cycle_inner(cycle_number, force_scan, skip_new_trades)
+        finally:
+            self._cycle_running = False
+
+    async def _run_cycle_inner(self, cycle_number: int, force_scan: bool = False, skip_new_trades: bool = False):
+        LLMClient.reset_cycle_tokens()
         is_rest, time_str = get_msk_status()
         profile = config.TRADING_PROFILE
 
@@ -104,9 +136,25 @@ class TradingPipeline:
                 if not force_scan:
                     return
 
+        # Синхронизация и проверка лимита открытых позиций ПЕРЕД анализом рынка
+        await self.run_sentinel_checks()
+
+        max_positions = getattr(config, "MAX_CONCURRENT_POSITIONS", 2)
+        active_pos_count = len(self.services.trading_service.active_positions)
+        if active_pos_count >= max_positions and not force_scan:
+            active_symbols = ", ".join(self.services.trading_service.active_positions.keys())
+            msg = (
+                f"⏸️ [Positions Cap] Достигнут лимит открытых позиций ({active_pos_count}/{max_positions}): [{active_symbols}].\n"
+                f"Новые сделки заблокированы. Сканирование рынка пропущено (экономия токенов 100%)."
+            )
+            print(f"\n{msg}\n")
+            self.services.logger.info(f"[System_Core] {msg}")
+            return
+
         # СТАДИЯ 0: REGIME DETECTION (Адаптивный профиль риска)
         self.services.logger.info("[Stage 0] Regime Agent определяет фазу рынка (BTC/ETH)...")
         macro_cache = {}
+        detected_regime = "RANGE_CHOPPY"
         try:
             btc_data = await self.services.fetcher.fetch_all_market_data("BTC-USD")
             eth_data = await self.services.fetcher.fetch_all_market_data("ETH-USD")
@@ -137,6 +185,7 @@ class TradingPipeline:
                 effective_profile = detected_profile
                 
             profile = effective_profile
+            self._effective_profile = profile
             
             print(f"🌍 [Macro Regime] Рынок находится в фазе: {detected_regime}")
             print(f"🛡️ [Risk Profile] Профиль риска на этот цикл: {profile}")
@@ -175,8 +224,6 @@ class TradingPipeline:
         any_signal_sent = False
         scan_summaries = []  # Сводка по каждому активу для отчёта ручного /scan
 
-        await self.run_sentinel_checks()
-
         # QW Quiet Rest: Выход из цикла, если сейчас тихий час и нет force_scan
         if is_rest and not force_scan:
             print(f"⏸️ [Schedule] Тихий час. Позиции проверены. Пропуск новых сделок.")
@@ -188,8 +235,9 @@ class TradingPipeline:
         # ИТЕРАЦИЯ ПО ВСЕМ АКТИВАМ
         for symbol in selected_assets:
             # QW #5: Check if we've reached the maximum number of concurrent positions
-            if len(self.services.trading_service.active_positions) >= getattr(config, "MAX_CONCURRENT_POSITIONS", 2):
-                msg = f"⏸️ Достигнут лимит одновременных позиций ({config.MAX_CONCURRENT_POSITIONS}). Пропуск новых активов."
+            max_cap = getattr(config, "MAX_CONCURRENT_POSITIONS", 2)
+            if len(self.services.trading_service.active_positions) >= max_cap:
+                msg = f"⏸️ Достигнут лимит одновременных позиций ({max_cap}). Пропуск новых активов."
                 print(msg)
                 self.services.logger.info(f"[System_Core] {msg}")
                 break
@@ -211,6 +259,10 @@ class TradingPipeline:
                     market_data["derivatives_data"] = {}
                 if "size_increment" in limits:
                     market_data["derivatives_data"]["size_increment"] = limits["size_increment"]
+                if "min_notional" in limits and limits["min_notional"] > 0:
+                    market_data["derivatives_data"]["min_notional"] = limits["min_notional"]
+                if "min_size" in limits:
+                    market_data["derivatives_data"]["min_size"] = limits["min_size"]
 
             except Exception as e:
                 print(f"❌ Ошибка загрузки данных для {symbol}: {e}. Пропускаем.")
@@ -294,22 +346,31 @@ class TradingPipeline:
                 continue
 
             # --- PRE-CEO FILTER ---
-            # Экономим токены Llama 70B: если все базовые агенты нейтральны, пропускаем актив
+            # Экономим токены LLM: если рынок в боковике/нет явного направленного перевеса, пропускаем актив
             has_directional_signal = False
             mtf_alignment = market_data.get("multi_timeframe", {}).get("mtf_alignment")
             
+            # Оцениваем консенсус локальных технических аналитиков (исключая рыночно-широкий News_Agent)
+            tech_bulls = sum(1 for r in valid_reports if r.get("agent_name") != "News_Agent" and str(r.get("signal", "")).upper() in ["BULLISH", "LONG"])
+            tech_bears = sum(1 for r in valid_reports if r.get("agent_name") != "News_Agent" and str(r.get("signal", "")).upper() in ["BEARISH", "SHORT"])
+
             if mtf_alignment == "FULL_ALIGNMENT":
                 has_directional_signal = True
-                self.services.logger.info(f"[System_Core] Pre-CEO Filter bypassed for {symbol} due to FULL_ALIGNMENT MTF trend.")
+                self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен из-за FULL_ALIGNMENT MTF trend.")
+            elif tech_bulls >= 2 and tech_bears <= 1:
+                has_directional_signal = True
+                self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (Bullish консенсус {tech_bulls} vs {tech_bears}).")
+            elif tech_bears >= 2 and tech_bulls <= 1:
+                has_directional_signal = True
+                self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (Bearish консенсус {tech_bears} vs {tech_bulls}).")
+            elif mtf_alignment == "COUNTER_TREND_WARNING" and (tech_bulls >= 1 or tech_bears >= 1):
+                has_directional_signal = True
+                self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (COUNTER_TREND_WARNING с подтверждением).")
             else:
-                for report in valid_reports:
-                    signal = str(report.get("signal", "NEUTRAL")).upper()
-                    if signal in ["BULLISH", "BEARISH", "LONG", "SHORT"]:
-                        has_directional_signal = True
-                        break
+                has_directional_signal = False
 
             if not has_directional_signal:
-                msg = f"⏸️ Пропуск {symbol}. Причина: Нет базовых сигналов (Pre-CEO Filter)."
+                msg = f"⏸️ Пропуск {symbol}. Причина: Боковик/нет консенсуса аналитиков (Pre-CEO Filter: bulls={tech_bulls}, bears={tech_bears}, MTF={mtf_alignment}). Экономим токены."
                 print(msg)
                 self.services.logger.info(f"[System_Core] {msg}")
 
@@ -321,8 +382,8 @@ class TradingPipeline:
                     "scanner_status": scanner_status,
                     "scanner_reason": scanner_reason if scanner_blocked else None,
                     "risk_approved": False,
-                    "risk_reason": "Pre-CEO Filter: все базовые аналитики нейтральны",
-                    "ceo_reasoning": "Bypassed",
+                    "risk_reason": "Pre-CEO Filter: нет направленного консенсуса аналитиков (боковик)",
+                    "ceo_reasoning": "Bypassed (Pre-CEO Filter)",
                     "status": "⏸️ НЕТ СИГНАЛА"
                 })
                 tracker.record_rejection("NO_SIGNAL")
@@ -331,9 +392,10 @@ class TradingPipeline:
             # СТАДИЯ 4: MULTI-AGENT DEBATE & CEO JUDGEMENT
             self.services.logger.info(f"[Stage 4] Bull and Bear agents debating on {symbol}...")
             
+            clean_mtf = self._clean_mtf_for_llm(market_data.get("multi_timeframe", {}))
             debate_payload = {
                 "symbol": symbol,
-                "multi_timeframe_context": market_data.get("multi_timeframe", {}),
+                "multi_timeframe_context": clean_mtf,
                 "analyst_reports": valid_reports
             }
             
@@ -343,23 +405,26 @@ class TradingPipeline:
                 self.agents.bear.analyze(debate_payload)
             )
             
-            print(f"🐂 Bull Thesis: {bull_verdict.get('summary', 'N/A')[:100]}...")
-            print(f"🐻 Bear Thesis: {bear_verdict.get('summary', 'N/A')[:100]}...")
+            bull_summary = str(bull_verdict.get('summary', 'N/A')).strip()
+            bear_summary = str(bear_verdict.get('summary', 'N/A')).strip()
+            print(f"🐂 Bull Thesis: {bull_summary}")
+            print(f"🐻 Bear Thesis: {bear_summary}")
             
             self.services.logger.info(f"[Stage 4] CEO Agent (Judge) evaluates the debate and MTF trend for {symbol}...")
             historical_context = self.agents.memory.get_recent_context(limit=3)
             
             ceo_payload = {
                 "symbol": symbol,
-                "multi_timeframe_context": market_data.get("multi_timeframe", {}),
+                "macro_regime": detected_regime,
+                "macro_profile": profile,
+                "multi_timeframe_context": clean_mtf,
                 "bull_thesis": bull_verdict,
                 "bear_thesis": bear_verdict,
                 "subordinate_analyst_reports": valid_reports,
                 "historical_context": historical_context,
                 "past_lessons_learned": recent_lessons,
                 "indicators": market_data.get("indicators", {}),
-                "news_data": market_data.get("news_data", {}),
-                "market_data": market_data
+                "news_data": market_data.get("news_data", {})
             }
             ceo_verdict = await self.agents.ceo.analyze(ceo_payload)
 
@@ -480,9 +545,15 @@ class TradingPipeline:
             except Exception as e:
                 self.services.logger.error(f"[Stage 5] Failed to fetch fresh price for {symbol}: {e}. Proceeding with signal price.")
                 
-            self.services.logger.info(f"[Stage 5] Risk Manager ({profile}) проверяет параметры сделки для {symbol}...")
+            self.services.logger.info(f"[Stage 5] Risk Manager ({profile}, Regime: {detected_regime}) проверяет параметры сделки для {symbol}...")
             portfolio_data["active_positions"] = self.services.trading_service.active_positions
-            risk_verdict = await self.agents.risk.analyze(ceo_verdict, portfolio_data, market_data, effective_profile=profile)
+            risk_verdict = await self.agents.risk.analyze(
+                ceo_verdict, 
+                portfolio_data, 
+                market_data, 
+                effective_profile=profile,
+                macro_regime=detected_regime
+            )
 
             if risk_verdict.get("approved"):
                 self.services.logger.info(f"✅ Status: APPROVED BY RISK MANAGER")
@@ -632,7 +703,10 @@ class TradingPipeline:
             # Отправляем без Markdown чтобы избежать ошибок парсинга спецсимволов
             await self.services.tg_sender.send_message(scan_reply, parse_mode="")
 
+        tok_stats = LLMClient.get_token_stats()
         print(f"\n=== ТОРГОВЫЙ ЦИКЛ №{cycle_number} УСПЕШНО ЗАВЕРШЕН ===")
+        print(f"📊 [РАСХОД ТОКЕНОВ] За цикл: {tok_stats['cycle_tokens']:,} токенов | Всего за сессию: {tok_stats['total_tokens']:,} (Prompt: {tok_stats['total_prompt_tokens']:,}, Output: {tok_stats['total_completion_tokens']:,})")
+        self.services.logger.info(f"[Tokens] Cycle #{cycle_number}: {tok_stats['cycle_tokens']:,} | Total Session: {tok_stats['total_tokens']:,}")
 
 
 
@@ -677,61 +751,38 @@ class TradingPipeline:
                     await self.services.tg_sender.broadcast_to_channel(closed_msg)
                     asyncio.create_task(safe_reflect(self.agents.reflector, closed, market_data))
                 
-                # СТАДИЯ 1.6: SENTINEL AGENT (PHASE 2) - SIGNAL EVOLUTION TRACKING
+                # СТАДИЯ 1.6: SENTINEL AGENT (PHASE 2) - DETERMINISTIC RISK CONTROL
                 if symbol in self.services.trading_service.active_positions:
-                    import time
-                    now = time.time()
-                    if not hasattr(self, "_sentinel_last_run"):
-                        self._sentinel_last_run = {}
-                    cooldown = getattr(config, "SENTINEL_COOLDOWN_SECONDS", 600)
-                    if now - self._sentinel_last_run.get(symbol, 0) < cooldown:
-                        continue
-                    self._sentinel_last_run[symbol] = now
-
                     pos = self.services.trading_service.active_positions[symbol]
                     if hasattr(self.services.logger, "debug"):
-                        self.services.logger.debug(f"[Stage 1.6] Sentinel Agent оценивает актуальность тезиса для {symbol}...")
+                        self.services.logger.debug(f"[Stage 1.6] Sentinel Agent оценивает актуальность SL для {symbol}...")
                     
-                    safe_pos = {k: str(v) if not isinstance(v, (int, float, str, bool, type(None))) else v for k, v in pos.items()}
-                    
-                    sentinel_payload = {
-                        "symbol": symbol,
-                        "position_details": safe_pos,
-                        "market_data": market_data,
-                        "original_thesis": pos.get("original_thesis", "No thesis recorded.")
-                    }
-                    sentinel_verdict = await self.agents.sentinel.analyze(sentinel_payload)
-                    
-                    if not hasattr(self, "_pending_sentinel_closes"):
-                        self._pending_sentinel_closes = {}
+                    # Fetch ATR (14-period ATR from indicators, fallback to 1% of price)
+                    atr_value = market_data.get("indicators", {}).get("atr_14", 0)
+                    if atr_value <= 0:
+                        atr_value = current_price * 0.01
                         
-                    if sentinel_verdict.get("decision") == "CLOSE_POSITION":
-                        count = self._pending_sentinel_closes.get(symbol, 0) + 1
-                        self._pending_sentinel_closes[symbol] = count
-                        
-                        if count >= 2:
-                            self.services.logger.warning(f"🚨 [Sentinel] Thesis invalidated for {symbol}! Triggering early exit (Confirmed).")
-                            print(f"🚨 [Sentinel] EARLY EXIT TRIGGERED for {symbol}. Reason: {sentinel_verdict.get('reasoning_en', '')}")
-                            await self.services.trading_service.force_close_position(symbol, bypass_check=False)
-                            
-                            early_exit_msg = (
-                                f"🚨 *SENTINEL EARLY EXIT / РАННИЙ ВЫХОД*\n\n"
+                    profile_rules = self.agents.risk._get_profile_rules(getattr(self, '_effective_profile', getattr(config, "TRADING_PROFILE", "BALANCED")))
+                    
+                    sentinel_verdict = await self.agents.sentinel.analyze(pos, market_data, profile_rules, atr_value)
+                    
+                    new_sl = sentinel_verdict.get("new_sl")
+                    new_state = sentinel_verdict.get("state")
+                    reasoning = sentinel_verdict.get("reasoning")
+                    
+                    if new_sl:
+                        success = await self.services.trading_service.update_stop_loss(symbol, new_sl)
+                        if success:
+                            pos["protection_state"] = new_state
+                            msg = (
+                                f"🛡 *SENTINEL UPDATE / ЗАЩИТА ПРИБЫЛИ*\n\n"
                                 f"🪙 *Asset / Монета:* `{symbol}`\n"
-                                f"📝 *Reason / Причина:* `{sentinel_verdict.get('reasoning_en', '')}`\n"
-                                f"🛡 *Action:* The original thesis was invalidated. Position closed to prevent further losses."
+                                f"🔄 *State / Статус:* `{new_state}`\n"
+                                f"🎯 *New SL / Новый стоп:* `${new_sl:.4f}`\n"
+                                f"📝 *Reason:* `{reasoning}`"
                             )
-                            await self.services.tg_sender.send_message(early_exit_msg)
-                            self._pending_sentinel_closes[symbol] = 0
-                        else:
-                            self.services.logger.info(f"⚠️ [Sentinel] First CLOSE vote for {symbol}. Waiting for confirmation on next tick.")
-                            print(f"⚠️ [Sentinel] {symbol} thesis questioned. Waiting for 1 more confirmation.")
-                    elif sentinel_verdict.get("decision") == "ERROR":
-                        self._pending_sentinel_closes[symbol] = 0
-                        self.services.logger.error(f"❌ [Sentinel] SENTINEL_UNAVAILABLE: {sentinel_verdict.get('reasoning_en')}")
-                    else:
-                        self._pending_sentinel_closes[symbol] = 0
-                        if hasattr(self.services.logger, "debug"):
-                            self.services.logger.debug(f"[Sentinel] Thesis intact for {symbol}.")
+                            print(f"🛡 [Sentinel] {symbol} SL updated to {new_sl:.4f} ({new_state})")
+                            await self.services.tg_sender.send_message(msg)
                         
                         
             except Exception as e:

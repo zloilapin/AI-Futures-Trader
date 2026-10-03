@@ -1,0 +1,70 @@
+{
+    "symbol": "BNB-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0014%) и волатилен (ATR 0.2524%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.0100. Значительный перевес покупателей (imbalance: 1.33). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Neutral sentiment (71) indicates a lack of clear narrative, expecting choppy, range-bound price action.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (69.7). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 77,
+        "reasoning_en": "[Primary CEO: The current market trend is bullish across all timeframes (15m, 1h, 4h). The Order Book Agent reports a bullish signal with a confidence of 90, indicating a significant imbalance in the order book. The Indicator Agent reports a neutral signal, but the RSI is below 70, which could indicate a potential buy signal. The News Agent reports a neutral sentiment, which does not strongly influence the decision. The historical trade memory shows a mix of winning and losing trades, but the overall performance is positive. The past lessons learned do not apply to this specific situation, as the 4H trend is bullish and the RSI is above 50. The score breakdown is as follows: candle (16), order book (12), derivatives (18), indicators (13), news (-2), and mtf (17). The total score is 74, which indicates a strong bullish signal.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the Primary CEO's LONG recommendation. BNB-USD exhibits pristine Full MTF bullish alignment across 15m, 1h, and 4h horizons. The Order Book Agent indicates decisive buyer dominance with a 1.33 imbalance ratio and solid bid depth. Indicator momentum remains robust with RSI around 69.7 and price comfortably trading above EMA-20 with zero evidence of bearish divergence. Derivatives funding is completely neutral (0.0001%), eliminating immediate liquidation or overheating risk. Overall confluence strongly warrants execution.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Trend Continuation",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 74.86,
+        "margin_usd": 7.49,
+        "leverage": 10,
+        "contracts": 0.105,
+        "margin_pct": 19.15,
+        "entry_price": 712.96,
+        "take_profit_price": 766.432,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 695.136,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 0.0,
+        "position_size_pct": 19.15
+    },
+    "status": "VETOED"
+}

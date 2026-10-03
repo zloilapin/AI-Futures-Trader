@@ -1,0 +1,70 @@
+{
+    "symbol": "ZEC-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0023%) и волатилен (ATR 0.9035%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.0200. Значительный перевес покупателей (imbalance: 0.73). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "BEARISH",
+            "confidence": 100,
+            "reasoning": "Market Sentiment: Greed (Fear & Greed Index: 74) indicates Extreme Greed, which aligns with the Euphoria & Exhaustion contrarian short signal.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (58.7). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 85,
+        "reasoning_en": "[Primary CEO: The multi-timeframe context indicates a bullish trend across the 15m, 1h, and 4h timeframes, with full alignment. The Order Book Agent reports a significant imbalance (0.73) in favor of buyers, suggesting a potential buying opportunity. The Indicator Agent reports a neutral RSI (58.7), but the price is above the EMA-20, indicating a potential bullish trend. However, the News Agent reports extreme greed (Fear & Greed Index: 74), which could be a contrarian signal for a short position. Considering the primary analysts (Price Action and Derivatives) and the confirmation tools (Indicators and Order Book), the score breakdown is as follows: candle (16), orderbook (12), derivatives (18), indicators (13), news (-2), and mtf (17). The total score is 74, indicating a moderately bullish signal. However, given the extreme greed reported by the News Agent, the decision is to exercise caution and not enter a long position.]\n\n[ESCALATION GEMINI VERDICT: OVERRIDE Primary CEO HOLD to LONG. The primary CEO erroneously vetoed a strong multi-timeframe bullish trend based solely on a high macro Fear & Greed Index (74). Looking at asset-specific metrics: 1) MTF is in full bullish alignment across 15m, 1h, and 4h; 2) Order book exhibits extreme buyer dominance with a 0.73 bid imbalance and structural support; 3) Funding rate is completely neutral (0.0001%), indicating spot-driven/healthy accumulation without overleveraged froth; 4) RSI sits comfortably at 58.7, well below overbought thresholds, while price consolidates firmly above EMA-20 following a healthy pullback. This is a high-probability trend continuation setup that warrants execution.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish trend with potential buying opportunity, but caution advised due to extreme greed",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": "MIN_NOTIONAL",
+        "reasoning": "❌ ОТКЛОНЕНО (MIN_NOTIONAL): Safe position size ($76.78) is less than exchange minimum ($100.00). | Math calculated based on AGGRESSIVE profile. SL=831.8115, TP=917.1255, RR=2.83",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 76.78,
+        "margin_usd": 7.68,
+        "leverage": 10,
+        "contracts": 0.09,
+        "margin_pct": 19.64,
+        "entry_price": 853.14,
+        "take_profit_price": 917.1255,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 831.8115,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 0.0,
+        "position_size_pct": 19.64
+    },
+    "status": "VETOED"
+}

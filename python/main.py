@@ -46,9 +46,13 @@ async def main():
     logger = TradeLogger()
     
     # 4-Tier Architecture LLMs (ALL via OpenRouter)
-    cheap_llm_client = LLMClient(provider="openrouter", model_name="meta-llama/llama-3.1-8b-instruct")
-    primary_ceo_llm = LLMClient(provider="openrouter", model_name="meta-llama/llama-3.3-70b-instruct")
-    escalation_ceo_llm = LLMClient(provider="openrouter", model_name="google/gemini-3.7-flash")
+    model_cheap = config.OPENROUTER_MODEL_CHEAP
+    model_ceo = config.OPENROUTER_MODEL_CEO
+    model_escalation = config.OPENROUTER_MODEL_ESCALATION
+    
+    cheap_llm_client = LLMClient(provider="openrouter", model_name=model_cheap)
+    primary_ceo_llm = LLMClient(provider="openrouter", model_name=model_ceo)
+    escalation_ceo_llm = LLMClient(provider="openrouter", model_name=model_escalation)
     tg_sender = TelegramService()
     print("Инициализация сервисов...")
     

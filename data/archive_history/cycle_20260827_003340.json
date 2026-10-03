@@ -1,0 +1,70 @@
+{
+    "symbol": "SOL-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0099%) и волатилен (ATR 0.5042%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.0100. Значительный перевес покупателей (imbalance: 1.16). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Neutral sentiment (71) indicates a lack of clear narrative or strong conviction.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 60,
+            "reasoning": "RSI нейтрален (54.1). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 71,
+        "reasoning_en": "[Primary CEO: The 1H and 4H trends are bullish, with the current price at 101.3. The Order Book Agent reports a bullish signal with 90% confidence, indicating a significant imbalance in the order book. The Indicator Agent reports a neutral signal with 60% confidence, but the RSI is neutral at 54.1. The News Agent reports a neutral sentiment with 50% confidence. The Candle Agent reports a neutral signal with 50% confidence. The past lessons learned do not indicate any warning signs for this trade. The score breakdown is as follows: candle (10), orderbook (18), derivatives (0, as there is no derivatives data), indicators (12), news (0, as there is no significant news), and mtf (20). The total score is 60, indicating a moderately bullish signal.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the Primary CEO's LONG proposal on SOL-USD. Both 1H and 4H timeframes remain firmly bullish following the impulsive breakout from the $96.00-$97.00 consolidation zone toward recent highs above $102.00. Current 15m action is a constructive sideways consolidation around $101.30, holding comfortably above EMA-20 with a neutral RSI of 54.1, leaving ample headroom for continuation. Crucially, the order book displays significant buyer demand with an imbalance ratio of 1.16 and supportive bid walls. With funding neutral (0.0001%) and no excessive leverage overheating, the risk-reward favors initiating a LONG position aligned with the higher-timeframe bullish momentum.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Moderate Bullish Signal",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 70.91,
+        "margin_usd": 7.09,
+        "leverage": 10,
+        "contracts": 0.7000000000000001,
+        "margin_pct": 18.13,
+        "entry_price": 101.3,
+        "take_profit_price": 108.8975,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 98.7675,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 0.0,
+        "position_size_pct": 18.13
+    },
+    "status": "VETOED"
+}

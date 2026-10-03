@@ -1,0 +1,70 @@
+{
+    "symbol": "ETH-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.004%) и волатилен (ATR 0.261%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.1000. Значительный перевес покупателей (imbalance: 0.88). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 45,
+            "reasoning": "Fear & Greed Index at 71 (Neutral) lacks clear narrative, expect choppy, range-bound price action due to lack of strong conviction.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 60,
+            "reasoning": "RSI нейтрален (53.9). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 75,
+        "reasoning_en": "[Primary CEO: The current market analysis suggests a mixed trend across different timeframes. The 4H trend is bullish, while the 1H and 15M trends are neutral. The Order Book Agent reports a bullish signal with a high confidence level of 90, indicating a potential buying opportunity. However, the Candle Agent and Indicator Agent report neutral signals. The News Agent also reports a neutral signal due to a lack of strong conviction in the market. The historical trade memory shows a mix of profitable and unprofitable trades, but no specific pattern or lesson that directly applies to the current market conditions. Given the mixed signals and the bullish 4H trend, the decision is to go LONG with a cautious approach, monitoring the market conditions closely for any potential trend reversal.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the LONG proposal. The macro 4H structure remains firmly bullish with price establishing a clean higher-low base near $2,490 after testing $2,514. The Order Book Agent exhibits heavy buyer dominance with an imbalance of 0.88 and significant bid wall support. Flat funding rates (+0.0001%) show no long-side exhaustion or excessive leverage crowding, while momentum indicators (RSI 53.9, holding above EMA-20) support continuation within the broader uptrend.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Mixed Signals: Bullish 4H Trend, Neutral 1H and 15M Trends",
+        "mtf_validation": "1H/4H Trend Alignment NOT VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 77.31,
+        "margin_usd": 7.73,
+        "leverage": 10,
+        "contracts": 0.031,
+        "margin_pct": 19.76,
+        "entry_price": 2493.8,
+        "take_profit_price": 2680.835,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 2431.455,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 0.0,
+        "position_size_pct": 19.76
+    },
+    "status": "VETOED"
+}

@@ -1,0 +1,70 @@
+{
+    "symbol": "SOL-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0096%) и волатилен (ATR 0.7463%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.0100. Значительный перевес покупателей (imbalance: 0.85). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Market sentiment score is 71, indicating Neutral sentiment, which typically leads to choppy, range-bound price action without strong conviction.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (65.4). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 79,
+        "reasoning_en": "[Primary CEO: Based on the provided market data and analyst reports, the trend on the 1H and 4H timeframes is BULLISH, which aligns with the Macro Trend Override rule. The Order Book Agent reports a significant imbalance (0.85) with a bullish signal, and the Indicator Agent reports a neutral RSI (65.4) but with a price above the EMA-20, indicating a bullish trend. However, the Candle Agent and OI Funding Agent report neutral signals. Considering the confluence of these reports and the absence of any extreme capitulation, the decision is to go LONG.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the LONG trade. The macro structure across 1H and 4H timeframes remains decisively bullish with substantial volume expansion. The 15M 'counter-trend' dip from 105.78 to 104.28 is a classic healthy consolidation on drying volume (declining from 10.1k to 1.9k volume), presenting an optimal continuation entry. Concurrently, the Order Book Agent exhibits strong buy-side absorption with an imbalance of 0.85 and solid bid walls, while neutral funding ensures no immediate liquidation cascade threat.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish trend alignment with Order Book imbalance and Indicator support",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 73.0,
+        "margin_usd": 7.3,
+        "leverage": 10,
+        "contracts": 0.7000000000000001,
+        "margin_pct": 18.67,
+        "entry_price": 104.28,
+        "take_profit_price": 112.101,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 101.673,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 0.0,
+        "position_size_pct": 18.67
+    },
+    "status": "VETOED"
+}

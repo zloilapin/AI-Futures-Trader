@@ -1,0 +1,70 @@
+{
+    "symbol": "BTC-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0373%) и волатилен (ATR 0.138%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "BULLISH",
+            "confidence": 75,
+            "reasoning": "Бычье поглощение. Сильный импульс (Displacement), перекрывающий предыдущее падение.",
+            "pattern_detected": "Bullish Engulfing",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 81,
+            "reasoning": "Спред 29.0000. Значительный перевес покупателей (imbalance: 0.42). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0000%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Fear & Greed Index of 68 indicates Neutral sentiment. Expect choppy, range-bound price action without strong conviction.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (57.9). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 75,
+        "reasoning_en": "[Primary CEO: Based on the provided market data, the Candle Agent and Order Book Agent both report bullish signals with high confidence. The Indicator Agent also reports a bullish signal. However, the News Agent and OI Funding Agent report neutral signals. The 1H and 4H trends are both bullish, which aligns with the bullish signals from the Candle and Order Book Agents. Considering the confluence of these signals and the alignment with the 1H and 4H trends, the decision is to go LONG.]\n\n[ESCALATION GEMINI VERDICT: Confirming the Primary CEO's LONG proposal. Both 1H and 4H market structures remain firmly bullish. The Order Book shows significant buyer imbalance (+0.42) with solid support walls below current price, while Candle and Indicator agents confirm upward displacement above EMA-20 with moderate RSI (57.9). Neutral funding rates provide clean runway without imminent long-squeeze overhead risk.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Confluence: Candle, Order Book, and Indicator Agents Align with 1H and 4H Trends",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 23.75,
+        "notional_size_usd": 948.55,
+        "margin_usd": 94.85,
+        "leverage": 10,
+        "contracts": 0.0122,
+        "margin_pct": 19.97,
+        "entry_price": 77750.0,
+        "take_profit_price": 83581.25,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 75806.25,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.85,
+        "liquidation_price": 0.0,
+        "position_size_pct": 19.97
+    },
+    "status": "VETOED"
+}

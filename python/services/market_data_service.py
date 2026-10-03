@@ -235,7 +235,8 @@ class MarketDataService:
         pair = self._normalize_pair(symbol)
         
         if getattr(self, "is_nado", False) or True: # Force Nado
-            candles = await self._fetch_nado_candles(symbol, interval_min, 20)
+            # CRITICAL: Fetch at least 50 candles so EMA-9 can properly converge. 20 is too few.
+            candles = await self._fetch_nado_candles(symbol, interval_min, 50)
             if candles:
                 closes = [c["close"] for c in candles]
                 highs = [c["high"] for c in candles]
@@ -745,6 +746,7 @@ class MarketDataService:
                         try:
                             result["size_increment"] = float(p.book_info.size_increment) / 1e18
                             result["min_size"] = float(getattr(p.book_info, "min_size", 0)) / 1e18
+                            result["min_notional"] = 0.0
                         except Exception:
                             pass
                         break

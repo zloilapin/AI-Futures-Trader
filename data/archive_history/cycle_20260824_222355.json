@@ -1,0 +1,70 @@
+{
+    "symbol": "HYPE-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0012%) и волатилен (ATR 0.6326%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.0010. Значительный перевес покупателей (imbalance: 1.17). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "BEARISH",
+            "confidence": 80,
+            "reasoning": "Extreme Greed (Fear & Greed Index: 74) suggests Euphoria & Exhaustion. Retail may be bragging about gains, increasing the risk of a severe correction.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (65.8). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 72,
+        "reasoning_en": "[Primary CEO: Based on the provided executive dashboard data, the trend on the 1H and 4H timeframes is bullish, which aligns with our macro trend override rule. The Order Book Agent reports a significant imbalance (1.17) in favor of buyers, indicating a potential buying opportunity. However, the News Agent suggests extreme greed in the market, which could lead to a correction. The Indicator Agent reports a neutral RSI (65.8), and the Candle Agent sees no significant patterns. Considering these factors, we assign scores as follows: candle (10) due to lack of clear patterns, order book (12) for the buyer imbalance, derivatives (15) as there's no clear signal from funding rates, indicators (10) for the neutral RSI, news (-5) for the potential correction indicated by extreme greed, and mtf (15) for the bullish trends on 1H and 4H timeframes.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the LONG proposal on HYPE-USD. Higher timeframe structure on 1H and 4H is strongly bullish with solid upward volume continuation. The 15M timeframe is merely undergoing healthy sideways consolidation between $80.50 and $81.30 following an aggressive breakout. Furthermore, the Order Book reflects sustained buyer support with an imbalance of 1.17 and key bid wall backing, while perpetual funding rate remains near baseline (0.0001%), showing room for further upside without severe leverage saturation.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Trends with Buyer Imbalance",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": "MIN_NOTIONAL",
+        "reasoning": "❌ ОТКЛОНЕНО (MIN_NOTIONAL): Safe position size ($72.98) is less than exchange minimum ($100.00). | Math calculated based on AGGRESSIVE profile. SL=79.0569, TP=87.1653, RR=2.83",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 72.98,
+        "margin_usd": 7.3,
+        "leverage": 10,
+        "contracts": 0.9,
+        "margin_pct": 18.67,
+        "entry_price": 81.084,
+        "take_profit_price": 87.1653,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 79.0569,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 0.0,
+        "position_size_pct": 18.67
+    },
+    "status": "VETOED"
+}

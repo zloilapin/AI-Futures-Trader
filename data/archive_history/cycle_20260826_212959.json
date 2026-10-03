@@ -1,0 +1,70 @@
+{
+    "symbol": "SOL-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0099%) и волатилен (ATR 0.5667%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.0100. Значительный перевес покупателей (imbalance: 0.93). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Market Sentiment Score is 71, indicating Neutral sentiment. No extreme Fear or Greed conditions met. No clear narrative or catalyst to support a strong BULLISH or BEARISH signal.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (58.4). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 73,
+        "reasoning_en": "[Primary CEO: The 1H and 4H trends are BULLISH, indicating a strong uptrend. The Order Book Agent reports a significant imbalance (0.93) in favor of buyers, suggesting a potential buying opportunity. The Indicator Agent reports a neutral RSI (58.4) and a price above the EMA-20, which could indicate a continuation of the uptrend. However, the Candle Agent reports no clear pattern, and the News Agent reports neutral sentiment. The Derivatives Agent reports a neutral funding rate (0.0001%). Considering the strong uptrend and buying imbalance, the decision is to go LONG.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the Primary CEO's LONG recommendation. The higher timeframe structure (1H and 4H) is decisively BULLISH after a major expansion leg. The 15M minor bearish signal reflects a healthy, shallow consolidation holding well above key support levels. Crucially, the order book exhibits extreme buyer dominance with an imbalance of 0.93 and strong bid walls, while funding rates remain completely neutral at 0.0001%, indicating no dangerous long crowding. RSI at 58.4 leaves ample room for further upside momentum.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Trend with Buying Imbalance",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 70.92,
+        "margin_usd": 7.09,
+        "leverage": 10,
+        "contracts": 0.7000000000000001,
+        "margin_pct": 18.13,
+        "entry_price": 101.31,
+        "take_profit_price": 108.90825,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 98.77725,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 0.0,
+        "position_size_pct": 18.13
+    },
+    "status": "VETOED"
+}

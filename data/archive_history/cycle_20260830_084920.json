@@ -1,0 +1,72 @@
+{
+    "symbol": "ETH-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.004%) и волатилен (ATR 0.2054%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.1000. Значительный перевес покупателей (imbalance: 0.96). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (-0.0000%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Neutral sentiment (Fear & Greed Index: 69) indicates lack of strong conviction; choppy, range-bound price action expected.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (69.7). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 77,
+        "reasoning_en": "[Primary CEO: The current market trend is bullish on both the 1H and 4H timeframes, with the 15m trend being neutral. The Order Book Agent reports a significant imbalance (0.96) in favor of buyers, indicating a potential buying opportunity. The Indicator Agent reports a neutral RSI (69.7), which does not strongly support or reject the bullish trend. The News Agent reports a neutral sentiment, which does not significantly impact the decision. The past lessons learned do not contain any warnings relevant to the current market conditions. Given the bullish trend and the significant buyer imbalance, the decision is to go LONG.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the LONG verdict with upgraded conviction. Both the 1H and 4H timeframes exhibit structural bullish momentum, breaking out toward 2481.4. The order book reflects overwhelming buy-side imbalance (0.96) indicating strong passive bid support and minimal immediate overhead resistance. With neutral funding (0.0000%), the trade is not crowded, and RSI momentum above the EMA-20 supports continuation toward higher liquidity pools.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Trend with Buyer Imbalance",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE",
+        "primary_conviction": 50,
+        "escalated": true
+    },
+    "risk_assessment": {
+        "approved": true,
+        "veto_category": null,
+        "reasoning": "Math calculated based on AGGRESSIVE profile. SL=2419.365, TP=2667.505, RR=2.85",
+        "risk_amount_usd": 23.88,
+        "notional_size_usd": 952.86,
+        "margin_usd": 95.29,
+        "leverage": 10,
+        "contracts": 0.384,
+        "margin_pct": 19.95,
+        "entry_price": 2481.4,
+        "take_profit_price": 2667.505,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 2419.365,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.85,
+        "liquidation_price": 0.0,
+        "position_size_pct": 19.95
+    },
+    "status": "APPROVED"
+}

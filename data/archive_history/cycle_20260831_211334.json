@@ -1,0 +1,72 @@
+{
+    "symbol": "SOL-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0193%) и волатилен (ATR 0.2697%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.0200. Значительный перевес покупателей (imbalance: 1.05). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (-0.0000%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Neutral sentiment (40-60) means the market lacks a clear narrative. Expect choppy, range-bound price action without strong conviction.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (56.6). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 70,
+        "reasoning_en": "[Primary CEO: The market is currently in a BULLISH trend across all timeframes (15m, 1h, 4h). The Order Book Agent reports a significant imbalance (1.05) with a spread of 0.0200, indicating buying pressure. The Indicator Agent reports a neutral RSI (56.6) but notes that the price is above the EMA-20, suggesting a bullish bias. The News Agent reports a neutral sentiment. Given the bullish trend alignment and the buying pressure indicated by the Order Book Agent, we have a strong confluence of signals for a LONG position.]\n\n[ESCALATION GEMINI VERDICT: Confluence across all multi-timeframe horizons (15m, 1h, 4h) confirms strong bullish structural alignment. The order book reflects substantial buyer dominance with a 1.05 bid imbalance and tight 0.02 spread. Momentum indicators show healthy, non-overheated upside (RSI 56.6) with price sustained above key EMA levels. Derivatives and funding remain completely neutral, posing no liquidation overhang. Escalation verdict: CONFIRM LONG.]",
+        "reasoning_ru": "",
+        "consensus_summary": "",
+        "mtf_validation": "",
+        "hold_category": "NONE",
+        "primary_conviction": 75,
+        "escalated": true
+    },
+    "risk_assessment": {
+        "approved": true,
+        "veto_category": null,
+        "reasoning": "Math calculated based on AGGRESSIVE profile. SL=101.0685, TP=111.4345, RR=2.84",
+        "risk_amount_usd": 24.67,
+        "notional_size_usd": 985.81,
+        "margin_usd": 98.58,
+        "leverage": 10,
+        "contracts": 9.51,
+        "margin_pct": 19.98,
+        "entry_price": 103.66,
+        "take_profit_price": 111.4345,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 101.0685,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.84,
+        "liquidation_price": 0.0,
+        "position_size_pct": 19.98
+    },
+    "status": "APPROVED"
+}

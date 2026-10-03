@@ -77,3 +77,57 @@ def test_is_already_tracked_check():
         for k in service.active_positions
     )
     assert is_unknown_tracked is False
+
+
+@pytest.mark.asyncio
+async def test_sync_with_exchange_trigger_orders():
+    service = NadoTradingService.__new__(NadoTradingService)
+    service.logger = MagicMock()
+    service.is_connected = True
+    service.default_subaccount_id = "0x123"
+    service.product_map = {"ETH": 4, "ETH-USD": 4}
+    service.active_positions = {}
+    
+    # Mock positions from exchange
+    service.get_active_positions = AsyncMock(return_value=[{
+        "symbol": "ETH-USD",
+        "direction": "LONG",
+        "entry_price": 2500.0,
+        "size_usd": 150.0,
+        "leverage": 10,
+        "_product_id": 4
+    }])
+    
+    # Mock trigger order objects
+    sl_req = MagicMock(spec=["oracle_price_below"])
+    sl_req.oracle_price_below = "2400000000000000000000"
+    tp_req = MagicMock(spec=["oracle_price_above"])
+    tp_req.oracle_price_above = "2700000000000000000000"
+    
+    sl_order = MagicMock()
+    sl_order.order.digest = "0xsl123"
+    sl_order.order.order.amount = "-60000000000000000"
+    sl_order.order.trigger.price_trigger.price_requirement = sl_req
+    sl_order.placed_at = 100
+    
+    tp_order = MagicMock()
+    tp_order.order.digest = "0xtp123"
+    tp_order.order.order.amount = "-60000000000000000"
+    tp_order.order.trigger.price_trigger.price_requirement = tp_req
+    tp_order.placed_at = 100
+    
+    service._fetch_trigger_orders = AsyncMock(return_value=[sl_order, tp_order])
+    async def mock_trailing(sym): pass
+    service._trailing_stop_monitor = mock_trailing
+    
+    await service.sync_with_exchange()
+    
+    assert "ETH-USD" in service.active_positions
+    pos = service.active_positions["ETH-USD"]
+    assert pos["direction"] == "LONG"
+    assert pos["entry_price"] == 2500.0
+    assert pos["tp_price"] == 2700.0
+    assert pos["sl_price"] == 2400.0
+    assert pos["sl_digest"] == "0xsl123"
+    assert pos["unverified_triggers"] is False
+

@@ -1,0 +1,70 @@
+{
+    "symbol": "SOL-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0095%) и волатилен (ATR 0.6923%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.0100. Значительный перевес покупателей (imbalance: 0.80). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Sentiment score is 71 (Neutral), no extreme Fear or Greed, no clear narrative, and no missing data.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BEARISH",
+            "confidence": 65,
+            "reasoning": "RSI перекуплен (77.2). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 79,
+        "reasoning_en": "[Primary CEO: The current market trend for SOL-USD is BULLISH across all timeframes (15m, 1h, 4h) with a full alignment, indicating a strong upward momentum. The Order Book Agent reports a significant imbalance (0.80) with a notable spread (0.0100), suggesting a potential buying opportunity. However, the Indicator Agent signals a BEARISH sentiment due to an overbought RSI (77.2) and the price being above the EMA-20. The News Agent and OI Funding Agent report neutral sentiments. Considering the Macro Trend Override rule, since the 1H and 4H trends are BULLISH, we should not fight the trend unless there's extreme capitulation, which is not reported. The historical trade memory and past lessons learned do not indicate a similar setup that would suggest aborting the trade. Thus, the decision is based on the confluence of bullish trends and order book imbalance, despite some bearish indicators.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms and upgrades the LONG setup on SOL-USD. Market structure demonstrates strong full multi-timeframe alignment (15m, 1h, and 4h all bullish) backed by substantial volume expansion on the breakout toward 105.00. Orderbook shows heavy buy-side dominance with an imbalance of 0.80 and tight spread. While 15m RSI is elevated at 77.2, derivatives funding remains completely neutral at 0.0001%, indicating that the rally is spot/organic driven rather than an over-leveraged long squeeze prone to immediate liquidation. In strong trend-continuation environments, overbought indicators reflect momentum rather than an immediate reversal signal.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Trend with Order Book Imbalance",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 73.43,
+        "margin_usd": 7.34,
+        "leverage": 10,
+        "contracts": 0.7000000000000001,
+        "margin_pct": 18.77,
+        "entry_price": 104.9,
+        "take_profit_price": 112.7675,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 102.2775,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 0.0,
+        "position_size_pct": 18.77
+    },
+    "status": "VETOED"
+}

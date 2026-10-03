@@ -1,0 +1,70 @@
+{
+    "symbol": "HYPE-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0012%) и волатилен (ATR 0.5235%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 85,
+            "reasoning": "Спред 0.0010. Значительный перевес покупателей (imbalance: 0.51). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 60,
+            "reasoning": "Neutral sentiment (Fear & Greed Index: 71) indicates a lack of clear narrative, expecting choppy, range-bound price action.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (55.8). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 77,
+        "reasoning_en": "[Primary CEO: The current market trend is bullish across all timeframes (15m, 1h, 4h). The Order Book Agent reports a significant imbalance (0.51) in favor of buyers, indicating a potential buying opportunity. The Indicator Agent reports a neutral RSI (55.8), which does not indicate overbought or oversold conditions. The News Agent reports a neutral sentiment, which does not have a significant impact on the decision. The historical trade memory shows a mix of winning and losing trades, but the overall performance is positive. The past lessons learned do not apply to the current market conditions. Based on the confluence of these factors, the decision is to enter a LONG position.]\n\n[ESCALATION GEMINI VERDICT: Full multi-timeframe alignment across 15m, 1h, and 4h timeframes confirms solid structural bullish momentum. The Order Book displays a substantial bid imbalance (+0.51) with strong support walls holding price above recent consolidation. Technical indicators remain favorably poised with RSI at 55.8, indicating ample upside potential before overbought conditions, while price maintains strength above the 20 EMA. Uncrowded funding (0.0001%) provides a clean runway for continuation. Confirmed LONG position.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Trend with Buying Opportunity",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 73.44,
+        "margin_usd": 7.34,
+        "leverage": 10,
+        "contracts": 0.9,
+        "margin_pct": 18.77,
+        "entry_price": 81.598,
+        "take_profit_price": 87.71785,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 79.55805,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 0.0,
+        "position_size_pct": 18.77
+    },
+    "status": "VETOED"
+}

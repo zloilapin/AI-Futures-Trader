@@ -1,0 +1,70 @@
+{
+    "symbol": "HYPE-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0012%) и волатилен (ATR 0.4863%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 85,
+            "reasoning": "Спред 0.0010. Значительный перевес покупателей (imbalance: 0.50). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "BEARISH",
+            "confidence": 80,
+            "reasoning": "Extreme Greed (Fear & Greed Index: 71) indicates market exhaustion; retail is likely bragging about gains, increasing the risk of a severe correction.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (57.8). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 70,
+        "reasoning_en": "[Primary CEO: The current market trend is bullish across all timeframes (15m, 1h, 4h), with the Order Book Agent reporting a significant imbalance in favor of buyers (0.50). The Indicator Agent reports a neutral RSI (57.8), but the price is above the EMA-20. However, the News Agent reports extreme greed in the market (Fear & Greed Index: 71), indicating potential market exhaustion. The Candle Agent is neutral. Given the strong bullish trend and buyer imbalance, but also considering the potential for market exhaustion, the decision is to go LONG with caution.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the LONG proposal. The market exhibits full bullish multi-timeframe alignment across 15m, 1h, and 4h intervals. The latest 15m candle closed at the period high with surging volume, indicating strong breakout momentum. The order book displays a substantial 0.50 buyer imbalance with strong bid support. RSI at 57.8 leaves significant room for continuation before reaching overbought territory. While the Fear & Greed index is high (71), underlying momentum and spot liquidity firmly favor the upside.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Trend with Buyer Imbalance, but Potential Market Exhaustion",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 73.58,
+        "margin_usd": 7.36,
+        "leverage": 10,
+        "contracts": 0.9,
+        "margin_pct": 18.82,
+        "entry_price": 81.754,
+        "take_profit_price": 87.88555,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 79.71015,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 0.0,
+        "position_size_pct": 18.82
+    },
+    "status": "VETOED"
+}

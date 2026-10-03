@@ -1,0 +1,70 @@
+{
+    "symbol": "SOL-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0109%) и волатилен (ATR 0.6566%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.0100. Значительный перевес покупателей (imbalance: 0.83). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Market Sentiment: Greed (Fear & Greed Index: 72), falls into The Choppy Middle category, indicating a lack of clear narrative and likely choppy price action.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (64.0). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 80,
+        "reasoning_en": "[Primary CEO: The current market trend is BULLISH across all timeframes (15m, 1h, 4h). The Order Book Agent reports a significant imbalance (0.83) with a notable spread (0.0100), indicating a potential buying opportunity. The Indicator Agent reports a neutral RSI (64.0) with the price above EMA-20, supporting the BULLISH trend. However, the Candle Agent and News Agent report neutral signals. Considering the strong BULLISH trend and the Order Book imbalance, the decision is to go LONG.]\n\n[ESCALATION GEMINI VERDICT: Supreme Escalation AI approves the LONG decision on SOL-USD. There is clear Full MTF Alignment with solid bullish trends sustained across the 15m, 1h, and 4h horizons. The Order Book displays a commanding buyer imbalance of 0.83 with active bid support, while RSI at 64.0 shows healthy upward momentum above EMA-20 without being overbought. The setup offers favorable continuation conditions with strong trend confluence.]",
+        "reasoning_ru": "",
+        "consensus_summary": "BULLISH Trend with Order Book Imbalance",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 78.23,
+        "margin_usd": 7.82,
+        "leverage": 10,
+        "contracts": 0.85,
+        "margin_pct": 19.99,
+        "entry_price": 92.04,
+        "take_profit_price": 98.943,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 89.739,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 83.7564,
+        "position_size_pct": 19.99
+    },
+    "status": "VETOED"
+}

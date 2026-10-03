@@ -1,0 +1,70 @@
+{
+    "symbol": "BNB-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0014%) и волатилен (ATR 0.294%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 87,
+            "reasoning": "Спред 0.0100. Значительный перевес покупателей (imbalance: 0.55). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "The Fear & Greed Index is at 65, indicating Neutral sentiment. The market lacks a clear narrative, so expect choppy, range-bound price action without strong conviction.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BEARISH",
+            "confidence": 65,
+            "reasoning": "RSI перекуплен (70.4). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 75,
+        "reasoning_en": "[Primary CEO: Based on the provided market data and analyst reports, the trend across all timeframes (15m, 1h, 4h) is bullish. The Order Book Agent reports a bullish signal with a confidence of 87, indicating a significant imbalance in favor of buyers. However, the Indicator Agent reports a bearish signal due to the RSI being overbought. The News Agent and OI Funding Agent report neutral signals. Considering the Macro Trend Override rule, we should not fight the 1H/4H trend unless there is extreme capitulation, which is not present in this case. The score breakdown is as follows: candle (16) based on the bullish trend, order book (12) due to the imbalance, derivatives (18) reflecting the overall market sentiment, indicators (13) considering the overbought RSI, news (-2) for the neutral sentiment, and mtf (17) aligning with the bullish trend. The total score is 74, indicating a strong bullish signal.]\n\n[ESCALATION GEMINI VERDICT: Escalation review fully validates the LONG proposal on BNB-USD. Multi-timeframe alignment across 15m, 1h, and 4h is definitively bullish, backed by a strong volume expansion during the breakout above 700 to 707.93. Order book orderflow demonstrates heavy buyer dominance (0.55 imbalance and bid support). Neutral funding rate confirms the move is spot/volume-driven rather than an overheated leveraged squeeze. RSI at 70 is standard momentum behavior during an early breakout phase and not a counter-trend reversal trigger. The trade is confirmed.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Trend with Buyer Imbalance",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 77.66,
+        "margin_usd": 7.77,
+        "leverage": 10,
+        "contracts": 0.11,
+        "margin_pct": 19.87,
+        "entry_price": 706.02,
+        "take_profit_price": 758.9715,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 688.3695,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 0.0,
+        "position_size_pct": 19.87
+    },
+    "status": "VETOED"
+}

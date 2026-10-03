@@ -1,0 +1,71 @@
+[
+    {
+        "trade_outcome": "WIN",
+        "root_cause": "Entered LONG into a multi-timeframe bull trend with RSI below 80 and MACD signal line showing bullish crossover",
+        "actionable_rule": "FAVORABLE ENTRY: Consider entering LONG when multi-timeframe trend is BULLISH, RSI < 80, and MACD shows a bullish crossover",
+        "reasoning": "The trade was profitable due to alignment of trends across multiple timeframes, a relatively high RSI that still indicated room for upside, and a bullish MACD signal. These conditions suggest a strong bullish momentum that supported the long position."
+    },
+    {
+        "trade_outcome": "WIN",
+        "root_cause": "Entered LONG with FULL_ALIGNMENT of BULLISH trends across 15m, 1h, and 4h timeframes and RSI > 70, indicating overbought conditions but strong momentum",
+        "actionable_rule": "WARNING: Be cautious entering LONG when RSI > 70, even with BULLISH trends across multiple timeframes, as it may indicate overbought conditions prone to correction",
+        "reasoning": "The trade was successful with a 0.4% gain. The root cause of this success is attributed to the alignment of BULLISH trends across the 15m, 1h, and 4h timeframes. However, the RSI at 78.38 indicates overbought conditions. The trade was closed by a take-profit (TP) trigger, and despite the bullish market context, the high RSI suggests a cautious approach in similar future scenarios to avoid potential corrections."
+    },
+    {
+        "trade_outcome": "WIN",
+        "root_cause": "Entered LONG in full multi-timeframe alignment with bullish trends on 15m, 1h, and 4h timeframes",
+        "actionable_rule": "CONFIRMATION RULE: Only enter LONG when there is full alignment of bullish trends across 15m, 1h, and 4h timeframes and RSI < 80",
+        "reasoning": "The trade was successful due to entering LONG in a strong bullish trend across multiple timeframes. The RSI was above 70 but not overbought at 78.38, and the MACD signal confirmed a bullish trend."
+    },
+    {
+        "trade_outcome": "LOSS",
+        "root_cause": "Entered LONG into mixed trend environment with high RSI value (61.8) while 15m and 1h trends were neutral",
+        "actionable_rule": "WARNING: Avoid entering LONG positions when RSI > 60 and multi-timeframe trend alignment is MIXED_CHOP, especially if lower timeframes (15m, 1h) do not confirm the bullish trend of higher timeframes (4h)",
+        "reasoning": "The post-mortem analysis reveals that the trade was entered into a mixed trend environment where the 4h timeframe was bullish but the 15m and 1h timeframes were neutral. The high RSI value of 61.8 and the mixed trend alignment (MIXED_CHOP) should have served as a warning against entering a long position. The lack of confirmation from lower timeframes (15m, 1h) further supports this conclusion. This outcome suggests the need for a more cautious approach when trends are not aligned across multiple timeframes and when the RSI is near overbought conditions."
+    },
+    {
+        "reasoning": "The trade was closed with a small profit, but the market context suggests that the trade was held during a bearish 15m trend and a neutral 1h and 4h trend. The RSI (42.53) indicates that the symbol was not overbought or oversold. The MACD signal is bullish, but the EMA trend is down. The trade was triggered by a take-profit (TP) order, indicating that the position was initially profitable but ultimately resulted in a small gain.",
+        "root_cause": "Held position during bearish 15m trend with neutral 1h and 4h trends, and low RSI",
+        "actionable_rule": "WARNING: Avoid holding positions when 15m trend is BEARISH and RSI < 50, unless 1h and 4h trends are strongly BULLISH",
+        "trade_outcome": "WIN"
+    },
+    {
+        "symbol": "ETH",
+        "reasoning": "Closed a LONG position in ETH due to a TIME_STOP. The position was entered with an Entry Price of 1889.11.",
+        "root_cause": "Entered LONG into 4H bear trend with RSI value (44.88) below 50 and MACD bearish signal, indicating sell pressure in the 4-hour timeframe.",
+        "actionable_rule": "WARNING: When trading in a BEARISH 4H trend with RSI < 50 and MACD bearish signal, use caution when entering LONG positions, and closely monitor market conditions for a potential trend reversal.",
+        "trade_outcome": "LOSS"
+    },
+    {
+        "symbol": "BTC",
+        "reasoning": [
+            "Closed LONG position on a minor TIME_STOP, with a tiny gain of $0.0033 (0.022%).",
+            "At close, the 4H trend was clearly BEARISH (-1.17% change in price)",
+            "In addition, the 14-period RSI at 54.82 was in an uptrend, not showing significant divergence or sell signal."
+        ],
+        "root_cause": " Entered LONG despite BEARISH 4H trend and neutral 1h trend, potentially misjudging short-term volatility.",
+        "actionable_rule": " Be cautious when entering LONG in a market with a 4H BEARISH trend and avoid using TIME_STOPs with small gains.",
+        "trade_outcome": "WIN"
+    },
+    {
+        "symbol": "BTC/USD",
+        "reasoning": "The trade was closed with a loss, as the exit price (62816.0) is higher than the entry price (60000.0) for a SHORT position. The market context at the time of closing showed a BEARISH trend on the 1h and 4h timeframes, but the 15m timeframe was NEUTRAL. The RSI (34.48) was below 50, indicating a bearish momentum. However, the MACD signal was bearish, and the EMA trend was down, which should have supported the SHORT position. The trade was likely closed due to a stop-loss or take-profit order being triggered.",
+        "root_cause": "Entered SHORT into a bearish market with a low RSI, but the position was not managed properly, resulting in a loss.",
+        "actionable_rule": "WARNING: Do not enter SHORT when the market is already bearish and the RSI is below 50, unless there is a clear sign of a trend reversal or a strong support level.",
+        "trade_outcome": "LOSS"
+    },
+    {
+        "symbol": "ETH-USD",
+        "reasoning": "The trade was closed on-chain, indicating a loss. The 4H trend was bullish, but the RSI-14 was at 52.13, indicating overbought conditions. The MACD was bearish, and the candle patterns showed a strong bearish pattern. The news sentiment was 74, indicating greed.",
+        "root_cause": "Entered LONG in a 4H bullish trend with overbought conditions (RSI-14 > 50) and a bearish MACD.",
+        "actionable_rule": "WARNING: Do not enter LONG when the 4H trend is BULLISH and RSI-14 > 50, and the MACD is BEARISH.",
+        "trade_outcome": "LOSS"
+    },
+    {
+        "symbol": "BCH-USD",
+        "reasoning": "The trade was closed on-chain with a minor loss of -$0.18 (-0.25 USD with fees). Long entered at 255.38 and closed via protective trigger at 255.16 as the 15M trend reversed with overbought RSI (70.46).",
+        "root_cause": "Entered LONG during a bearish 15M trend and overbought RSI",
+        "actionable_rule": "WARNING: Do not enter LONG when 15M trend is BEARISH and RSI > 60",
+        "trade_outcome": "LOSS"
+    }
+]

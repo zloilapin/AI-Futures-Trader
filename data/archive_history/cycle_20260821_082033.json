@@ -1,0 +1,70 @@
+{
+    "symbol": "SOL-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0109%) и волатилен (ATR 0.664%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.0100. Значительный перевес покупателей (imbalance: 0.81). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Sentiment score of 72 indicates Neutral sentiment, lacking a clear narrative.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (58.9). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 77,
+        "reasoning_en": "[Primary CEO: The current market trend for SOL-USD is bullish across all timeframes (15m, 1h, 4h). The Order Book Agent reports a bullish signal with a confidence of 90, indicating a significant imbalance in favor of buyers. The Indicator Agent also reports a bullish signal with a confidence of 65. However, the Candle Agent and OI Funding Agent report neutral signals. The News Agent reports a neutral sentiment score of 72. Considering the bullish trend and the signals from the Order Book and Indicator Agents, the decision is to go LONG.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the LONG decision on SOL-USD with elevated conviction. Multi-timeframe trend alignment is cleanly bullish across 15m, 1h, and 4h charts. The Order Book displays strong buy-side support with an 81% imbalance and significant bid walls. Momentum indicators remain constructive with RSI at 58.9 sitting comfortably below overbought levels, allowing room for continuation above the 20 EMA. Neutral funding rate (0.0001%) confirms the move is spot-driven rather than an overheated perpetual squeeze.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Trend with Order Book and Indicator Support",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 77.94,
+        "margin_usd": 7.79,
+        "leverage": 10,
+        "contracts": 0.85,
+        "margin_pct": 19.92,
+        "entry_price": 91.69,
+        "take_profit_price": 98.56675,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 89.39775,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 83.4379,
+        "position_size_pct": 19.92
+    },
+    "status": "VETOED"
+}

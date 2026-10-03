@@ -1,0 +1,70 @@
+{
+    "symbol": "HYPE",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0506%) и волатилен (ATR 0.0%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Спред 0.0380. Баланс покупателей и продавцов нейтрален (imbalance: 0.00)",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0029%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "The Fear & Greed Index is at Neutral (72), indicating a lack of clear market narrative. Expect choppy, range-bound price action.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 60,
+            "reasoning": "RSI нейтрален (50.0). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 76,
+        "reasoning_en": "[Primary CEO: Based on the provided market data and analyst reports, the current trend is BULLISH on both the 1H and 4H timeframes. The Candle Agent and Order Book Agent report neutral signals, while the Indicator Agent reports a bullish signal with 60% confidence. The News Agent reports a neutral signal. Given the bullish trend and the lack of strong bearish signals, the decision is to go LONG. However, the Macro Sentiment Agent does not report extreme capitulation, and the MTF alignment is not verified as 'trend alignment', which would typically require a more cautious approach. The score breakdown reflects the bullish signals from the Indicator Agent and the overall market trend.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the LONG opportunity on HYPE. Both the 1H and 4H timeframes exhibit strong bullish structure with consecutive higher lows forming across the 15m consolidation (support stepping up from 73.04 to 74.57). The OI/Funding rate remains neutral at +0.0029%, indicating the trend is not overheated and has sufficient liquidity room to retest and break recent highs above 76.13. Technical indicators confirm price holding firmly above EMA-20 with healthy reset momentum.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish trend with neutral candle and order book signals, but bullish indicator signal",
+        "mtf_validation": "1H/4H Trend Alignment NOT VERIFIED due to counter-trend warning",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": "INSUFFICIENT_BALANCE",
+        "reasoning": "Math calculated based on AGGRESSIVE profile. SL=0.0, TP=0.0, RR=0.0",
+        "risk_amount_usd": 0.0,
+        "notional_size_usd": 0.0,
+        "margin_usd": 0.0,
+        "leverage": 10,
+        "contracts": 0.0,
+        "margin_pct": 0.0,
+        "entry_price": 75.171,
+        "take_profit_price": 0.0,
+        "take_profit_pct": 100.0,
+        "stop_loss_price": 0.0,
+        "stop_loss_pct": 100.0,
+        "risk_reward_ratio": 0.0,
+        "liquidation_price": 0.0,
+        "position_size_pct": 0.0
+    },
+    "status": "VETOED"
+}

@@ -1,0 +1,70 @@
+{
+    "symbol": "BNB-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0014%) и волатилен (ATR 0.3251%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "BULLISH",
+            "confidence": 80,
+            "reasoning": "Длинная нижняя тень. Сбор ликвидности (стопов) снизу и агрессивный откуп.",
+            "pattern_detected": "Bullish Liquidity Sweep",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.0100. Значительный перевес покупателей (imbalance: 0.96). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "The Fear & Greed Index is at 65, indicating Neutral sentiment, with no clear narrative or extreme sentiment to provide a contrarian opportunity.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 60,
+            "reasoning": "RSI нейтрален (54.4). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 78,
+        "reasoning_en": "[Primary CEO: Based on the provided market data and analyst reports, the trend on the 1H and 4H timeframes is bullish, which aligns with our Macro Trend Override rule. The Candle Agent and Order Book Agent both report bullish signals with high confidence, indicating a potential Bullish Liquidity Sweep and significant buy orders. However, the OI Funding Agent and News Agent report neutral signals. The Indicator Agent reports a bullish signal but with lower confidence. Given the strong bullish signals from the primary analysts and the alignment with the macro trend, we proceed with a long position.]\n\n[ESCALATION GEMINI VERDICT: Supreme Escalation AI approves and confirms the Primary CEO's LONG proposal on BNB-USD. The multi-timeframe structure is solidly bullish on 1H and 4H charts, with the 15M timeframe showing a healthy consolidation and aggressive lower wick absorption after a liquidity sweep down to 697.64. The order book displays overwhelming buyer dominance with an extreme 0.96 bid imbalance, while RSI sits comfortably at 54.4 with price holding firmly above the EMA-20. Neutral funding indicates the move is not overheated, providing strong risk/reward for trend continuation.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Confluence: Liquidity Sweep + Bullish Trend",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 77.18,
+        "margin_usd": 7.72,
+        "leverage": 10,
+        "contracts": 0.11,
+        "margin_pct": 19.74,
+        "entry_price": 701.65,
+        "take_profit_price": 754.27375,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 684.10875,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 0.0,
+        "position_size_pct": 19.74
+    },
+    "status": "VETOED"
+}

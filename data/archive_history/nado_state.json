@@ -1,0 +1,17 @@
+{
+    "initial_balance": 492.94,
+    "win_count": 8,
+    "loss_count": 3,
+    "recent_streak": [
+        "WIN",
+        "WIN",
+        "WIN",
+        "WIN",
+        "WIN",
+        "WIN",
+        "LOSS",
+        "LOSS",
+        "WIN",
+        "LOSS"
+    ]
+}

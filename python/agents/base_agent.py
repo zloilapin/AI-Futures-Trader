@@ -29,7 +29,7 @@ class BaseAgent:
         """
         current_prompt = prompt
         if required_keys:
-            current_prompt += f"\n\n[SCHEMA REQUIRED]: You MUST return a JSON object with EXACTLY these keys: {', '.join(required_keys)}"
+            current_prompt += f"\n\n[SCHEMA REQUIRED]: You MUST return a JSON object starting with '{{' and ending with '}}' with EXACTLY these keys: {', '.join(required_keys)}. Never output plain text lists or conversational explanations outside the JSON."
             
         for attempt in range(max_retries):
             response_text = await self.llm_client.generate(current_prompt)

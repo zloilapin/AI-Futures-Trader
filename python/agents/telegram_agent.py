@@ -65,9 +65,9 @@ class TelegramAgent(BaseAgent):
         escalated = ceo.get("escalated", False)
         
         if escalated:
-            conv_str = f"Llama {primary_conviction}% | Gemini {conviction}% (Escalated)"
+            conv_str = f"Primary {primary_conviction}% | Escalation {conviction}% (Consensus)"
         else:
-            conv_str = f"Llama {primary_conviction}% (Direct)"
+            conv_str = f"Primary {primary_conviction}% (Direct)"
 
         message = (
             f"🚀 *TRADE SIGNAL | NADO DEX{net_badge}*\n\n"

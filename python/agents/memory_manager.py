@@ -53,8 +53,8 @@ class MemoryManager:
         """
         context = []
         try:
-            # Ищем все json файлы в папке
-            files = [f for f in os.listdir(self.storage_path) if f.endswith('.json')]
+            # Ищем только json файлы циклов в папке
+            files = [f for f in os.listdir(self.storage_path) if f.startswith('cycle_') and f.endswith('.json')]
             # Сортируем от самых новых к старым (т.к. в имени дата и время)
             files.sort(reverse=True)
             

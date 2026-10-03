@@ -1,0 +1,72 @@
+{
+    "symbol": "BTC-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0344%) и волатилен (ATR 0.208%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 27.0000. Значительный перевес покупателей (imbalance: 0.64). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (-0.0000%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "The Fear & Greed Index is at 62, indicating neutral sentiment. No extreme fear or greed, so no clear contrarian opportunity is identified.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (58.2). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 75,
+        "reasoning_en": "[Primary CEO: The market is currently in a BULLISH trend across all timeframes (15m, 1h, 4h). The Order Book Agent reports a significant imbalance in favor of buyers (imbalance: 0.64), indicating a potential buying opportunity. The Indicator Agent reports a neutral RSI (58.2) and a bullish EMA-20, further supporting the bullish case. However, the Candle Agent and News Agent report neutral signals. Given the strong bullish trend and buying pressure, the decision is to enter a LONG position.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the Primary CEO's LONG proposal. All timeframes (15m, 1h, 4h) are fully aligned in a bullish structure. Order book shows strong buy-side dominance with a 0.64 imbalance and solid bid depth support. Neutral funding rate indicates no overheated leverage, leaving substantial room for upward momentum with RSI comfortably at 58.2 above the EMA-20.]",
+        "reasoning_ru": "",
+        "consensus_summary": "",
+        "mtf_validation": "",
+        "hold_category": "NONE",
+        "primary_conviction": 72,
+        "escalated": true
+    },
+    "risk_assessment": {
+        "approved": true,
+        "veto_category": null,
+        "reasoning": "Math calculated based on AGGRESSIVE profile. SL=76519.95, TP=84368.15, RR=2.85",
+        "risk_amount_usd": 24.65,
+        "notional_size_usd": 984.95,
+        "margin_usd": 98.5,
+        "leverage": 10,
+        "contracts": 0.01255,
+        "margin_pct": 19.98,
+        "entry_price": 78482.0,
+        "take_profit_price": 84368.15,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 76519.95,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.85,
+        "liquidation_price": 0.0,
+        "position_size_pct": 19.98
+    },
+    "status": "APPROVED"
+}

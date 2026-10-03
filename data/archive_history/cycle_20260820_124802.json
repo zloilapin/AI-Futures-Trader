@@ -1,0 +1,70 @@
+{
+    "symbol": "ETH",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0086%) и волатилен (ATR 0.6602%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Спред 0.2000. Баланс покупателей и продавцов нейтрален (imbalance: 0.00)",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0000%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Neutral sentiment (40-60) indicates the market lacks a clear narrative, expecting choppy, range-bound price action without strong conviction.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (55.7). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 72,
+        "reasoning_en": "[Primary CEO: The current market trend is mixed, with a bullish trend on the 4H timeframe and a neutral trend on the 1H timeframe. The Candle_Agent and Order_Book_Agent report neutral signals, while the Indicator_Agent reports a bullish signal. The News_Agent reports a neutral sentiment. The historical trade memory shows a mix of winning and losing trades. The past lessons learned warn against entering long positions in a bearish 4H trend, but the current 4H trend is bullish. Therefore, the decision is to go LONG.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the LONG decision. ETH has experienced a strong macro expansion on the 4H timeframe (rallying from ~1900 to highs of 2371). The current price action on the 1H and 15m timeframes reflects a healthy consolidation and higher-low structure holding above the 2310 support zone. With the Indicator Agent reporting bullish posture (above EMA-20, RSI at 55.7) and neutral funding providing ample runway without overcrowding, continuation to the upside remains the highest probability path.]",
+        "reasoning_ru": "",
+        "consensus_summary": "",
+        "mtf_validation": "",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": true,
+        "veto_category": null,
+        "reasoning": "Math calculated based on AGGRESSIVE profile. SL=2267.5575, TP=2500.1275, RR=2.85",
+        "risk_amount_usd": 5.51,
+        "notional_size_usd": 220.94,
+        "margin_usd": 22.09,
+        "leverage": 10,
+        "contracts": 0.095,
+        "margin_pct": 20.05,
+        "entry_price": 2325.7,
+        "take_profit_price": 2500.1275,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 2267.5575,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.85,
+        "liquidation_price": 2104.7585,
+        "position_size_pct": 20.05
+    },
+    "status": "APPROVED"
+}

@@ -1,0 +1,70 @@
+{
+    "symbol": "BNB-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0015%) и волатилен (ATR 0.4626%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.0100. Значительный перевес покупателей (imbalance: 1.27). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "BEARISH",
+            "confidence": 50,
+            "reasoning": "Euphoria & Exhaustion. Fear & Greed Index at 72, indicating Extreme Greed, suggesting the market has run out of marginal buyers and a severe correction is possible.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (57.0). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 75,
+        "reasoning_en": "[Primary CEO: Based on the provided market data and analyst reports, the trend is bullish across all timeframes (15m, 1h, 4h). The Order Book Agent reports a significant imbalance (1.27) with a bullish signal, and the Indicator Agent reports a neutral RSI (57.0) with the price above the EMA-20. However, the News Agent reports a bearish signal due to extreme greed in the market. Considering the primary analysts (Price Action and Derivatives) and the confirmation tools (Order Book and Indicators), the overall score breakdown is as follows: candle (16), orderbook (12), derivatives (18), indicators (13), news (-2), and mtf (17). The Macro Trend Override rule does not apply since the 1H and 4H trends are bullish. The past lessons learned do not indicate a similar setup to abort the trade.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the Primary CEO's LONG proposal. BNB-USD displays strong multi-timeframe bullish alignment across 15m, 1h, and 4h charts with consistent higher lows and price sustaining above EMA-20. The order book demonstrates significant buy-side support with a 1.27 imbalance ratio and tight spreads. RSI at 57.0 provides ample headroom before overbought conditions emerge, while flat funding rates indicate the rally is structurally sound rather than an overheated leverage chase. General macro greed sentiment is insufficient to override pristine multi-timeframe technical momentum.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Trend with Imbalance and Neutral RSI",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 81.57,
+        "margin_usd": 8.16,
+        "leverage": 10,
+        "contracts": 0.12,
+        "margin_pct": 20.86,
+        "entry_price": 679.78,
+        "take_profit_price": 730.7635,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 662.7855,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 618.5998,
+        "position_size_pct": 20.86
+    },
+    "status": "VETOED"
+}

@@ -1,0 +1,72 @@
+{
+    "symbol": "BTC-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0038%) и волатилен (ATR 0.2198%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "BULLISH",
+            "confidence": 75,
+            "reasoning": "Бычье поглощение. Сильный импульс (Displacement), перекрывающий предыдущее падение.",
+            "pattern_detected": "Bullish Engulfing",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 83,
+            "reasoning": "Спред 3.0000. Значительный перевес покупателей (imbalance: 0.46). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (-0.0000%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Neutral sentiment (62) means the market lacks a clear narrative. Expect choppy, range-bound price action without strong conviction.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (58.6). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 73,
+        "reasoning_en": "[Primary CEO: The multi-timeframe context indicates a BULLISH trend across all timeframes (15m, 1h, 4h), with FULL_ALIGNMENT. The Candle_Agent reports a BULLISH signal with 75% confidence, detecting a Bullish Engulfing pattern. The Order_Book_Agent also reports a BULLISH signal with 83% confidence, citing a significant imbalance in the order book. The Indicator_Agent reports a BULLISH signal with 65% confidence, based on the RSI and EMA-20. The News_Agent and OI_Funding_Agent report NEUTRAL signals. Given the strong confluence of BULLISH signals across multiple analysts and the aligned multi-timeframe context, the decision is to enter a LONG position.]\n\n[ESCALATION GEMINI VERDICT: Concur with Primary CEO verdict. Full multi-timeframe bullish alignment across 15m, 1h, and 4h charts confirms solid upward momentum. Order book imbalance (+0.46) and strong buyer displacement provide excellent market microstructure support, while RSI at 58.6 and price holding above EMA-20 indicate room for continuation without overbought conditions. Neutral funding ensures the move is spot/delta driven rather than crowded leverage.]",
+        "reasoning_ru": "",
+        "consensus_summary": "",
+        "mtf_validation": "",
+        "hold_category": "NONE",
+        "primary_conviction": 76,
+        "escalated": true
+    },
+    "risk_assessment": {
+        "approved": true,
+        "veto_category": null,
+        "reasoning": "Math calculated based on AGGRESSIVE profile. SL=76563.825, TP=84416.525, RR=2.85",
+        "risk_amount_usd": 24.66,
+        "notional_size_usd": 985.51,
+        "margin_usd": 98.55,
+        "leverage": 10,
+        "contracts": 0.01255,
+        "margin_pct": 19.98,
+        "entry_price": 78527.0,
+        "take_profit_price": 84416.525,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 76563.825,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.85,
+        "liquidation_price": 0.0,
+        "position_size_pct": 19.98
+    },
+    "status": "APPROVED"
+}

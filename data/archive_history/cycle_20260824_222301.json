@@ -1,0 +1,70 @@
+{
+    "symbol": "BTC-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0012%) и волатилен (ATR 0.3837%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 1.0000. Значительный перевес покупателей (imbalance: 1.34). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "BEARISH",
+            "confidence": 80,
+            "reasoning": "The Fear & Greed Index is at Extreme Greed (74), indicating a high risk of a severe correction. The market has run out of marginal buyers, and retail is bragging about gains, suggesting a contrarian short opportunity.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (63.2). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 73,
+        "reasoning_en": "[Primary CEO: The current market trend is bullish across all timeframes (15m, 1h, 4h), with a full alignment in the multi-timeframe context. The Order Book Agent reports a bullish signal with a confidence of 90, indicating a significant imbalance in favor of buyers. The Indicator Agent reports a bullish signal with a confidence of 65, citing a neutral RSI value and a price above the EMA-20. However, the News Agent reports a bearish signal with a confidence of 80, citing extreme greed in the market. The Candle Agent and OI Funding Agent report neutral signals. Given the strong bullish trend and the bullish signals from the Order Book and Indicator Agents, the decision is to go LONG.]\n\n[ESCALATION GEMINI VERDICT: Escalation Review: Full multi-timeframe alignment across 15m, 1h, and 4h confirms powerful bullish momentum. The Order Book Agent indicates solid buyer dominance with an imbalance ratio of 1.34 and strong bid support. Furthermore, funding rates remain remarkably neutral at 0.0001%, demonstrating that this expansion is not over-leveraged and has room to extend. While the News Agent flags elevated market greed (74), momentum and structural indicators (RSI 63.2 holding above EMA-20) strongly favor continuation after the recent 15m base at 80.2k-80.5k. Verdict: Decisive LONG confirmed.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish trend with bullish Order Book and Indicator signals, despite bearish News signal",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": "MIN_NOTIONAL",
+        "reasoning": "❌ ОТКЛОНЕНО (MIN_NOTIONAL): Safe position size ($76.49) is less than exchange minimum ($100.00). | Math calculated based on AGGRESSIVE profile. SL=78502.125, TP=86553.625, RR=2.83",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 76.49,
+        "margin_usd": 7.65,
+        "leverage": 10,
+        "contracts": 0.00095,
+        "margin_pct": 19.56,
+        "entry_price": 80515.0,
+        "take_profit_price": 86553.625,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 78502.125,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 0.0,
+        "position_size_pct": 19.56
+    },
+    "status": "VETOED"
+}

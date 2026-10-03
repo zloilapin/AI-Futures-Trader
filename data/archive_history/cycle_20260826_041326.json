@@ -1,0 +1,70 @@
+{
+    "symbol": "ETH-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0041%) и волатилен (ATR 0.3111%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.1000. Значительный перевес покупателей (imbalance: 0.82). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Neutral sentiment (65) means the market lacks a clear narrative, expecting choppy, range-bound price action without strong conviction.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (60.9). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 72,
+        "reasoning_en": "[Primary CEO: The current market trend is bullish across all timeframes (15m, 1h, 4h). The Order Book Agent reports a bullish signal with a confidence of 90, indicating a significant imbalance in favor of buyers. The Indicator Agent also reports a bullish signal with a confidence of 65, citing a neutral RSI and a price above the EMA-20. However, the Candle Agent and News Agent report neutral signals. The Derivatives Agent is not explicitly mentioned but based on the provided data, we can infer a bullish sentiment due to the overall trend alignment and the Order Book imbalance. Considering the Macro Trend Override rule, we should not fight the 1H/4H trend unless there's extreme capitulation, which is not indicated here. Thus, the decision leans towards a LONG position due to the strong confluence of bullish signals across key analysts and the alignment with the macro trend.]\n\n[ESCALATION GEMINI VERDICT: Concurring with the Primary CEO's LONG decision. ETH exhibits clear full multi-timeframe alignment (15m, 1h, and 4h all bullish) with strong support established around the 2440-2450 level. The Order Book Agent indicates exceptional buyer dominance with an 0.82 bid imbalance and tight spreads. Indicators show RSI at a healthy 60.9 above the EMA-20, leaving room for upside expansion without overbought exhaustion. Derivatives and funding remain balanced, reducing the risk of a squeeze against the trade.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Consensus: Order Book Imbalance + Indicator Alignment + Macro Trend",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 76.53,
+        "margin_usd": 7.65,
+        "leverage": 10,
+        "contracts": 0.031,
+        "margin_pct": 19.56,
+        "entry_price": 2468.6,
+        "take_profit_price": 2653.745,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 2406.885,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 0.0,
+        "position_size_pct": 19.56
+    },
+    "status": "VETOED"
+}

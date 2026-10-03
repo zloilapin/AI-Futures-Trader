@@ -1,0 +1,70 @@
+{
+    "symbol": "BNB-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0014%) и волатилен (ATR 0.2067%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.0100. Значительный перевес покупателей (imbalance: 0.68). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "BEARISH",
+            "confidence": 80,
+            "reasoning": "Euphoria & Exhaustion: The Fear & Greed Index is at Extreme Greed (71), indicating a high risk of a severe correction. Retail is bragging about gains, suggesting a lack of caution.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BEARISH",
+            "confidence": 65,
+            "reasoning": "RSI перекуплен (75.5). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 72,
+        "reasoning_en": "[Primary CEO: The current market trend is bullish across all timeframes (15m, 1h, 4h), with the 1h and 4h trends showing a strong bullish signal. The Order Book Agent reports a significant imbalance in favor of buyers, with a spread of 0.0100 and an imbalance of 0.68. However, the News Agent reports a high risk of a severe correction due to extreme greed in the market. The Indicator Agent reports an RSI of 75.5, which is overbought. Considering the confluence of signals, the decision is to go LONG, but with caution due to the potential for a trend reversal.]\n\n[ESCALATION GEMINI VERDICT: Overriding CEO hesitation: Full multi-timeframe bullish alignment across 15m, 1h, and 4h confirms strong institutional momentum. The 15m and 1h candles show clear volume expansion into breakout highs with substantial order book bid imbalance (+0.68). While RSI is elevated at 75.5 and sentiment indicates greed, in strong multi-timeframe trend expansions, overbought readings signify momentum strength rather than an immediate top. Low neutral funding rates further confirm that the move is not yet overcrowded by speculative long leverage.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Trend with Caution",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 78.2,
+        "margin_usd": 7.82,
+        "leverage": 10,
+        "contracts": 0.11,
+        "margin_pct": 19.99,
+        "entry_price": 710.9,
+        "take_profit_price": 764.2175,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 693.1275,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 0.0,
+        "position_size_pct": 19.99
+    },
+    "status": "VETOED"
+}

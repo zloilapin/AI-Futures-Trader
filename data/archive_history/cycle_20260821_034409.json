@@ -1,0 +1,70 @@
+{
+    "symbol": "XRP",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0291%) и волатилен (ATR 1.7197%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Спред 0.0004. Баланс покупателей и продавцов нейтрален (imbalance: 0.00)",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0000%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Market Sentiment is at Greed (Fear & Greed Index: 72), which does not trigger a clear contrarian opportunity. The sentiment score is neither in Extreme Fear nor Extreme Greed.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (57.9). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 71,
+        "reasoning_en": "[Primary CEO: The current market trend for XRP is bullish on the 1H and 4H timeframes, with a change percentage of 5.71 and 11.36 respectively. The Candle Agent and Order Book Agent report neutral signals, while the Indicator Agent reports a bullish signal with a confidence of 65. The News Agent reports a neutral signal. The historical trade memory shows a total PNL of 62.95 and a win count of 18. The past lessons learned warn against entering LONG positions in a BEARISH 4H trend, but the current trend is BULLISH. The score breakdown is as follows: candle (16), orderbook (12), derivatives (18), indicators (13), news (-2), mtf (17). The total score is 74, indicating a strong bullish signal.]\n\n[ESCALATION GEMINI VERDICT: The macro structure remains decisively bullish with strong high-volume momentum on both the 1H (+5.71%) and 4H (+11.36%) timeframes. While the 15M timeframe displays a short-term pullback from the 1.4311 local high, the last two 15M candles demonstrate price stabilization and bottom wick absorption around the 1.3670-1.3725 support zone. Funding rates remain flat at 0.0000%, indicating no overcrowded perpetual positioning, and the 1H RSI has cooled down to an optimal 57.9 level while holding firmly above the 20 EMA. This pullback provides an attractive risk-reward entry in alignment with the broader 4H macro expansion.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish trend on 1H and 4H timeframes, with bullish signal from Indicator Agent",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": "INSUFFICIENT_BALANCE",
+        "reasoning": "Math calculated based on AGGRESSIVE profile. SL=0.0, TP=0.0, RR=0.0",
+        "risk_amount_usd": 0.0,
+        "notional_size_usd": 0.0,
+        "margin_usd": 0.0,
+        "leverage": 10,
+        "contracts": 0.0,
+        "margin_pct": 0.0,
+        "entry_price": 1.3727,
+        "take_profit_price": 0.0,
+        "take_profit_pct": 100.0,
+        "stop_loss_price": 0.0,
+        "stop_loss_pct": 100.0,
+        "risk_reward_ratio": 0.0,
+        "liquidation_price": 0.0,
+        "position_size_pct": 0.0
+    },
+    "status": "VETOED"
+}

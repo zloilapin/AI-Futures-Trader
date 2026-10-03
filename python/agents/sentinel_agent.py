@@ -1,44 +1,102 @@
-import os
-from typing import Dict, Any
-
-from agents.base_agent import BaseAgent
+import logging
+from typing import Dict, Any, Optional
 from core.logger import TradeLogger
-from core.llm_client import LLMClient
-import json
 
-class SentinelAgent(BaseAgent):
+class SentinelAgent:
     """
-    The Sentinel Agent (Risk Overwatch).
-    Monitors active positions against current market conditions to see if the original thesis holds.
-    Can trigger an early exit if the thesis is invalidated.
+    Deterministic Execution/Risk Controller for active positions.
+    Manages Break-Even and Trailing Stops dynamically based on ATR.
+    Replaces the old LLM-based logic.
     """
-    def __init__(self, logger: TradeLogger, llm_client: LLMClient):
-        super().__init__("Sentinel_Agent", logger, llm_client)
-        prompt_path = os.path.join(os.path.dirname(__file__), "..", "prompts", "sentinel_prompt.txt")
-        with open(prompt_path, "r", encoding="utf-8") as f:
-            self.system_instruction = f.read()
+    def __init__(self, logger: TradeLogger, llm_client=None):
+        self.name = "Sentinel_Agent"
+        self.logger = logger
+        # llm_client kept for signature compatibility with main.py, but unused.
 
-    async def analyze(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        symbol = data.get("symbol")
-        position_details = data.get("position_details", {})
-        market_data = data.get("market_data", {})
-        original_thesis = data.get("original_thesis", "")
+    async def analyze(self, pos: Dict[str, Any], market_data: Dict[str, Any], profile_rules: dict, atr_value: float) -> Dict[str, Any]:
+        """
+        Evaluates if the SL should be moved to Break-Even or Trailed.
+        Enforces monotonic SL (never worsen).
+        """
+        entry = float(pos["entry_price"])
+        current_price = market_data.get("price_data", {}).get("current_price", 0)
+        current_sl = float(pos.get("sl_price", 0))
+        direction = pos.get("direction", "LONG").upper()
+        
+        highest = float(pos.get("highest_price", entry))
+        lowest = float(pos.get("lowest_price", entry))
+        current_state = pos.get("protection_state", "PROTECTED")
 
-        if hasattr(self.logger, "debug"):
-            self.logger.debug(f"[{self.name}] Checking health of active {position_details.get('direction', '')} position on {symbol}...")
-        
-        payload = {
-            "target_symbol": symbol,
-            "position_details": position_details,
-            "market_data": market_data,
-            "original_thesis": original_thesis
-        }
-        
-        data_string = json.dumps(payload, indent=2)
-        full_prompt = f"{self.system_instruction}\n\nData:\n{data_string}"
-        
-        try:
-            return await self.generate_json(full_prompt, required_keys=["decision", "reasoning_en"])
-        except Exception as e:
-            self.logger.error(f"[{self.name}] Failed to evaluate position: {e}")
-            return {"decision": "ERROR", "reasoning_en": f"Error: {e}"}
+        if current_price <= 0 or atr_value <= 0:
+            return {"new_sl": None, "state": current_state, "reasoning": "Invalid price or ATR data."}
+
+        # Profile parameters (fallback to defaults if not provided)
+        from core.config import config
+        be_atr = profile_rules.get("sentinel_be_atr", getattr(config, "SENTINEL_BE_ATR", 1.0))
+        trail_activation = profile_rules.get("sentinel_trail_activation_atr", getattr(config, "SENTINEL_TRAIL_ACTIVATION_ATR", 1.5))
+        trail_dist = profile_rules.get("sentinel_trail_distance_atr", getattr(config, "SENTINEL_TRAIL_DISTANCE_ATR", 1.5))
+        min_improve = profile_rules.get("sentinel_min_improve_atr", getattr(config, "SENTINEL_MIN_IMPROVE_ATR", 0.25))
+
+        # Calculate cost buffer (Estimated fees + slippage)
+        # Nado Taker fee is typically 0.05% (0.0005). Roundtrip = 0.1%. Slippage = 0.1%.
+        estimated_fees = entry * 0.001
+        slippage_buffer = entry * 0.001
+        cost_buffer = estimated_fees + slippage_buffer
+
+        candidate_sl = None
+        new_state = current_state
+        reasoning = ""
+
+        if direction == "LONG":
+            profit_distance = current_price - entry
+            
+            # 1. Break-Even Check
+            if profit_distance >= (be_atr * atr_value):
+                be_target = entry + cost_buffer
+                if current_sl < be_target:
+                    candidate_sl = be_target
+                    new_state = "BREAK_EVEN"
+                    reasoning = f"Price passed {be_atr}x ATR. SL moved to Break-Even + cost buffer."
+                    
+            # 2. Trailing Check
+            if profit_distance >= (trail_activation * atr_value):
+                trail_target = highest - (trail_dist * atr_value)
+                if candidate_sl is None or trail_target > candidate_sl:
+                    candidate_sl = trail_target
+                    new_state = "TRAILING"
+                    reasoning = f"Price passed {trail_activation}x ATR. SL trailed {trail_dist}x ATR from highest price."
+
+            # Enforce Monotonic SL (Never worsen)
+            if candidate_sl is not None:
+                new_sl = max(current_sl, candidate_sl) if current_sl > 0 else candidate_sl
+                # Check minimum improvement threshold
+                if current_sl == 0 or (new_sl - current_sl) >= (min_improve * atr_value):
+                    return {"new_sl": new_sl, "state": new_state, "reasoning": reasoning}
+
+        else: # SHORT
+            profit_distance = entry - current_price
+            
+            # 1. Break-Even Check
+            if profit_distance >= (be_atr * atr_value):
+                be_target = entry - cost_buffer
+                if current_sl > be_target or current_sl == 0:
+                    candidate_sl = be_target
+                    new_state = "BREAK_EVEN"
+                    reasoning = f"Price passed {be_atr}x ATR. SL moved to Break-Even + cost buffer."
+                    
+            # 2. Trailing Check
+            if profit_distance >= (trail_activation * atr_value):
+                trail_target = lowest + (trail_dist * atr_value)
+                if candidate_sl is None or trail_target < candidate_sl:
+                    candidate_sl = trail_target
+                    new_state = "TRAILING"
+                    reasoning = f"Price passed {trail_activation}x ATR. SL trailed {trail_dist}x ATR from lowest price."
+
+            # Enforce Monotonic SL (Never worsen)
+            if candidate_sl is not None:
+                new_sl = min(current_sl, candidate_sl) if current_sl > 0 else candidate_sl
+                # Check minimum improvement threshold
+                if current_sl == 0 or (current_sl - new_sl) >= (min_improve * atr_value):
+                    return {"new_sl": new_sl, "state": new_state, "reasoning": reasoning}
+
+        return {"new_sl": None, "state": current_state, "reasoning": "No update required."}

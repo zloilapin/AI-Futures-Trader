@@ -247,18 +247,15 @@ class TelegramBotListener:
             symbol = callback_data.split("_")[1]
             await tg.answer_callback_query(callback_id, f"Закрываю {symbol}... ⏳")
             
-            success, result = await self.trading_service.force_close_position(symbol)
+            success, pnl = await self.trading_service.force_close_position(symbol)
             if success:
-                mode = "👻 [ВИРТУАЛЬНО]" if result.get('is_virtual') else "⚡ [БОЕВАЯ]"
-                pnl = result.get('pnl_usd', 0)
-                roi = result.get('roi_pct', 0)
-                exit_price = result.get('exit_price', 0)
+                mode = "⚡ [БОЕВАЯ]"
                 emoji = "🎉" if pnl >= 0 else "🔻"
-                msg = f"{emoji} {mode} Сделка по {symbol} ЗАКРЫТА ВРУЧНУЮ!\n💰 PnL: `${pnl:+.2f}` (ROI: {roi:+.2f}%)\n🎯 Выход: `${exit_price:,.2f}`"
+                msg = f"{emoji} {mode} Сделка по {symbol} ЗАКРЫТА ВРУЧНУЮ!\n💰 PnL: `${pnl:+.2f}`"
                 await tg.send_message(msg)
                 await tg.broadcast_to_channel(msg)
             else:
-                await tg.send_message(f"❌ Ошибка закрытия {symbol}: {result}")
+                await tg.send_message(f"❌ Ошибка закрытия {symbol}.")
                 
         elif callback_data.startswith("setrisk_"):
             new_profile = callback_data.split("_")[1]

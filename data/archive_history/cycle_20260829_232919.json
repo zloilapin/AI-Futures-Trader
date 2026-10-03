@@ -1,0 +1,72 @@
+{
+    "symbol": "ETH-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0122%) и волатилен (ATR 0.1401%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.3000. Значительный перевес покупателей (imbalance: 1.03). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (-0.0000%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "The Fear & Greed Index is at 69, indicating Neutral sentiment, and the market lacks a clear narrative.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 60,
+            "reasoning": "RSI нейтрален (52.7). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 71,
+        "reasoning_en": "[Primary CEO: The 4H trend is bullish, and the Order Book Agent reports a significant imbalance (1.03) with a bullish signal. The Indicator Agent also reports a bullish signal with an RSI of 52.7. However, the Candle Agent and News Agent report neutral signals. The Derivatives Agent reports a neutral signal as well. Considering the bullish 4H trend and the bullish signals from the Order Book and Indicator Agents, we will assign a score of 18 to derivatives, 16 to candle, 12 to orderbook, 13 to indicators, -2 to news, and 17 to mtf. The total score is 54, indicating a bullish trend.]\n\n[ESCALATION GEMINI VERDICT: Confirming the LONG proposal. The 4H timeframe maintains a structural bullish uptrend, while the 15m and 1h consolidation around 2456 forms a solid base above the 20-period EMA. The Order Book displays a strong buy-side imbalance (1.03) with solid bid defense, and RSI at 52.7 provides ample upside room without exhaustion risk.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Trend with Significant Imbalance",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE",
+        "primary_conviction": 74,
+        "escalated": true
+    },
+    "risk_assessment": {
+        "approved": true,
+        "veto_category": null,
+        "reasoning": "Math calculated based on AGGRESSIVE profile. SL=2395.38, TP=2641.06, RR=2.85",
+        "risk_amount_usd": 23.69,
+        "notional_size_usd": 945.87,
+        "margin_usd": 94.59,
+        "leverage": 10,
+        "contracts": 0.385,
+        "margin_pct": 19.97,
+        "entry_price": 2456.8,
+        "take_profit_price": 2641.06,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 2395.38,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.85,
+        "liquidation_price": 0.0,
+        "position_size_pct": 19.97
+    },
+    "status": "APPROVED"
+}

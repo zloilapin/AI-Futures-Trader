@@ -1,0 +1,70 @@
+{
+    "symbol": "HYPE-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0013%) и волатилен (ATR 1.3492%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.0010. Значительный перевес покупателей (imbalance: 1.37). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "BEARISH",
+            "confidence": 80,
+            "reasoning": "Extreme Greed (Fear & Greed Index: 72) indicates market euphoria, and retail is likely bragging about gains, increasing the risk of a severe correction.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (60.5). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 74,
+        "reasoning_en": "[Primary CEO: The current market trend is BULLISH across all timeframes (15m, 1h, 4h), with a FULL_ALIGNMENT in the multi-timeframe context. The Order Book Agent reports a BULLISH signal with 90% confidence due to a significant imbalance (1.37) in favor of buyers. However, the News Agent reports a BEARISH signal with 80% confidence, indicating extreme greed in the market. The Indicator Agent reports a BULLISH signal with 65% confidence based on the RSI. Considering these signals and the deterministic scoring system, the score breakdown is as follows: candle (16), orderbook (12), derivatives (18), indicators (13), news (-2), and mtf (17). The total score is 74, which is above the threshold for a LONG position. Additionally, there is no indication of a past failure in 'past_lessons_learned' that would suggest aborting the trade. Therefore, the decision is to enter a LONG position.]\n\n[ESCALATION GEMINI VERDICT: CONFIRMED: HYPE-USD demonstrates unambiguous multi-timeframe bullish alignment across 15m, 1h, and 4h intervals. The 15m price action exhibits strong impulsive volume expansion up to 77.85 with subsequent tight consolidation above 76.80. Order book microstructure displays a solid buyer imbalance (1.37) and support wall, while RSI (60.5) remains well within sustainable continuation territory without overextension. The bearish news sentiment based purely on the general Fear & Greed index does not invalidate the immediate high-momentum setup.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Trend with Order Book and Indicator Support",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 77.85,
+        "margin_usd": 7.78,
+        "leverage": 10,
+        "contracts": 1.01,
+        "margin_pct": 19.89,
+        "entry_price": 77.075,
+        "take_profit_price": 82.855625,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 75.148125,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 70.13825,
+        "position_size_pct": 19.89
+    },
+    "status": "VETOED"
+}

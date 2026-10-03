@@ -1,0 +1,70 @@
+{
+    "symbol": "BTC-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0013%) и волатилен (ATR 0.3365%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 1.0000. Значительный перевес покупателей (imbalance: 0.90). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Neutral sentiment (40-60) indicates the market lacks a clear narrative, expecting choppy, range-bound price action without strong conviction.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (63.1). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 70,
+        "reasoning_en": "[Primary CEO: The current market trend is bullish across all timeframes (15m, 1h, 4h) with a full alignment, indicating a strong upward momentum. The Order Book Agent reports a significant imbalance (0.90) in favor of buyers, suggesting a potential liquidity sweep and short squeeze. The Indicator Agent detects a neutral RSI (63.1) but notes that the price is above the EMA-20, which could indicate a bullish trend. However, the Candle Agent and News Agent report neutral signals. Considering the strong bullish trend and potential for a short squeeze, the decision is to go LONG.]\n\n[ESCALATION GEMINI VERDICT: Full multi-timeframe alignment across 15m, 1h, and 4h confirms strong underlying bullish momentum following the breakout above 79,000. Order book data shows massive buyer imbalance (0.90) with solid bid support on the healthy pullback to 79,892. With RSI at a healthy 63.1 and neutral funding rates, the market is not yet overstretched, offering favorable continuation potential to retest and break 80,500+.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Trend with Potential Short Squeeze",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 75.93,
+        "margin_usd": 7.59,
+        "leverage": 10,
+        "contracts": 0.00095,
+        "margin_pct": 19.41,
+        "entry_price": 79931.0,
+        "take_profit_price": 85925.825,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 77932.725,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 0.0,
+        "position_size_pct": 19.41
+    },
+    "status": "VETOED"
+}

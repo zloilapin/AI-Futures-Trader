@@ -1,0 +1,70 @@
+{
+    "symbol": "XRP",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0162%) и волатилен (ATR 1.0696%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "BULLISH",
+            "confidence": 75,
+            "reasoning": "Бычье поглощение. Сильный импульс (Displacement), перекрывающий предыдущее падение.",
+            "pattern_detected": "Bullish Engulfing",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Спред 0.0002. Баланс покупателей и продавцов нейтрален (imbalance: 0.00)",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (-0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "The Fear & Greed Index is at Neutral (62), indicating a lack of clear narrative. Expect choppy, range-bound price action without strong conviction.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BEARISH",
+            "confidence": 65,
+            "reasoning": "RSI перекуплен (78.6). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 74,
+        "reasoning_en": "[Primary CEO: The current market trend for XRP is bullish on both the 1H and 4H timeframes, with a change percentage of 3.96% and 11.9%, respectively. The Candle_Agent reports a bullish signal with 75% confidence due to a bullish engulfing pattern. However, the Indicator_Agent reports a bearish signal with 65% confidence due to an overbought RSI. The Order_Book_Agent and OI_Funding_Agent report neutral signals. Given the bullish trend and the bullish signal from the Candle_Agent, we will assign a score of 16 to the candle, 12 to the order book, 18 to the derivatives, 13 to the indicators, -2 to the news, and 17 to the MTF validation. The total score is 74, indicating a strong bullish signal.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the LONG proposal on XRP. The higher timeframe momentum is exceptionally strong, with 1H (+3.96%) and 4H (+11.90%) both in clear bull expansion supported by heavy volume. On the 15M timeframe, the brief pullback was defended above key support at 1.225, immediately followed by a bullish engulfing displacement candle back to 1.2371. Funding rates remain completely neutral (-0.0001%), indicating the rally is organic spot/flow-driven without speculative overleveraging. While lower timeframe RSI is elevated, in strong momentum regimes this reflects continuation strength rather than an immediate reversal. LONG conviction is affirmed.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Engulfing + Bullish Trend",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": true,
+        "veto_category": null,
+        "reasoning": "Math calculated based on AGGRESSIVE profile. SL=1.206173, TP=1.329883, RR=2.83",
+        "risk_amount_usd": 1.23,
+        "notional_size_usd": 49.48,
+        "margin_usd": 4.95,
+        "leverage": 10,
+        "contracts": 40.0,
+        "margin_pct": 5.04,
+        "entry_price": 1.2371,
+        "take_profit_price": 1.329883,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 1.206173,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 1.125761,
+        "position_size_pct": 5.04
+    },
+    "status": "APPROVED"
+}

@@ -1,0 +1,70 @@
+{
+    "symbol": "ETH-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0042%) и волатилен (ATR 0.7187%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.1000. Значительный перевес покупателей (imbalance: 0.71). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Market Sentiment: Greed (Fear & Greed Index: 72), indicating a neutral sentiment score of 72.0, which falls within the 'Choppy Middle' range of 40-60.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (57.4). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 70,
+        "reasoning_en": "[Primary CEO: The multi-timeframe context indicates a bullish trend across the 15m, 1h, and 4h timeframes. The Order Book Agent reports a significant imbalance with a spread of 0.1000, indicating a potential buying opportunity. The Indicator Agent reports a neutral RSI of 57.4, which is not overly bearish. However, the News Agent reports a neutral sentiment score of 72.0. The past lessons learned do not indicate any warnings for this specific trading scenario. The Macro Trend Override rule is satisfied as the 1H and 4H trends are bullish.]\n\n[ESCALATION GEMINI VERDICT: Supreme Escalation AI approves the Primary CEO's LONG recommendation on ETH-USD. Full multi-timeframe alignment is confirmed bullish across 15m, 1h, and 4h horizons. Order book dynamics show overwhelming buy-side pressure (imbalance 0.71 with active support wall) and a tight spread of 0.10. Momentum indicators corroborate the upside bias with RSI at a healthy 57.4 above EMA-20, while funding remains neutral (0.0001%), leaving substantial runway before overheating.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish trend alignment across timeframes with potential buying opportunity",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 72.07,
+        "margin_usd": 7.21,
+        "leverage": 10,
+        "contracts": 0.03,
+        "margin_pct": 18.44,
+        "entry_price": 2402.3,
+        "take_profit_price": 2582.4725,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 2342.2425,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 2186.093,
+        "position_size_pct": 18.44
+    },
+    "status": "VETOED"
+}

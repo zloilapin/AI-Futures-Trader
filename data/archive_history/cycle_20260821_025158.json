@@ -1,0 +1,70 @@
+{
+    "symbol": "XRP",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0492%) и волатилен (ATR 1.5521%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Спред 0.0007. Баланс покупателей и продавцов нейтрален (imbalance: 0.00)",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0000%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Market Sentiment: Greed (Fear & Greed Index: 72), indicating neutral sentiment, as the Fear & Greed Index is not in extreme fear or greed territory.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BEARISH",
+            "confidence": 65,
+            "reasoning": "RSI перекуплен (75.2). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 81,
+        "reasoning_en": "[Primary CEO: The current market trend is BULLISH across all timeframes (15m, 1h, 4h) with a FULL_ALIGNMENT in the multi-timeframe context. However, the subordinate analyst reports are mostly NEUTRAL with the exception of the Indicator_Agent which reports a BEARISH signal due to an overbought RSI. Given the strong trend alignment and the lack of extreme capitulation, the Macro Sentiment Agent does not override the trend. The Price Action and Derivatives analysts are PRIMARY and do not indicate a strong directional signal. Therefore, the decision is to HOLD and not fight the trend unless extreme panic is detected.]\n\n[ESCALATION GEMINI VERDICT: OVERRIDE Primary CEO HOLD. The market shows clean FULL_ALIGNMENT across all timeframes (15m, 1h, 4h Bullish) with explosive volume expansion driving XRP from 1.31 to 1.42. The Primary CEO incorrectly hesitated due to standard RSI overbought signals (75.2), which in strong momentum breakout regimes represent powerful continuation rather than reversal. Derivatives and orderbook conditions remain healthy without signs of extreme funding drag or distribution. A decisive LONG position aligns with the dominant momentum.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Trend Alignment with Neutral Analyst Sentiment",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": true,
+        "veto_category": null,
+        "reasoning": "Math calculated based on AGGRESSIVE profile. SL=1.385865, TP=1.528005, RR=2.84",
+        "risk_amount_usd": 6.15,
+        "notional_size_usd": 245.9,
+        "margin_usd": 24.59,
+        "leverage": 10,
+        "contracts": 173.0,
+        "margin_pct": 20.0,
+        "entry_price": 1.4214,
+        "take_profit_price": 1.528005,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 1.385865,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.84,
+        "liquidation_price": 1.293474,
+        "position_size_pct": 20.0
+    },
+    "status": "APPROVED"
+}

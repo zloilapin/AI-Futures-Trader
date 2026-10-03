@@ -1,0 +1,70 @@
+{
+    "symbol": "SOL-USD",
+    "market_conditions": {
+        "reasoning": "Рынок ликвиден (спред 0.0098%) и волатилен (ATR 0.5069%).",
+        "status": "READY",
+        "proceed": true
+    },
+    "analysts": [
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Обычное движение цены, нет четких паттернов ликвидности.",
+            "pattern_detected": "None",
+            "agent_name": "Candle_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 90,
+            "reasoning": "Спред 0.0100. Значительный перевес покупателей (imbalance: 0.75). Стенка на покупку.",
+            "agent_name": "Order_Book_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 50,
+            "reasoning": "Фандинг нейтрален (0.0001%)",
+            "agent_name": "OI_Funding_Agent"
+        },
+        {
+            "signal": "NEUTRAL",
+            "confidence": 60,
+            "reasoning": "Current Fear & Greed Index (71) is not indicative of an oversold or overbought condition. Neutral sentiment means the market lacks a clear narrative.",
+            "agent_name": "News_Agent"
+        },
+        {
+            "signal": "BULLISH",
+            "confidence": 65,
+            "reasoning": "RSI нейтрален (60.1). Цена выше EMA-20",
+            "agent_name": "Indicator_Agent"
+        }
+    ],
+    "ceo_decision": {
+        "decision": "LONG",
+        "conviction": 75,
+        "reasoning_en": "[Primary CEO: The current market trend is bullish across all timeframes (15m, 1h, 4h), with a full alignment of trends. The Order Book Agent reports a significant imbalance (0.75) in favor of buyers, indicating a potential buying opportunity. The Indicator Agent reports a neutral RSI (60.1), which does not indicate overbought or oversold conditions. The News Agent reports a neutral sentiment, lacking a clear narrative. The historical trade memory shows a mix of winning and losing trades, but no specific patterns or lessons that would prevent a long position in the current market conditions. The past lessons learned do not apply to the current market situation, as the 4H trend is bullish and the RSI is above 50.]\n\n[ESCALATION GEMINI VERDICT: Escalation review confirms the Primary CEO's LONG proposal on SOL-USD. Multi-timeframe structure shows full bullish alignment across 15m, 1h, and 4h charts. The Order Book displays strong buyer dominance with a 0.75 imbalance and buy wall support. Technical indicators are optimal, with RSI at 60.1 and price sustaining above EMA-20, indicating trend continuation room without overbought exhaustion. Derivatives funding remains neutral (0.0001%), eliminating immediate liquidation squeeze risk.]",
+        "reasoning_ru": "",
+        "consensus_summary": "Bullish Trend Alignment with Buying Imbalance",
+        "mtf_validation": "1H/4H Trend Alignment VERIFIED",
+        "hold_category": "NONE"
+    },
+    "risk_assessment": {
+        "approved": false,
+        "veto_category": null,
+        "reasoning": "Биржа отклонила ордер (или ошибка сети/дубликат).",
+        "risk_amount_usd": 1.96,
+        "notional_size_usd": 71.31,
+        "margin_usd": 7.13,
+        "leverage": 10,
+        "contracts": 0.7000000000000001,
+        "margin_pct": 18.23,
+        "entry_price": 101.87,
+        "take_profit_price": 109.51025,
+        "take_profit_pct": 7.5,
+        "stop_loss_price": 99.32325,
+        "stop_loss_pct": 2.5,
+        "risk_reward_ratio": 2.83,
+        "liquidation_price": 0.0,
+        "position_size_pct": 18.23
+    },
+    "status": "VETOED"
+}

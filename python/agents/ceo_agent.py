@@ -59,11 +59,17 @@ class CEOAgent(BaseAgent):
         mtf_data = data.get("multi_timeframe_context", {})
         historical_context = data.get("historical_context", {})
 
-        self.logger.info(f"[{self.name}] Llama 70B (Judge) анализирует дебаты Bull vs Bear по {symbol}...")
+        self.logger.info(f"[{self.name}] {self.llm_client.model_name} (Judge) анализирует дебаты Bull vs Bear по {symbol}...")
         
+        # Strip heavy candle arrays to save ~1,500 prompt tokens
+        clean_mtf = dict(mtf_data) if isinstance(mtf_data, dict) else {}
+        for tf_k in ["tf_15m", "tf_1h", "tf_4h"]:
+            if tf_k in clean_mtf and isinstance(clean_mtf[tf_k], dict):
+                clean_mtf[tf_k] = {k: v for k, v in clean_mtf[tf_k].items() if k != "candles_20"}
+
         payload = {
             "target_symbol": symbol,
-            "multi_timeframe_context": mtf_data,
+            "multi_timeframe_context": clean_mtf,
             "bull_thesis": data.get("bull_thesis", {}),
             "bear_thesis": data.get("bear_thesis", {}),
             "subordinate_analyst_reports": analyst_reports,
@@ -100,12 +106,12 @@ class CEOAgent(BaseAgent):
         
         if decision == "HOLD":
             log_detail = "Decision: HOLD (Conf: N/A)"
-            print(f"👔 [CEO Llama 70B] HOLD (Нет направленного преимущества)")
+            print(f"👔 [CEO {self.llm_client.model_name}] HOLD (Нет направленного преимущества)")
         else:
             log_detail = f"Decision: {decision} (DirConf: {directional_confidence}%, RiskPenalty: {total_penalty}, EntryQuality: {entry_quality}%, Action: {trade_action})"
-            print(f"👔 [CEO Llama 70B] {decision} (DirConf: {directional_confidence}%, EntryQuality: {entry_quality}% -> {trade_action})")
+            print(f"👔 [CEO {self.llm_client.model_name}] {decision} (DirConf: {directional_confidence}%, EntryQuality: {entry_quality}% -> {trade_action})")
             
-        self.logger.info(f"[{self.name}] Primary CEO Llama 70B: {log_detail}")
+        self.logger.info(f"[{self.name}] Primary CEO ({self.llm_client.model_name}): {log_detail}")
         
         final_hold_category = "NONE"
         
@@ -115,25 +121,25 @@ class CEOAgent(BaseAgent):
         primary_dir_conf = directional_confidence
         primary_entry_quality = entry_quality
         escalated = False
-        gemini_decision_log = "N/A"
-        gemini_conv_log = "N/A"
+        esc_decision_log = "N/A"
+        esc_conv_log = "N/A"
         
         if decision == "HOLD":
             self.logger.info(f"[{self.name}] Primary CEO decided HOLD. Bypassing escalation to save API costs.")
-            print(f"⏩ [Escalation Bypassed] Рынок не имеет явного тренда (HOLD). Gemini не вызывается для экономии API.")
+            print(f"⏩ [Escalation Bypassed] Рынок не имеет явного тренда (HOLD). Вторая модель ({self.escalation_llm.model_name}) не вызывается для экономии API.")
         elif conviction >= 80:
             self.logger.info(f"[{self.name}] High conviction {decision} (EntryQuality {conviction}% >= 80%). Bypassing escalation.")
-            print(f"⏩ [Escalation Bypassed] Качество входа Llama достаточно высоко ({conviction}%). Gemini не вызывается.")
+            print(f"⏩ [Escalation Bypassed] Качество входа Primary CEO достаточно высоко ({conviction}%). Вторая модель ({self.escalation_llm.model_name}) не вызывается.")
         elif conviction < 60:
             self.logger.info(f"[{self.name}] Entry Quality low ({decision} {conviction}% < 60%). Bypassing escalation.")
-            print(f"⏩ [Escalation Bypassed] Слишком низкое качество входа Llama ({conviction}% < 60%). Пропуск сделки (HOLD/WAIT).")
+            print(f"⏩ [Escalation Bypassed] Слишком низкое качество входа Primary CEO ({conviction}% < 60%). Пропуск сделки (HOLD/WAIT).")
         else:
             escalated = True
-            self.logger.info(f"[{self.name}] Conviction {conviction}% (60-79%). Escalating to Gemini...")
-            print(f"⚠️ [Escalation] Спорный сетап ({decision} {conviction}%). Подключаем Gemini 3.7 Flash для финального вердикта...")
+            self.logger.info(f"[{self.name}] Conviction {conviction}% (60-79%). Escalating to {self.escalation_llm.model_name}...")
+            print(f"⚠️ [Escalation] Спорный сетап ({decision} {conviction}%). Подключаем {self.escalation_llm.model_name} для финального вердикта...")
             
-            escalation_prompt = f"""You are the Supreme Escalation AI (Gemini 3.7 Flash) for an elite crypto prop-trading firm.
-The Primary CEO (Llama 70B) has proposed a {decision} on {symbol} with Directional Confidence of {directional_confidence}%, Risk Penalty of {total_penalty}, and Entry Quality (Conviction) of {conviction}%.
+            escalation_prompt = f"""You are the Supreme Escalation AI ({self.escalation_llm.model_name}) for an elite crypto prop-trading firm.
+The Primary CEO ({self.llm_client.model_name}) has proposed a {decision} on {symbol} with Directional Confidence of {directional_confidence}%, Risk Penalty of {total_penalty}, and Entry Quality (Conviction) of {conviction}%.
 Proposed Trade Action: {trade_action}.
 Your job is to review the exact same data and provide a FINAL decisive verdict.
 Evaluate both trend strength (directional confidence) and counter-risks (RSI extremes, sentiment, divergences).
@@ -167,6 +173,8 @@ Provide a JSON strictly matching this schema:
   "consensus_summary": "Your detailed escalation review reasoning",
   "reasoning_en": "Step-by-step CIO executive summary"
 }}
+
+CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and end with '}}'. Do NOT output markdown bullet lists, internal reasoning, or conversational text outside the JSON.
 """
             try:
                 original_llm = self.llm_client
@@ -176,41 +184,41 @@ Provide a JSON strictly matching this schema:
                 finally:
                     self.llm_client = original_llm
                 
-                gemini_raw_decision = str(k3_response.get("decision", "ERROR")).upper()
-                if gemini_raw_decision == "ERROR":
-                    raise ValueError("Gemini returned ERROR")
+                esc_raw_decision = str(k3_response.get("decision", "ERROR")).upper()
+                if esc_raw_decision == "ERROR":
+                    raise ValueError(f"{self.escalation_llm.model_name} returned ERROR")
                     
                 k3_breakdown = k3_response.get("score_breakdown", {})
-                gemini_score_res = self._validate_and_compute_score(gemini_raw_decision, k3_breakdown, market_context=data)
+                esc_score_res = self._validate_and_compute_score(esc_raw_decision, k3_breakdown, market_context=data)
                 
-                gemini_decision = gemini_score_res["decision"]
-                gemini_conviction = gemini_score_res["conviction"]
-                gemini_dir_conf = gemini_score_res["directional_confidence"]
-                gemini_entry_qual = gemini_score_res["entry_quality"]
+                esc_decision = esc_score_res["decision"]
+                esc_conviction = esc_score_res["conviction"]
+                esc_dir_conf = esc_score_res["directional_confidence"]
+                esc_entry_qual = esc_score_res["entry_quality"]
                 
-                gemini_decision_log = gemini_decision
-                gemini_conv_log = gemini_conviction
+                esc_decision_log = esc_decision
+                esc_conv_log = esc_conviction
                 k3_reasoning = k3_response.get("reasoning_en", "")
                 
-                reasoning = f"[Primary CEO: {reasoning}]\n\n[ESCALATION GEMINI VERDICT: {k3_reasoning}]"
-                self.logger.info(f"[{self.name}] Escalation Gemini Final Decision: {gemini_decision} (DirConf: {gemini_dir_conf}%, EntryQuality: {gemini_entry_qual}%)")
-                print(f"🧠 [Gemini 3.7 Flash] Вердикт: {gemini_decision} (DirConf: {gemini_dir_conf}%, EntryQuality: {gemini_entry_qual}%)")
+                reasoning = f"[Primary CEO: {reasoning}]\n\n[ESCALATION VERDICT ({self.escalation_llm.model_name}): {k3_reasoning}]"
+                self.logger.info(f"[{self.name}] Escalation ({self.escalation_llm.model_name}) Final Decision: {esc_decision} (DirConf: {esc_dir_conf}%, EntryQuality: {esc_entry_qual}%)")
+                print(f"🧠 [{self.escalation_llm.model_name}] Вердикт: {esc_decision} (DirConf: {esc_dir_conf}%, EntryQuality: {esc_entry_qual}%)")
                 
                 # Consensus Check logic
-                if gemini_decision == primary_decision:
-                    decision = gemini_decision
-                    conviction = int((primary_conviction * 0.6) + (gemini_conviction * 0.4))
-                    directional_confidence = int((primary_dir_conf * 0.6) + (gemini_dir_conf * 0.4))
-                    entry_quality = conviction
+                if esc_decision == primary_decision:
+                    decision = esc_decision
+                    conviction = int((primary_conviction * 0.6) + (esc_conviction * 0.4))
+                    directional_confidence = int((primary_dir_conf * 0.6) + (esc_dir_conf * 0.4))
+                    entry_quality = int((primary_entry_quality * 0.6) + (esc_entry_qual * 0.4))
                     if conviction >= 75:
                         trade_action = "ENTER"
                     elif directional_confidence >= 75 and conviction < 70:
                         trade_action = "WAIT_FOR_PULLBACK"
                     else:
                         trade_action = "REDUCE_SIZE"
-                    print(f"🤝 [Consensus] Модели пришли к согласию! Подтвержден {decision}. Entry Quality: {conviction}% (Llama: {primary_conviction}%, Gemini: {gemini_conviction}%)")
+                    print(f"🤝 [Consensus] Модели пришли к согласию! Подтвержден {decision}. Conviction: {conviction}% (Primary: {primary_conviction}%, Esc: {esc_conviction}%) | Entry Quality: {entry_quality}%")
                 else:
-                    print(f"⚔️ [Conflict] Llama ({primary_decision}) и Gemini ({gemini_decision}) разошлись во мнениях. Итог: HOLD.")
+                    print(f"⚔️ [Conflict] {self.llm_client.model_name} ({primary_decision}) и {self.escalation_llm.model_name} ({esc_decision}) разошлись во мнениях. Итог: HOLD.")
                     decision = "HOLD"
                     conviction = 0
                     entry_quality = 0
@@ -218,12 +226,14 @@ Provide a JSON strictly matching this schema:
                     trade_action = "HOLD"
                     
             except Exception as e:
-                self.logger.error(f"[{self.name}] Escalation LLM failed: {e}")
-                decision = "ERROR"
-                conviction = 0
-                entry_quality = 0
-                trade_action = "HOLD"
-                reasoning += f"\n\n[ESCALATION FAILED: {e}. Strict Fallback triggered.]"
+                self.logger.warning(f"[{self.name}] Escalation LLM failed ({e}). Falling back to Primary CEO verdict: {primary_decision} ({primary_conviction}%)")
+                print(f"⚠️ [Escalation Fallback] Модель эскалации недоступна ({e}). Сохраняем вердикт Primary CEO: {primary_decision} ({primary_conviction}%).")
+                decision = primary_decision
+                conviction = primary_conviction
+                entry_quality = primary_entry_quality
+                directional_confidence = primary_dir_conf
+                trade_action = "ENTER" if conviction >= 75 else ("WAIT_FOR_PULLBACK" if directional_confidence >= 75 and conviction < 70 else "REDUCE_SIZE")
+                reasoning += f"\n\n[ESCALATION WARNING: {e}. Fallback to Primary CEO {primary_decision} ({primary_conviction}%).]"
 
         # Deterministic Decision Engine for HOLD Category
         if decision == "HOLD":
@@ -237,7 +247,7 @@ Provide a JSON strictly matching this schema:
                 import datetime
                 with open("confidence_stats.log", "a", encoding="utf-8") as f:
                     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    f.write(f"[{ts}] {symbol} | Result: {decision} | Llama: {primary_decision} ({primary_conviction}%) | Gemini: {gemini_decision_log} ({gemini_conv_log}%)\n")
+                    f.write(f"[{ts}] {symbol} | Result: {decision} | {self.llm_client.model_name}: {primary_decision} ({primary_conviction}%) | {self.escalation_llm.model_name}: {esc_decision_log} ({esc_conv_log}%)\n")
             except Exception as e:
                 self.logger.error(f"Failed to log confidence stats: {e}")
 
