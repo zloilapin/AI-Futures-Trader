@@ -723,7 +723,8 @@ class MarketDataService:
                 # CRITICAL-12: Inject open_interest_usd for OI_FundingAgent
                 current_price = ohlcv.get("current_price", 0.0) if isinstance(ohlcv, dict) else 0.0
                 if isinstance(oi, dict) and current_price > 0:
-                    oi["open_interest_usd"] = oi.get("open_interest", 0.0) * current_price
+                    oi_val = oi.get("open_interest")
+                    oi["open_interest_usd"] = (oi_val * current_price) if oi_val is not None else None
 
                 return {
                     "exchange": self.exchange_name,
