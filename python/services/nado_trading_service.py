@@ -1303,9 +1303,9 @@ class NadoTradingService(BaseTradingService):
             try:
                 await asyncio.to_thread(self.client.market.cancel_trigger_orders, cancel_params)
             except Exception as e:
-                logger.warning(f"[NadoTradingService] Failed to cancel old SL for {symbol}: {e}. Proceeding to place new SL anyway to maintain protection.")
-
-            # 3. Place new SL
+                logger.warning(f"[NadoTradingService] Failed to cancel old SL for {symbol}: {e}. Proceeding to place new SL.")
+                
+            # 3. Place new SL immediately
             exec_price = new_sl_price * 0.9 if direction == "LONG" else new_sl_price * 1.1
             
             exec_price_x18 = int(exec_price * 10**18)
@@ -1329,23 +1329,21 @@ class NadoTradingService(BaseTradingService):
                     new_digest = sl_res.data.digest
                     pos["sl_digest"] = new_digest
                     pos["sl_price"] = new_sl_price
+                    self._save_positions()
                     logger.info(f"[NadoTradingService] ✅ Stop Loss updated for {symbol} -> {new_sl_price:.4f}")
                     return True
                 else:
-                    logger.warning(f"[NadoTradingService] ⚠️ Failed to get digest for new SL on {symbol}. Software protection active.")
-                    pos["sl_digest"] = None
-                    pos["sl_price"] = new_sl_price
-                    return True
+                    raise ValueError("Missing digest in Nado response")
                     
             except Exception as e:
-                logger.warning(
-                    f"[NadoTradingService] ⚠️ Failed to place on-chain updated SL for {symbol} ({e}). "
-                    f"Position held safely! Software Sentinel protection active at {new_sl_price:.4f}."
+                logger.error(
+                    f"[NadoTradingService] 🚨 FATAL: Failed to place NEW on-chain SL for {symbol} after cancelling OLD SL ({e}). "
+                    f"Position is UNPROTECTED on-chain! Executing Emergency Force Close to lock in safety."
                 )
                 pos["sl_digest"] = None
-                pos["sl_price"] = new_sl_price
-                self._save_positions()
-                return True
+                pos["is_closing"] = True
+                asyncio.create_task(self.force_close_position(symbol, bypass_check=True))
+                return False
 
     async def update_take_profit(self, symbol: str, new_tp_price: float) -> bool:
         """
