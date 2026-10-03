@@ -110,7 +110,7 @@ class RiskManager(BaseAgent):
         current_price = float(price_data.get("current_price", 1.0) or 1.0)
         
         indicators = market_data.get("indicators", {})
-        atr_14 = float(indicators.get("atr_14", current_price * 0.02) or current_price * 0.02)
+        atr_14 = float(indicators.get("atr_14", 0) or 0)
         
         total_balance = float(portfolio_data.get("total_usd", portfolio_data.get("current_balance", 0.0)) or 0.0)
         available_margin = float(portfolio_data.get("available_margin", total_balance))
@@ -130,7 +130,12 @@ class RiskManager(BaseAgent):
         liq_price = 0.0
         leverage = 1.0
         
-        if total_balance <= 0:
+        if atr_14 <= 0:
+            self.logger.warning(f"[{self.name}] ❌ INVALID ATR: atr_14 is {atr_14}. Blocking trade to prevent corrupted risk sizing.")
+            approved = False
+            veto_category = "INVALID_ATR"
+            veto_reason = "Missing or zero ATR_14 data."
+        elif total_balance <= 0:
             self.logger.warning(f"[{self.name}] ❌ INSUFFICIENT BALANCE: Total balance is {total_balance}. Blocking trade.")
             approved = False
             veto_category = "INSUFFICIENT_BALANCE"

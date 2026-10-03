@@ -581,7 +581,7 @@ class MarketDataService:
     async def fetch_oi_funding(self, symbol: str) -> Dict[str, Any]:
         """Fetches real Open Interest and funding rates from Nado DEX."""
         if not self.is_nado or not self.nado_client:
-            return {"symbol": symbol, "open_interest": 0.0, "open_interest_trend": "neutral", "funding_rate": 0.0001}
+            return {"symbol": symbol, "open_interest": None, "open_interest_trend": "neutral", "funding_rate": None}
             
         try:
             import asyncio
@@ -590,10 +590,10 @@ class MarketDataService:
             base_symbol = symbol.split('-')[0].upper()
             product_id = self.product_map.get(base_symbol)
             if product_id is None:
-                return {"symbol": symbol, "open_interest": 0.0, "open_interest_trend": "neutral", "funding_rate": 0.0001}
+                return {"symbol": symbol, "open_interest": None, "open_interest_trend": "neutral", "funding_rate": None}
                 
             # 1. Real-time OI from engine markets
-            open_interest = 0.0
+            open_interest = None
             markets = await asyncio.to_thread(self.nado_client.market.get_all_engine_markets)
             for p in markets.perp_products:
                 if p.product_id == product_id:
@@ -604,14 +604,19 @@ class MarketDataService:
                     break
                     
             # 2. Hourly Snapshot for Funding Rate (CRITICAL-14)
-            funding_rate = 0.0001
+            funding_rate = None
             params = IndexerMarketSnapshotsParams(interval=IndexerMarketSnapshotInterval(count=1, granularity=3600))
             snapshots = await asyncio.to_thread(self.nado_client.market.get_market_snapshots, params)
             
             if snapshots and snapshots.snapshots:
                 snap = snapshots.snapshots[0]
                 vid = str(product_id)
-                funding_rate = float(snap.funding_rates.get(vid, 0)) / 1e18
+                if vid in snap.funding_rates:
+                    funding_rate = float(snap.funding_rates[vid]) / 1e18
+                    
+            if funding_rate is None or open_interest is None:
+                self._log(f"⚠️ [MarketDataService] Missing critical risk data OI ({open_interest}) or Funding ({funding_rate}) for {symbol}. VETO triggered.")
+                return {"symbol": symbol, "open_interest": None, "open_interest_trend": "neutral", "funding_rate": None, "funding_rate_decimal": None}
                 
             # 3. Time-Weighted OI Trend (CRITICAL-13)
             import time
@@ -655,7 +660,7 @@ class MarketDataService:
         except Exception as e:
             self._log(f"⚠️ [MarketDataService] Failed to fetch Nado OI/Funding for {symbol}: {e}")
             
-        return {"symbol": symbol, "open_interest": 0.0, "open_interest_trend": "neutral", "funding_rate": 0.0001, "funding_rate_decimal": 0.0001}
+        return {"symbol": symbol, "open_interest": None, "open_interest_trend": "neutral", "funding_rate": None, "funding_rate_decimal": None}
 
     async def fetch_margin_requirements(self, symbol: str) -> Dict[str, Any]:
         """Fetches real maintenance margin parameters and size limits from Nado DEX SDK."""

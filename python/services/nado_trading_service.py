@@ -580,7 +580,7 @@ class NadoTradingService(BaseTradingService):
                             f"Позиция удерживается под программной защитой Take-Profit на {tp_price:.4f}!"
                         )
             
-            # Recalculate notional_usd to reflect actual fill (Option A: allow partial fills)
+            # Recalculate notional_usd to reflect actual fill amount
             notional_usd = abs(actual_filled_x18 / 1e18) * actual_entry_price
             
             # Store position state to prevent duplicate orders and track PnL
