@@ -17,11 +17,11 @@ class RiskManager(BaseAgent):
 
     def _get_profile_rules(self, profile: str) -> dict:
         if profile == "AGGRESSIVE":
-            return {"min_conviction": 65, "base_risk": 0.015, "risk_cap": 0.015, "sl_mult": 1.75, "tp_mult": 3.5, "target_margin_pct": 0.20, "max_margin_pct": 0.45, "max_leverage": 15, "sentinel_be_atr": 1.2, "sentinel_trail_atr": 2.0, "sentinel_trail_activation_atr": 1.2, "sentinel_trail_distance_atr": 1.0, "sentinel_min_improve_atr": 0.20}
+            return {"min_conviction": 65, "base_risk": 0.015, "risk_cap": 0.015, "portfolio_risk_cap": 0.05, "sl_mult": 1.75, "tp_mult": 3.5, "target_margin_pct": 0.20, "max_margin_pct": 0.45, "max_leverage": 15, "sentinel_be_atr": 1.2, "sentinel_trail_atr": 2.0, "sentinel_trail_activation_atr": 1.2, "sentinel_trail_distance_atr": 1.0, "sentinel_min_improve_atr": 0.20}
         elif profile == "CONSERVATIVE":
-            return {"min_conviction": 80, "base_risk": 0.005, "risk_cap": 0.01, "sl_mult": 2.0, "tp_mult": 3.0, "target_margin_pct": 0.05, "max_margin_pct": 0.10, "max_leverage": 5, "sentinel_be_atr": 0.8, "sentinel_trail_atr": 1.2, "sentinel_trail_activation_atr": 1.8, "sentinel_trail_distance_atr": 2.0, "sentinel_min_improve_atr": 0.30}
+            return {"min_conviction": 80, "base_risk": 0.005, "risk_cap": 0.01, "portfolio_risk_cap": 0.02, "sl_mult": 2.0, "tp_mult": 3.0, "target_margin_pct": 0.05, "max_margin_pct": 0.10, "max_leverage": 5, "sentinel_be_atr": 0.8, "sentinel_trail_atr": 1.2, "sentinel_trail_activation_atr": 1.8, "sentinel_trail_distance_atr": 2.0, "sentinel_min_improve_atr": 0.30}
         else: # BALANCED
-            return {"min_conviction": 70, "base_risk": 0.01, "risk_cap": 0.015, "sl_mult": 1.5, "tp_mult": 2.5, "target_margin_pct": 0.10, "max_margin_pct": 0.20, "max_leverage": 10, "sentinel_be_atr": 1.0, "sentinel_trail_atr": 1.5, "sentinel_trail_activation_atr": 1.5, "sentinel_trail_distance_atr": 1.5, "sentinel_min_improve_atr": 0.25}
+            return {"min_conviction": 70, "base_risk": 0.01, "risk_cap": 0.015, "portfolio_risk_cap": 0.035, "sl_mult": 1.5, "tp_mult": 2.5, "target_margin_pct": 0.10, "max_margin_pct": 0.20, "max_leverage": 10, "sentinel_be_atr": 1.0, "sentinel_trail_atr": 1.5, "sentinel_trail_activation_atr": 1.5, "sentinel_trail_distance_atr": 1.5, "sentinel_min_improve_atr": 0.25}
 
     def _get_conviction_multiplier(self, min_conviction: int, conviction: int) -> float:
         """
@@ -142,8 +142,8 @@ class RiskManager(BaseAgent):
         elif decision in ["LONG", "SHORT"] and conviction >= min_conviction:
             
             # --- Portfolio Correlated Exposure Check ---
-            # Maximum total portfolio risk across all open positions (3.0% of balance)
-            MAX_TOTAL_PORTFOLIO_RISK_PCT = 0.03
+            # Maximum total portfolio risk across all open positions
+            MAX_TOTAL_PORTFOLIO_RISK_PCT = profile_rules.get("portfolio_risk_cap", 0.03)
             max_portfolio_risk_usd = total_balance * MAX_TOTAL_PORTFOLIO_RISK_PCT
             
             existing_risk_usd = 0.0
@@ -157,7 +157,7 @@ class RiskManager(BaseAgent):
             remaining_risk_budget_usd = max(0.0, max_portfolio_risk_usd - existing_risk_usd)
             
             if remaining_risk_budget_usd < (total_balance * 0.002):
-                msg = f"Portfolio correlated risk budget exhausted: Active risk ${existing_risk_usd:.2f} >= Cap ${max_portfolio_risk_usd:.2f} (3% limit)."
+                msg = f"Portfolio correlated risk budget exhausted: Active risk ${existing_risk_usd:.2f} >= Cap ${max_portfolio_risk_usd:.2f} ({MAX_TOTAL_PORTFOLIO_RISK_PCT*100}% limit)."
                 self.logger.warning(f"[{self.name}] 🚫 PORTFOLIO RISK VETO: {msg}")
                 return {
                     "approved": False,

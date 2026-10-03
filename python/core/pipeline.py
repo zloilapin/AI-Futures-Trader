@@ -354,9 +354,9 @@ class TradingPipeline:
             tech_bulls = sum(1 for r in valid_reports if r.get("agent_name") != "News_Agent" and str(r.get("signal", "")).upper() in ["BULLISH", "LONG"])
             tech_bears = sum(1 for r in valid_reports if r.get("agent_name") != "News_Agent" and str(r.get("signal", "")).upper() in ["BEARISH", "SHORT"])
 
-            if mtf_alignment == "FULL_ALIGNMENT":
+            if mtf_alignment == "FULL_ALIGNMENT" and (tech_bulls >= 1 or tech_bears >= 1):
                 has_directional_signal = True
-                self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен из-за FULL_ALIGNMENT MTF trend.")
+                self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен из-за FULL_ALIGNMENT MTF trend + подтверждение аналитика.")
             elif tech_bulls >= 2 and tech_bears <= 1:
                 has_directional_signal = True
                 self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (Bullish консенсус {tech_bulls} vs {tech_bears}).")
