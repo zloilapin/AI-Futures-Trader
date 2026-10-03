@@ -465,6 +465,24 @@ class NadoTradingService(BaseTradingService):
                     
                     return False
             
+            # --- Actual Risk vs Approved Risk Check (CRITICAL-13) ---
+            actual_base_amount = abs(actual_filled_x18) / 1e18
+            expected_risk_usd = actual_base_amount * abs(entry_price - sl_price)
+            actual_risk_usd = actual_base_amount * abs(actual_entry_price - sl_price)
+            
+            # If slippage caused the risk to increase by more than 15% (and at least $2 to ignore dust)
+            if sl_price > 0 and expected_risk_usd > 0 and actual_risk_usd > (expected_risk_usd * 1.15) and (actual_risk_usd - expected_risk_usd) > 2.0:
+                logger.error(
+                    f"[NadoTradingService] ❌ FATAL SLIPPAGE: Actual risk (${actual_risk_usd:.2f}) exceeds approved risk "
+                    f"(${expected_risk_usd:.2f}) due to bad execution price ({actual_entry_price:.4f} vs expected {entry_price:.4f}). "
+                    f"Emergency closing position to protect capital."
+                )
+                try:
+                    await self.force_close_position(symbol, bypass_check=True)
+                except Exception as e:
+                    logger.error(f"[NadoTradingService] ⚠️ Failed to close high-risk position {symbol}: {e}")
+                return False
+                
             # --- Partial Fill Guard (CRITICAL-4) ---
             fill_ratio = abs(actual_filled_x18) / abs(amount_x18) if amount_x18 != 0 else 0
             if fill_ratio < 0.95:
