@@ -222,11 +222,13 @@ class NadoTradingService(BaseTradingService):
                             real_entry = current_price
                         entry_price = real_entry
                     
-                    # Calculate PnL
+                    # Calculate Net PnL (Deducting ~0.05% round-trip taker fees)
                     if direction == "LONG":
-                        pnl = (current_price - entry_price) * abs(base_amount)
+                        gross_pnl = (current_price - entry_price) * abs(base_amount)
                     else:
-                        pnl = (entry_price - current_price) * abs(base_amount)
+                        gross_pnl = (entry_price - current_price) * abs(base_amount)
+                        
+                    net_pnl = gross_pnl - (size_usd * 0.0005)
                         
                     active_list.append({
                         "symbol": symbol,
@@ -236,7 +238,7 @@ class NadoTradingService(BaseTradingService):
                         "tp_price": local_pos.get("tp_price", 0.0),
                         "sl_price": local_pos.get("sl_price", 0.0),
                         "leverage": local_pos.get("leverage", 10),
-                        "pnl": pnl,
+                        "pnl": net_pnl,
                         "amount": base_amount,
                         "_subaccount": sa.subaccount,
                         "_product_id": product_id
@@ -569,6 +571,7 @@ class NadoTradingService(BaseTradingService):
                 "entry_price": actual_entry_price,
                 "size_usd": notional_usd,
                 "notional_usd": notional_usd,
+                "margin_used": notional_usd / float(leverage) if leverage > 0 else notional_usd,
                 "tp_price": tp_price,
                 "sl_price": sl_price,
                 "leverage": leverage,
@@ -765,10 +768,13 @@ class NadoTradingService(BaseTradingService):
                     logger.warning(f"[NadoTradingService] ⚠️ Could not fetch exact history for {symbol}, falling back to estimation: {e}")
                 
                 if direction == "LONG":
-                    target_pnl = (exit_price - entry_price) / entry_price * size_usd
+                    gross_pnl = (exit_price - entry_price) / entry_price * size_usd
                 else:
-                    target_pnl = (entry_price - exit_price) / entry_price * size_usd
+                    gross_pnl = (entry_price - exit_price) / entry_price * size_usd
                     
+                estimated_fees = size_usd * 0.0005
+                target_pnl = gross_pnl - estimated_fees
+                logger.info(f"[NadoTradingService] 💰 Gross PnL: ${gross_pnl:.2f}, Est Fees: ${estimated_fees:.2f} -> Net PnL: ${target_pnl:.2f}")
                 if symbol in self.active_positions:
                     del self.active_positions[symbol]
                 alias_key = base_symbol if '-' in symbol else f"{base_symbol}-USD"
