@@ -65,7 +65,8 @@ class MarketDataService:
         if self.logger:
             if level == "error": self.logger.error(msg)
             elif level == "warning": self.logger.warning(msg)
-            else: self.logger.info(msg)
+            elif level == "debug" and hasattr(self.logger, "debug"): self.logger.debug(msg)
+            elif level != "debug": self.logger.info(msg)
         else:
             print(f"[{level.upper()}] {msg}")
 
@@ -615,7 +616,7 @@ class MarketDataService:
                     funding_rate = float(snap.funding_rates[vid]) / 1e18
                     
             if funding_rate is None or open_interest is None:
-                self._log(f"⚠️ [MarketDataService] Missing critical risk data OI ({open_interest}) or Funding ({funding_rate}) for {symbol}. VETO triggered.")
+                self._log(f"⚠️ [MarketDataService] Missing critical risk data OI ({open_interest}) or Funding ({funding_rate}) for {symbol}. VETO triggered.", level="debug")
                 return {"symbol": symbol, "open_interest": None, "open_interest_trend": "neutral", "funding_rate": None, "funding_rate_decimal": None}
                 
             # 3. Time-Weighted OI Trend (CRITICAL-13)
