@@ -360,7 +360,7 @@ class RiskManager(BaseAgent):
             
             # The actual leverage used is what's required, capped by the absolute safety ceiling
             final_leverage = min(required_leverage, safe_ceiling_leverage)
-            final_leverage = max(1.0, round(final_leverage))
+            final_leverage = max(1.0, float(int(final_leverage))) # Floor instead of round to never exceed ceiling
             
             # ═══ 6. Position Size Reduction (If Required > Safe Ceiling) ═══
             if required_leverage > safe_ceiling_leverage:
