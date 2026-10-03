@@ -355,16 +355,8 @@ class RiskManager(BaseAgent):
             else:
                 vol_max_leverage = 15.0
                 
-            # 5b. Liquidation Safety Limit (Liquidation must be 3x further than SL)
-            LIQUIDATION_BUFFER = 3.0
-            sl_pct = (distance_to_sl / current_price) if current_price > 0 else 0.01
-            if sl_pct > 0:
-                liq_max_leverage = 1.0 / (sl_pct * LIQUIDATION_BUFFER)
-            else:
-                liq_max_leverage = max_leverage
-                
-            # Final allowed ceiling leverage
-            safe_ceiling_leverage = min(max_leverage, vol_max_leverage, liq_max_leverage)
+            # Final allowed ceiling leverage (removed pseudo-liquidation cap for cross-margin)
+            safe_ceiling_leverage = min(max_leverage, vol_max_leverage)
             
             # The actual leverage used is what's required, capped by the absolute safety ceiling
             final_leverage = min(required_leverage, safe_ceiling_leverage)
@@ -397,7 +389,7 @@ class RiskManager(BaseAgent):
             self.logger.info(
                 f"[{self.name}] Final Leverage: {leverage}x "
                 f"(Profile Max: {max_leverage}x, Volatility Max: {vol_max_leverage}x, "
-                f"Liq Safety: {liq_max_leverage:.1f}x, Required: {required_leverage:.1f}x)"
+                f"Required: {required_leverage:.1f}x)"
             )
             
             # ═══ 7. Rounding & Final Math Alignment ═══
