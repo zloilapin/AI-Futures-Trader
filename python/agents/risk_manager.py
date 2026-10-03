@@ -150,8 +150,15 @@ class RiskManager(BaseAgent):
             active_positions = portfolio_data.get("active_positions", {})
             for pos_sym, pos in active_positions.items():
                 if isinstance(pos, dict):
-                    pos_notional = float(pos.get("notional_usd") or pos.get("size_usd") or 0.0)
-                    pos_risk = float(pos.get("risk_amount_usd", pos_notional * 0.02))
+                    entry = float(pos.get("entry_price", 0))
+                    sl = float(pos.get("sl_price", 0))
+                    amount = abs(float(pos.get("amount", 0)))
+                    
+                    if entry > 0 and sl > 0 and amount > 0:
+                        pos_risk = amount * abs(entry - sl)
+                    else:
+                        pos_risk = 0.0
+                        
                     existing_risk_usd += pos_risk
                     
             remaining_risk_budget_usd = max(0.0, max_portfolio_risk_usd - existing_risk_usd)
@@ -294,8 +301,15 @@ class RiskManager(BaseAgent):
             # not a single price point for a single position. Adjusting SL based on a simplistic formula is dangerous.
             liq_price = 0.0
             
-            # Recalculate distance after SL adjustment
-            distance_to_sl = abs(current_price - sl_price)
+            # --- WORST CASE EXECUTION ---
+            expected_slippage_pct = config.EXPECTED_SLIPPAGE_PCT if hasattr(config, 'EXPECTED_SLIPPAGE_PCT') else 0.005
+            if decision == "LONG":
+                execution_entry = current_price * (1.0 + expected_slippage_pct)
+            else:
+                execution_entry = current_price * (1.0 - expected_slippage_pct)
+                
+            # Recalculate distance after SL adjustment based on expected execution price
+            distance_to_sl = abs(execution_entry - sl_price)
 
             # ═══ 2. Position Sizing (canonical math) ═══
             # risk_amount_usd = how much USD we're willing to LOSE
@@ -306,10 +320,10 @@ class RiskManager(BaseAgent):
                 risk_amount_usd = min(risk_amount_usd, remaining_risk_budget_usd)
             
             # contracts = risk_amount_usd / distance_to_sl (units of base asset)
-            # notional_usd = contracts * current_price (total exposure)
+            # notional_usd = contracts * execution_entry (total exposure)
             if distance_to_sl > 0:
                 contracts = risk_amount_usd / distance_to_sl
-                notional_usd = contracts * current_price
+                notional_usd = contracts * execution_entry
             else:
                 contracts = 0
                 notional_usd = 0
@@ -383,16 +397,17 @@ class RiskManager(BaseAgent):
                     risk_amount_usd = contracts * distance_to_sl
             
             # Also apply absolute max notional guard in case it wasn't caught
-            max_notional_usd = total_balance * max_margin_pct * final_leverage
+            # Replaced artificial final_leverage calculation with actual margin bound
+            max_notional_usd = usable_margin * safe_ceiling_leverage
             if notional_usd > max_notional_usd:
                 notional_usd = max_notional_usd
-                contracts = notional_usd / current_price if current_price > 0 else 0
+                contracts = notional_usd / execution_entry if execution_entry > 0 else 0
                 risk_amount_usd = contracts * distance_to_sl
                 
-            leverage = final_leverage
+            effective_leverage = final_leverage
             
             self.logger.info(
-                f"[{self.name}] Final Leverage: {leverage}x "
+                f"[{self.name}] Final Effective Leverage: {effective_leverage}x "
                 f"(Profile Max: {max_leverage}x, Volatility Max: {vol_max_leverage}x, "
                 f"Required: {required_leverage:.1f}x)"
             )
@@ -402,8 +417,8 @@ class RiskManager(BaseAgent):
             if size_increment > 0:
                 # Nado correctly floors the amount to size_increment, we should do the same
                 contracts = (contracts // size_increment) * size_increment
-            notional_usd = round(contracts * current_price, 2)
-            margin_usd = round(notional_usd / leverage if leverage > 0 else notional_usd, 2)
+            notional_usd = round(contracts * execution_entry, 2)
+            margin_usd = round(notional_usd / effective_leverage if effective_leverage > 0 else notional_usd, 2)
             margin_pct = round((margin_usd / total_balance) * 100 if total_balance > 0 else 0, 2)
 
             # --- 6. Maximum Notional Guard ---
@@ -486,15 +501,16 @@ class RiskManager(BaseAgent):
             "risk_amount_usd": risk_amount_usd,     # Max USD willing to lose
             "notional_size_usd": notional_usd,       # Total exposure (contracts * price)
             "margin_usd": margin_usd,                # Collateral locked (notional / leverage)
-            "leverage": leverage,                     # Multiplier
+            "leverage": effective_leverage,           # Legacy alias for backward compatibility
+            "effective_leverage": effective_leverage, # Multiplier
             "contracts": contracts,                   # Base asset amount
             "margin_pct": margin_pct,                 # margin_usd as % of balance
             # ═══ Levels ═══
-            "entry_price": current_price,
+            "entry_price": execution_entry if 'execution_entry' in locals() else current_price,
             "take_profit_price": tp_price,
-            "take_profit_pct": round(abs(tp_price - current_price) / current_price * 100, 2) if current_price > 0 else 0,
+            "take_profit_pct": round(abs(tp_price - (execution_entry if 'execution_entry' in locals() else current_price)) / (execution_entry if 'execution_entry' in locals() else current_price) * 100, 2) if current_price > 0 else 0,
             "stop_loss_price": sl_price,
-            "stop_loss_pct": round(abs(sl_price - current_price) / current_price * 100, 2) if current_price > 0 else 0,
+            "stop_loss_pct": round(abs(sl_price - (execution_entry if 'execution_entry' in locals() else current_price)) / (execution_entry if 'execution_entry' in locals() else current_price) * 100, 2) if current_price > 0 else 0,
             "risk_reward_ratio": rr_ratio,
             "liquidation_price": liq_price,
             # ═══ Legacy aliases (for backward compatibility) ═══
