@@ -1187,10 +1187,12 @@ class NadoTradingService(BaseTradingService):
                             tp_price = float(saved_p["tp_price"])
                             logger.info(f"[NadoTradingService] 💾 Restored TP ({tp_price:.4f}) from local persistence for {canonical_symbol}.")
                             
-                        # If still no SL, enforce 2.5% emergency fallback SL
                         if sl_price == 0.0 and entry > 0:
-                            sl_price = entry * 0.975 if direction == "LONG" else entry * 1.025
-                            logger.warning(f"[NadoTradingService] 🛡️ Applied emergency fallback SL ({sl_price:.4f}) for {canonical_symbol}!")
+                            logger.error(
+                                f"[NadoTradingService] 🚨 CRITICAL ALERT: Native SL for {canonical_symbol} "
+                                f"could not be found or restored after restart! Position may be unprotected "
+                                f"from software side. Manual intervention or risk reconciliation required."
+                            )
                             
                         if tp_price == 0.0 or sl_price == 0.0:
                             logger.warning(f"[NadoTradingService] ⚠️ Triggers for {canonical_symbol} (TP: {tp_price}, SL: {sl_price}).")
@@ -1251,6 +1253,11 @@ class NadoTradingService(BaseTradingService):
             # Re-fetch pos to ensure we have the latest state inside the lock
             pos = self.active_positions.get(symbol)
             if not pos:
+                return False
+                
+            # Race condition guard: if Fast Monitor is currently closing this position, DO NOT touch the triggers
+            if pos.get("is_closing"):
+                logger.info(f"[NadoTradingService] 🛑 Aborting SL update for {symbol} - position is currently being closed by Fast Monitor!")
                 return False
                 
             current_sl = pos.get("sl_price", 0)
