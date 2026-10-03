@@ -242,7 +242,7 @@ class TradingPipeline:
                 self.services.logger.info(f"[System_Core] {msg}")
                 break
 
-            print(f"\n🔍 ПОЛНЫЙ АНАЛИЗ (15m, 1H, 4H) KRAKEN FUTURES: {symbol}")
+            print(f"\n🔍 ПОЛНЫЙ АНАЛИЗ (15m, 1H, 4H) NADO DEX: {symbol}")
             tracker.record_scan()
 
             # СТАДИЯ 2: СБОР ДАННЫХ И ПРОВЕРКА СТАТУСА

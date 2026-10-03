@@ -118,64 +118,15 @@ class MarketDataService:
             except Exception as e:
                 self._log(f"⚠️ [MarketDataService] Failed to fetch Nado volume snapshots: {e}")
                 
-            # If dynamic fetch fails, fallback to product_map keys
+        # If dynamic fetch fails, fallback to product_map keys
             stablecoins = {'USDT', 'USDC', 'USDE', 'DAI', 'USD'}
             nado_symbols = [sym for sym in self.product_map.keys() if sym.upper() not in stablecoins]
             return [{"symbol": f"{sym}-USD", "volumeQuote": 10000000} for sym in nado_symbols[:limit]]
             
-        # Fallback to Kraken if Nado is disabled
-        url = "https://futures.kraken.com/derivatives/api/v3/tickers"
-        try:
-            session = await self._get_session()
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    tickers = data.get("tickers", [])
-                    
-                    perps = [t for t in tickers if t.get("tag") == "perpetual" and t.get("pair")]
-                    perps.sort(key=lambda x: float(x.get("volumeQuote", 0) or 0), reverse=True)
-                    
-                    top_symbols = []
-                    skip_symbols = {'WBTC'}
-                    
-                    for p in perps:
-                        pair = p.get("pair", "")
-                        if ":" in pair:
-                            base_asset = pair.split(":")[0]
-                            if base_asset == "XBT":
-                                base_asset = "BTC"
-                            
-                            if base_asset in skip_symbols:
-                                continue
-                                
-                            vol = round(float(p.get("volumeQuote", 0)), 2)
-                            change = round(float(p.get("change24h", 0)), 2)
-                            
-                            top_symbols.append({
-                                "symbol": base_asset,
-                                "vol24h": vol,
-                                "change24h": change
-                            })
-                            if len(top_symbols) >= limit:
-                                break
-                            
-                    if top_symbols:
-                        return top_symbols
-        except Exception as e:
-            self._log(f"⚠️ [MarketDataService] Failed to fetch Kraken tickers: {e}")
-            
+        self._log(f"⚠️ [MarketDataService] Nado Client not initialized. Cannot fetch active perps.")
         # Fallback list if API fails
         return [{"symbol": s, "vol24h": 0, "change24h": 0} for s in ["BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "LINK", "AVAX"]]
 
-    def _normalize_pair(self, symbol: str) -> str:
-        """Helper to convert generic symbols (BTC, SOL) to Kraken Futures Vanilla Perpetual format (PF_XBTUSD)."""
-        s = symbol.upper().replace("-", "").replace("/", "").replace("USDC", "").replace("USDT", "")
-        if s.startswith("BTC"):
-            s = "XBT"
-        elif s.startswith("DOGE"):
-            s = "XDG"
-            
-        return f"PF_{s}USD"
 
     def _normalize_candles(self, raw_candles: List[Any]) -> List[Dict[str, float]]:
         """Unified normalizer that accepts both dict and list API formats and returns a standard dict."""
@@ -232,8 +183,6 @@ class MarketDataService:
             return []
 
     async def _fetch_ohlc_interval(self, symbol: str, interval_min: int) -> dict:
-        pair = self._normalize_pair(symbol)
-        
         if getattr(self, "is_nado", False) or True: # Force Nado
             # CRITICAL: Fetch at least 50 candles so EMA-9 can properly converge. 20 is too few.
             candles = await self._fetch_nado_candles(symbol, interval_min, 50)
@@ -331,7 +280,6 @@ class MarketDataService:
 
     async def fetch_order_book(self, symbol: str) -> Dict[str, Any]:
         """Fetches real order book depth, spread, and wall strengths from Nado DEX."""
-        pair = self._normalize_pair(symbol)
         
         if self.is_nado and self.nado_client:
             try:
@@ -388,16 +336,7 @@ class MarketDataService:
             candles = res.get("candles_20", [])
             # We need a longer history to warm up EMA and MACD properly.
             # 200 candles is a good industry standard for stable EMA/MACD values.
-            if getattr(self, "is_nado", False):
-                candles = await self._fetch_nado_candles(symbol, 15, 200)
-            else:
-                pair = self._normalize_pair(symbol)
-                url = f"https://futures.kraken.com/api/charts/v1/trade/{pair}/15m"
-                session = await self._get_session()
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        candles = self._normalize_candles(data.get("candles", []))
+            candles = await self._fetch_nado_candles(symbol, 15, 200)
             
             if True: # Kept to maintain indentation level
                         if candles:

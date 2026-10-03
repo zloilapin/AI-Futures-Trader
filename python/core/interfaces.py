@@ -3,7 +3,7 @@ from typing import Dict, Any, List
 
 class BaseTradingService(ABC):
     """
-    Abstract Base Class for all trading services (Paper, Kraken, Nado).
+    Abstract Base Class for all trading services (Nado, Paper).
     Enforces a consistent interface across different execution environments.
     """
     

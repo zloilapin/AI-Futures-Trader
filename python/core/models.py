@@ -33,7 +33,7 @@ class Position(BaseModel):
     leverage: int
     open_time: float
     
-    # Optional fields for kraken/nado specific data
+    # Optional fields for nado specific data
     order_id: Optional[str] = None
     tp_order_id: Optional[str] = None
     sl_order_id: Optional[str] = None
