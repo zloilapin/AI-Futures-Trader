@@ -479,7 +479,7 @@ class TradingPipeline:
 
             # (Stage 4.5 Correlation Filter moved to RiskManager)
             # СТАДИЯ 4.6: ФАНДИНГ ГЕЙТ (Funding Rate Gate)
-            funding_rate = market_data.get("derivatives_data", {}).get("funding_rate", 0.0)
+            funding_rate = market_data.get("derivatives_data", {}).get("funding_rate") or 0.0
             if decision == "LONG" and funding_rate > 0.0005: # 0.05%
                 print(f"⏸️ Пропуск {symbol}. Фандинг гейт: Запрет LONG при экстремально положительном фандинге ({funding_rate*100:.3f}%).")
                 self.services.logger.info(f"[System_Core] Funding Gate: LONG denied for {symbol}. Funding = {funding_rate}")
