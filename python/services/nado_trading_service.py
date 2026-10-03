@@ -237,6 +237,7 @@ class NadoTradingService(BaseTradingService):
                         "sl_price": local_pos.get("sl_price", 0.0),
                         "leverage": local_pos.get("leverage", 10),
                         "pnl": pnl,
+                        "amount": base_amount,
                         "_subaccount": sa.subaccount,
                         "_product_id": product_id
                     })
@@ -533,8 +534,9 @@ class NadoTradingService(BaseTradingService):
                 exec_price_x18 = (exec_price_x18 // price_increment) * price_increment
                 trigger_price_x18 = (trigger_price_x18 // price_increment) * price_increment
                 
+                tp_digest = None
                 try:
-                    await asyncio.to_thread(
+                    tp_res = await asyncio.to_thread(
                         self.client.market.place_price_trigger_order,
                         product_id=product_id,
                         price_x18=str(exec_price_x18),
@@ -543,6 +545,7 @@ class NadoTradingService(BaseTradingService):
                         trigger_type=tp_type,
                         reduce_only=True
                     )
+                    tp_digest = tp_res.data.digest if tp_res and tp_res.data else None
                     logger.info(f"[NadoTradingService] 🎯 Native Take Profit placed at {tp_price}")
                 except Exception as e:
                     err_msg = str(e)
@@ -576,7 +579,9 @@ class NadoTradingService(BaseTradingService):
                 "product_id": product_id,
                 "sender": sender,
                 "sl_digest": sl_digest,
+                "tp_digest": tp_digest,
                 "sl_type": sl_type,
+                "tp_type": tp_type if tp_price > 0 else None,
                 "trigger_amount_x18": trigger_amount_x18,
                 "original_thesis": original_thesis,
                 "open_time": time.time()
@@ -1090,8 +1095,15 @@ class NadoTradingService(BaseTradingService):
                 tp_price = 0.0
                 sl_price = 0.0
                 sl_digest = None
+                tp_digest = None
                 sl_type = "oracle_price_below" if direction == "LONG" else "oracle_price_above"
                 trigger_amount_x18 = None
+                
+                # Pre-load known digests from local persistence to do exact matching if possible
+                saved_positions = self._load_positions()
+                saved_p = saved_positions.get(canonical_symbol) or saved_positions.get(base_symbol) or {}
+                known_sl_digest = saved_p.get("sl_digest")
+                known_tp_digest = saved_p.get("tp_digest")
                 
                 try:
                     orders = await self._fetch_trigger_orders(product_id)
@@ -1122,10 +1134,29 @@ class NadoTradingService(BaseTradingService):
                         order_data = getattr(getattr(o, "order", None), "order", None)
                         amt_x18 = getattr(order_data, "amount", None) if order_data else None
                         
+                        # 1. Verification: Subaccount Match
+                        if str(getattr(order_data, "subaccount", None)) != str(self.default_subaccount_id):
+                            continue
+                            
+                        # 2. Verification: Opposite Direction Check
+                        o_amount = float(amt_x18) / 1e18 if amt_x18 else 0
+                        is_opposite_dir = (direction == "LONG" and o_amount < 0) or (direction == "SHORT" and o_amount > 0)
+                        if not is_opposite_dir:
+                            continue
+                            
+                        # 3. Verification: Size Match Check (to avoid matching old/partial orders)
+                        pos_amount = abs(float(pos.get("amount", 0)))
+                        if pos_amount > 0 and abs(abs(o_amount) - pos_amount) / max(pos_amount, 1e-6) > 0.05:
+                            continue
+                        
+                        is_sl_digest_match = known_sl_digest and order_digest == known_sl_digest
+                        is_tp_digest_match = known_tp_digest and order_digest == known_tp_digest
+                        
                         if direction == "LONG":
-                            if t_price > entry and tp_price == 0.0:
+                            if is_tp_digest_match or (not known_tp_digest and t_price > entry and tp_price == 0.0):
                                 tp_price = t_price
-                            elif t_price <= entry and sl_price == 0.0:
+                                tp_digest = order_digest
+                            elif is_sl_digest_match or (not known_sl_digest and t_price <= entry and sl_price == 0.0):
                                 sl_price = t_price
                                 sl_digest = order_digest
                                 trigger_amount_x18 = amt_x18
@@ -1135,9 +1166,10 @@ class NadoTradingService(BaseTradingService):
                                             sl_type = f
                                             break
                         else: # SHORT
-                            if t_price < entry and tp_price == 0.0:
+                            if is_tp_digest_match or (not known_tp_digest and t_price < entry and tp_price == 0.0):
                                 tp_price = t_price
-                            elif t_price >= entry and sl_price == 0.0:
+                                tp_digest = order_digest
+                            elif is_sl_digest_match or (not known_sl_digest and t_price >= entry and sl_price == 0.0):
                                 sl_price = t_price
                                 sl_digest = order_digest
                                 trigger_amount_x18 = amt_x18
@@ -1148,9 +1180,6 @@ class NadoTradingService(BaseTradingService):
                                             break
 
                     if tp_price == 0.0 or sl_price == 0.0:
-                        # Attempt to restore missing triggers from local persistence
-                        saved_positions = self._load_positions()
-                        saved_p = saved_positions.get(canonical_symbol) or saved_positions.get(base_symbol) or {}
                         if sl_price == 0.0 and saved_p.get("sl_price", 0.0) > 0:
                             sl_price = float(saved_p["sl_price"])
                             logger.info(f"[NadoTradingService] 💾 Restored SL ({sl_price:.4f}) from local persistence for {canonical_symbol}.")
