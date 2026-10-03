@@ -578,7 +578,8 @@ class NadoTradingService(BaseTradingService):
                 "sl_digest": sl_digest,
                 "sl_type": sl_type,
                 "trigger_amount_x18": trigger_amount_x18,
-                "original_thesis": original_thesis
+                "original_thesis": original_thesis,
+                "open_time": time.time()
             }
             self._save_positions()
                 
@@ -711,13 +712,27 @@ class NadoTradingService(BaseTradingService):
                         history = await asyncio.to_thread(self.client.market.get_subaccount_historical_orders, params)
                         
                         if history and history.orders:
+                            expected_base = abs(float(pos.get("trigger_amount_x18", 0)) / 1e18) if "trigger_amount_x18" in pos else 0
+                            open_time = float(pos.get("open_time", 0))
+
                             # 1. Match closing order (opposite sign of position direction)
                             for order in history.orders:
                                 quote = abs(float(order.quote_filled))
                                 base = abs(float(order.base_filled))
                                 bf = float(order.base_filled)
+                                
+                                # Strict Time Check
+                                if open_time > 0 and hasattr(order, "timestamp"):
+                                    order_ts_sec = float(order.timestamp) / 1000.0 if len(str(order.timestamp)) > 10 else float(order.timestamp)
+                                    if order_ts_sec < open_time:
+                                        continue
+                                        
                                 if (direction == "LONG" and bf < 0) or (direction == "SHORT" and bf > 0):
                                     if base > 0:
+                                        # Strict Size Match Check (allow up to 5% tolerance for exchange rounding)
+                                        if expected_base > 0 and abs(base - expected_base) / max(expected_base, 1e-6) > 0.05:
+                                            continue
+                                            
                                         exec_price = quote / base
                                         logger.info(f"[NadoTradingService] 🔍 Found exact exit execution price from history: {exec_price}")
                                         exit_price = exec_price
@@ -729,6 +744,11 @@ class NadoTradingService(BaseTradingService):
                                 quote = abs(float(order.quote_filled))
                                 base = abs(float(order.base_filled))
                                 bf = float(order.base_filled)
+                                
+                                # Strict Size Match Check
+                                if expected_base > 0 and abs(base - expected_base) / max(expected_base, 1e-6) > 0.05:
+                                    continue
+                                    
                                 if (direction == "LONG" and bf > 0) or (direction == "SHORT" and bf < 0):
                                     if base > 0:
                                         hist_entry = quote / base
