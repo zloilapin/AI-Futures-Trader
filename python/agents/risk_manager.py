@@ -375,14 +375,14 @@ class RiskManager(BaseAgent):
             final_leverage = min(required_leverage, safe_ceiling_leverage)
             final_leverage = max(1.0, float(int(final_leverage))) # Floor instead of round to never exceed ceiling
             
-            # ═══ 6. Position Size Reduction (If Notional Exceeds Usable Margin at Final Leverage) ═══
-            # Since final_leverage is rounded down, the required margin (notional / final_leverage) increases.
-            # We must ensure this new margin doesn't exceed usable_margin.
-            max_safe_notional = usable_margin * final_leverage
+            # ═══ 6. Position Size Reduction (Enforcing Target Margin) ═══
+            # Since final_leverage is rounded down, the required margin (notional / final_leverage) would naturally expand.
+            # To strictly enforce the target_margin_usd (Variant A: margin is the anchor), we must cap notional_usd.
+            max_safe_notional = target_margin_usd * final_leverage
             if notional_usd > max_safe_notional:
                 self.logger.warning(
-                    f"[{self.name}] Required margin at {final_leverage}x exceeds usable margin. "
-                    f"Reducing notional from ${notional_usd:.2f} to ${max_safe_notional:.2f}."
+                    f"[{self.name}] Required margin at {final_leverage}x would exceed target margin. "
+                    f"Reducing notional from ${notional_usd:.2f} to ${max_safe_notional:.2f} to strictly enforce target."
                 )
                 notional_usd = max_safe_notional
                 contracts = notional_usd / execution_entry if execution_entry > 0 else 0
