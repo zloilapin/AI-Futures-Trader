@@ -1449,25 +1449,25 @@ class NadoTradingService(BaseTradingService):
                                 )
                                 
                                 async def _close_and_notify_fast(sym=symbol, t_name=trigger_name, p_dict=dict(pos), cur_p=current_price):
-                                        success, pnl = await self.force_close_position(sym, bypass_check=True)
-                                        if success:
-                                            pnl_emoji = "🎉" if pnl >= 0 else "🔻"
-                                            msg = (
-                                                f"{pnl_emoji} *TRADE CLOSED / СДЕЛКА ЗАКРЫТА (FAST_MONITOR_{t_name})*\n\n"
-                                                f"🪙 *Asset / Монета:* `{sym}`\n"
-                                                f"📊 *Direction / Направление:* `{p_dict.get('direction', 'UNKNOWN')}`\n"
-                                                f"🎯 *Entry / Вход:* `${p_dict.get('entry_price', 0):,.4f}` ➔ *Exit / Выход:* `${cur_p:,.4f}`\n"
-                                                f"💰 *PnL:* `${pnl:,.2f}`\n"
-                                            )
-                                            try:
-                                                from services.telegram_service import TelegramService
-                                                tg = TelegramService()
-                                                await tg.send_message(msg)
-                                                await tg.broadcast_to_channel(msg)
-                                            except Exception as tg_err:
-                                                logger.warning(f"[NadoTradingService] ⚠️ Не удалось отправить TG уведомление закрытия: {tg_err}")
+                                    success, pnl = await self.force_close_position(sym, bypass_check=True)
+                                    if success:
+                                        pnl_emoji = "🎉" if pnl >= 0 else "🔻"
+                                        msg = (
+                                            f"{pnl_emoji} *TRADE CLOSED / СДЕЛКА ЗАКРЫТА (FAST_MONITOR_{t_name})*\n\n"
+                                            f"🪙 *Asset / Монета:* `{sym}`\n"
+                                            f"📊 *Direction / Направление:* `{p_dict.get('direction', 'UNKNOWN')}`\n"
+                                            f"🎯 *Entry / Вход:* `${p_dict.get('entry_price', 0):,.4f}` ➔ *Exit / Выход:* `${cur_p:,.4f}`\n"
+                                            f"💰 *PnL:* `${pnl:,.2f}`\n"
+                                        )
+                                        try:
+                                            from services.telegram_service import TelegramService
+                                            tg = TelegramService()
+                                            await tg.send_message(msg)
+                                            await tg.broadcast_to_channel(msg)
+                                        except Exception as tg_err:
+                                            logger.warning(f"[NadoTradingService] ⚠️ Не удалось отправить TG уведомление закрытия: {tg_err}")
 
-                                    asyncio.create_task(_close_and_notify_fast())
+                                asyncio.create_task(_close_and_notify_fast())
                     except Exception as sym_err:
                         logger.warning(f"[NadoTradingService] ⚠️ Fast Price Monitor error on {symbol}: {sym_err}")
                             
