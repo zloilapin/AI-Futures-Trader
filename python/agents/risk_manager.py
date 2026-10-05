@@ -375,27 +375,18 @@ class RiskManager(BaseAgent):
             final_leverage = min(required_leverage, safe_ceiling_leverage)
             final_leverage = max(1.0, float(int(final_leverage))) # Floor instead of round to never exceed ceiling
             
-            # ═══ 6. Position Size Reduction (If Required > Safe Ceiling) ═══
-            if required_leverage > safe_ceiling_leverage:
-                # We need more leverage than is safe to open the requested notional size.
-                # Must reduce notional to fit within max_margin * safe_ceiling_leverage
-                max_safe_notional = usable_margin * safe_ceiling_leverage
-                if notional_usd > max_safe_notional:
-                    self.logger.warning(
-                        f"[{self.name}] Required leverage ({required_leverage:.1f}x) > Safe Final ({final_leverage}x). "
-                        f"Reducing notional from ${notional_usd:.2f} to ${max_safe_notional:.2f}."
-                    )
-                    notional_usd = max_safe_notional
-                    contracts = notional_usd / execution_entry if execution_entry > 0 else 0
-                    # Recalculate Risk USD based on reduced position size
-                    risk_amount_usd = contracts * distance_to_sl
-            
-            # Also apply absolute max notional guard in case it wasn't caught
-            # Replaced artificial final_leverage calculation with actual margin bound
-            max_notional_usd = usable_margin * safe_ceiling_leverage
-            if notional_usd > max_notional_usd:
-                notional_usd = max_notional_usd
+            # ═══ 6. Position Size Reduction (If Notional Exceeds Usable Margin at Final Leverage) ═══
+            # Since final_leverage is rounded down, the required margin (notional / final_leverage) increases.
+            # We must ensure this new margin doesn't exceed usable_margin.
+            max_safe_notional = usable_margin * final_leverage
+            if notional_usd > max_safe_notional:
+                self.logger.warning(
+                    f"[{self.name}] Required margin at {final_leverage}x exceeds usable margin. "
+                    f"Reducing notional from ${notional_usd:.2f} to ${max_safe_notional:.2f}."
+                )
+                notional_usd = max_safe_notional
                 contracts = notional_usd / execution_entry if execution_entry > 0 else 0
+                # Recalculate Risk USD based on reduced position size
                 risk_amount_usd = contracts * distance_to_sl
                 
             effective_leverage = final_leverage
