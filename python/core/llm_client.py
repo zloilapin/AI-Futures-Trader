@@ -162,7 +162,8 @@ class LLMClient:
                     response = await self.client.chat.completions.create(
                         messages=[{"role": "user", "content": current_prompt}],
                         model=self.model_name,
-                        response_format={"type": "json_object"}
+                        response_format={"type": "json_object"},
+                        temperature=0.0
                     )
                     if hasattr(response, "usage") and response.usage:
                         p_tok = getattr(response.usage, "prompt_tokens", 0) or 0
@@ -205,7 +206,8 @@ class LLMClient:
                         model=self.model_name,
                         contents=current_prompt,
                         config=types.GenerateContentConfig(
-                            response_mime_type="application/json"
+                            response_mime_type="application/json",
+                            temperature=0.0
                         )
                     )
                     return response.text
@@ -267,7 +269,8 @@ class LLMClient:
                     payload = {
                         "model": model_to_try if not is_cerebras else self.model_name,
                         "messages": messages,
-                        "max_tokens": 3500
+                        "max_tokens": 3500,
+                        "temperature": 0.0
                     }
                     
                     # OpenRouter reasoning effort control: use 'low' effort so reasoning is brief and budget is left for output

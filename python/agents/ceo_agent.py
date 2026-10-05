@@ -32,8 +32,7 @@ class CEOAgent(BaseAgent):
     """
     The Chief Investment Officer (CIO / CEO) of the trading syndicate.
     
-    Uses Llama 70B as the Primary CEO, and Gemini 3.7 Flash as the Escalation Model 
-    for medium-confidence trades.
+    Uses dynamic OpenRouter models (e.g. Qwen, DeepSeek) for the Primary CEO and Escalation.
     
     Architecture:
     - Trend strength determines DIRECTIONAL CONFIDENCE (0..100).
