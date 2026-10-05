@@ -1428,27 +1428,27 @@ class NadoTradingService(BaseTradingService):
                             if current_price < pos.get("lowest_price", entry):
                                 pos["lowest_price"] = current_price
 
-                            # Software SL/TP Trigger Check (if on-chain trigger not active)
-                            if not pos.get("sl_digest"):
-                                direction = pos.get("direction", "LONG").upper()
-                                sl_price = float(pos.get("sl_price", 0.0))
-                                tp_price = float(pos.get("tp_price", 0.0))
+                            # Software SL/TP Trigger Check (ALWAYS ACTIVE as a safety net)
+                            # We check this regardless of sl_digest to cover exchange failures, dropped orders, or replacement windows
+                            direction = pos.get("direction", "LONG").upper()
+                            sl_price = float(pos.get("sl_price", 0.0))
+                            tp_price = float(pos.get("tp_price", 0.0))
+                            
+                            hit_sl = (direction == "LONG" and sl_price > 0 and current_price <= sl_price) or \
+                                     (direction == "SHORT" and sl_price > 0 and current_price >= sl_price)
+                            hit_tp = (direction == "LONG" and tp_price > 0 and current_price >= tp_price) or \
+                                     (direction == "SHORT" and tp_price > 0 and current_price <= tp_price)
+                                     
+                            if (hit_sl or hit_tp) and not pos.get("is_closing"):
+                                pos["is_closing"] = True
+                                trigger_name = "STOP LOSS" if hit_sl else "TAKE PROFIT"
+                                target_val = sl_price if hit_sl else tp_price
+                                logger.info(
+                                    f"[NadoTradingService] 🚨 Fast Monitor: Software {trigger_name} triggered for {symbol}! "
+                                    f"Current: {current_price:.4f}, Target: {target_val:.4f}. Executing market close..."
+                                )
                                 
-                                hit_sl = (direction == "LONG" and sl_price > 0 and current_price <= sl_price) or \
-                                         (direction == "SHORT" and sl_price > 0 and current_price >= sl_price)
-                                hit_tp = (direction == "LONG" and tp_price > 0 and current_price >= tp_price) or \
-                                         (direction == "SHORT" and tp_price > 0 and current_price <= tp_price)
-                                         
-                                if (hit_sl or hit_tp) and not pos.get("is_closing"):
-                                    pos["is_closing"] = True
-                                    trigger_name = "STOP LOSS" if hit_sl else "TAKE PROFIT"
-                                    target_val = sl_price if hit_sl else tp_price
-                                    logger.info(
-                                        f"[NadoTradingService] 🚨 Fast Monitor: Software {trigger_name} triggered for {symbol}! "
-                                        f"Current: {current_price:.4f}, Target: {target_val:.4f}. Executing market close..."
-                                    )
-                                    
-                                    async def _close_and_notify_fast(sym=symbol, t_name=trigger_name, p_dict=dict(pos), cur_p=current_price):
+                                async def _close_and_notify_fast(sym=symbol, t_name=trigger_name, p_dict=dict(pos), cur_p=current_price):
                                         success, pnl = await self.force_close_position(sym, bypass_check=True)
                                         if success:
                                             pnl_emoji = "🎉" if pnl >= 0 else "🔻"
