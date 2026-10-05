@@ -141,8 +141,8 @@ class RiskManager(BaseAgent):
             veto_category = "INSUFFICIENT_BALANCE"
         elif decision in ["LONG", "SHORT"] and conviction >= min_conviction:
             
-            # --- Portfolio Correlated Exposure Check ---
-            # Maximum total portfolio risk across all open positions
+            # --- Total Open Risk Check ---
+            # Maximum total portfolio risk across all open positions (simple sum, no correlation adjustments yet)
             MAX_TOTAL_PORTFOLIO_RISK_PCT = profile_rules.get("portfolio_risk_cap", 0.03)
             max_portfolio_risk_usd = total_balance * MAX_TOTAL_PORTFOLIO_RISK_PCT
             
@@ -169,11 +169,11 @@ class RiskManager(BaseAgent):
             remaining_risk_budget_usd = max(0.0, max_portfolio_risk_usd - existing_risk_usd)
             
             if remaining_risk_budget_usd < (total_balance * 0.002):
-                msg = f"Portfolio correlated risk budget exhausted: Active risk ${existing_risk_usd:.2f} >= Cap ${max_portfolio_risk_usd:.2f} ({MAX_TOTAL_PORTFOLIO_RISK_PCT*100}% limit)."
-                self.logger.warning(f"[{self.name}] 🚫 PORTFOLIO RISK VETO: {msg}")
+                msg = f"Total open risk budget exhausted: Active risk ${existing_risk_usd:.2f} >= Cap ${max_portfolio_risk_usd:.2f} ({MAX_TOTAL_PORTFOLIO_RISK_PCT*100}% limit)."
+                self.logger.warning(f"[{self.name}] 🚫 TOTAL OPEN RISK VETO: {msg}")
                 return {
                     "approved": False,
-                    "veto_category": "PORTFOLIO_RISK_CAP",
+                    "veto_category": "TOTAL_OPEN_RISK_CAP",
                     "reasoning": msg
                 }
 
