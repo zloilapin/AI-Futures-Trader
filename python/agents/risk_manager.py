@@ -177,35 +177,6 @@ class RiskManager(BaseAgent):
                     "reasoning": msg
                 }
 
-            # --- Expectancy Gate with Hysteresis (N >= 30 trades) ---
-            win_count = portfolio_data.get("win_count", 0)
-            loss_count = portfolio_data.get("loss_count", 0)
-            total_trades = win_count + loss_count
-            
-            expectancy_penalty_active = getattr(self, "_expectancy_penalty_active", False)
-            
-            if total_trades >= 30:
-                win_rate = win_count / total_trades
-                target_rr = tp_mult / sl_mult
-                expected_r = (win_rate * target_rr) - (1.0 - win_rate)
-                
-                # Hysteresis: trigger at E < -0.10R, clear at E > +0.05R
-                if not expectancy_penalty_active and expected_r < -0.10:
-                    self._expectancy_penalty_active = True
-                    expectancy_penalty_active = True
-                elif expectancy_penalty_active and expected_r > 0.05:
-                    self._expectancy_penalty_active = False
-                    expectancy_penalty_active = False
-                    
-                if expectancy_penalty_active:
-                    penalty_factor = 0.75
-                    self.logger.warning(
-                        f"[{self.name}] ⚠️ EXPECTANCY GATE ACTIVE (Hysteresis ON): Expected R is {expected_r:.2f}R (< -0.10R threshold on {total_trades} trades). "
-                        f"WR: {win_rate*100:.1f}%. Applying risk penalty (x{penalty_factor}) and raising min_conviction."
-                    )
-                    min_conviction = min(95, min_conviction + 5)
-                    base_risk *= penalty_factor
-            
             trade_action = ceo_decision.get("trade_action", "ENTER")
             if trade_action == "WAIT_FOR_PULLBACK":
                 msg = f"CEO recommended WAIT_FOR_PULLBACK (Overheated market condition). Blocking trade execution."
@@ -214,13 +185,6 @@ class RiskManager(BaseAgent):
                     "approved": False,
                     "veto_category": "WAIT_FOR_PULLBACK",
                     "reasoning": msg
-                }
-                    
-            if conviction < min_conviction:
-                return {
-                    "approved": False,
-                    "veto_category": "LOW_CONFIDENCE",
-                    "reasoning": f"Conviction {conviction} is below Win Rate Gate threshold {min_conviction}"
                 }
 
             # --- WORST CASE EXECUTION (Compute FIRST) ---
@@ -252,6 +216,55 @@ class RiskManager(BaseAgent):
                 
             distance_to_sl = abs(execution_entry - sl_price)
             distance_to_tp = abs(tp_price - execution_entry)
+            
+            # --- Calculate Realized Unit RR for Expectancy Gate ---
+            derivatives_data = market_data.get("derivatives_data", {})
+            fee_pct = float(derivatives_data.get("taker_fee_pct") or 0.0005) * 2 # Open + Close
+            funding_rate = float(derivatives_data.get("funding_rate") or 0.0001)
+            funding_cost_pct = funding_rate if decision == "LONG" else -funding_rate
+            
+            unit_entry_fee = execution_entry * (fee_pct / 2)
+            unit_tp_exit_fee = tp_price * (fee_pct / 2)
+            unit_sl_exit_fee = sl_price * (fee_pct / 2)
+            unit_funding_cost = execution_entry * funding_cost_pct
+            
+            unit_net_profit = distance_to_tp - unit_entry_fee - unit_tp_exit_fee - unit_funding_cost
+            unit_net_loss = distance_to_sl + unit_entry_fee + unit_sl_exit_fee + unit_funding_cost
+            realized_rr = unit_net_profit / unit_net_loss if unit_net_loss > 0 else 0
+            
+            # --- Expectancy Gate with Hysteresis (N >= 30 trades) ---
+            win_count = portfolio_data.get("win_count", 0)
+            loss_count = portfolio_data.get("loss_count", 0)
+            total_trades = win_count + loss_count
+            expectancy_penalty_active = getattr(self, "_expectancy_penalty_active", False)
+            
+            if total_trades >= 30:
+                win_rate = win_count / total_trades
+                expected_r = (win_rate * realized_rr) - (1.0 - win_rate)
+                
+                # Hysteresis: trigger at E < -0.10R, clear at E > +0.05R
+                if not expectancy_penalty_active and expected_r < -0.10:
+                    self._expectancy_penalty_active = True
+                    expectancy_penalty_active = True
+                elif expectancy_penalty_active and expected_r > 0.05:
+                    self._expectancy_penalty_active = False
+                    expectancy_penalty_active = False
+                    
+                if expectancy_penalty_active:
+                    penalty_factor = 0.75
+                    self.logger.warning(
+                        f"[{self.name}] ⚠️ EXPECTANCY GATE ACTIVE: Realized Expected R is {expected_r:.2f}R (< -0.10R threshold on {total_trades} trades). "
+                        f"WR: {win_rate*100:.1f}%. Applying risk penalty (x{penalty_factor}) and raising min_conviction."
+                    )
+                    min_conviction = min(95, min_conviction + 5)
+                    base_risk *= penalty_factor
+                    
+            if conviction < min_conviction:
+                return {
+                    "approved": False,
+                    "veto_category": "LOW_CONFIDENCE",
+                    "reasoning": f"Conviction {conviction} is below Expectancy/Win Rate Gate threshold {min_conviction}"
+                }
             
             # Slippage Penalty
             spread_pct = float(market_data.get("order_book_data", {}).get("spread_pct", 0))
@@ -338,18 +351,6 @@ class RiskManager(BaseAgent):
                 notional_usd *= 0.8 # Cut notional by 20%
                 contracts = notional_usd / execution_entry if execution_entry > 0 else 0
                 risk_amount_usd = contracts * distance_to_sl # Fix HIGH #4: Recalculate planned risk to match reduced position
-            
-            # Fee and Funding Impact on RR
-            derivatives_data = market_data.get("derivatives_data", {})
-            fee_pct = float(derivatives_data.get("taker_fee_pct") or 0.0005) * 2 # Open + Close
-            funding_rate = float(derivatives_data.get("funding_rate") or 0.0001)
-            
-            # If LONG, positive funding rate means we PAY (cost). Negative means we EARN (rebate).
-            # If SHORT, positive funding rate means we EARN (rebate). Negative means we PAY (cost).
-            if decision == "LONG":
-                funding_cost_pct = funding_rate
-            else:
-                funding_cost_pct = -funding_rate
             
             # ═══ 4. Target Margin & Required Leverage ═══
             target_margin_pct = profile_rules.get("target_margin_pct", 0.10)
@@ -460,20 +461,7 @@ class RiskManager(BaseAgent):
             liq_price = round(liq_price, 6)
             
             # RR adjusted for exact nominal fees and directional funding
-            gross_profit = contracts * distance_to_tp
-            gross_loss = contracts * distance_to_sl
-            
-            single_side_fee_pct = fee_pct / 2
-            entry_fee = notional_usd * single_side_fee_pct
-            tp_exit_fee = (contracts * tp_price) * single_side_fee_pct
-            sl_exit_fee = (contracts * sl_price) * single_side_fee_pct
-            
-            funding_cost = notional_usd * funding_cost_pct
-            
-            net_profit = gross_profit - entry_fee - tp_exit_fee - funding_cost
-            net_loss = gross_loss + entry_fee + sl_exit_fee + funding_cost
-            
-            rr_ratio = round(net_profit / net_loss if net_loss > 0 else 0, 2)
+            rr_ratio = round(realized_rr, 2)
             
             # ═══ 7. Verify Actual Risk (using rounded contracts) ═══
             actual_risk_usd = contracts * distance_to_sl
