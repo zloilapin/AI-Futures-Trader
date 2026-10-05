@@ -222,13 +222,13 @@ class NadoTradingService(BaseTradingService):
                             real_entry = current_price
                         entry_price = real_entry
                     
-                    # Calculate Net PnL (Deducting ~0.05% round-trip taker fees)
+                    # Calculate Net PnL (Deducting ~0.10% round-trip taker fees: 0.05% entry + 0.05% exit)
                     if direction == "LONG":
                         gross_pnl = (current_price - entry_price) * abs(base_amount)
                     else:
                         gross_pnl = (entry_price - current_price) * abs(base_amount)
                         
-                    net_pnl = gross_pnl - (size_usd * 0.0005)
+                    net_pnl = gross_pnl - (size_usd * 0.001)
                         
                     active_list.append({
                         "symbol": symbol,
@@ -787,7 +787,8 @@ class NadoTradingService(BaseTradingService):
                 else:
                     gross_pnl = (entry_price - exit_price) / entry_price * size_usd
                     
-                estimated_fees = size_usd * 0.0005
+                # Exact round-trip fee approximation (0.05% * 2)
+                estimated_fees = size_usd * 0.001
                 target_pnl = gross_pnl - estimated_fees
                 logger.info(f"[NadoTradingService] 💰 Gross PnL: ${gross_pnl:.2f}, Est Fees: ${estimated_fees:.2f} -> Net PnL: ${target_pnl:.2f}")
                 if symbol in self.active_positions:
