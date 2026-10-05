@@ -110,11 +110,8 @@ class TradingPipeline:
         print(f"⚙️ ПРОФИЛЬ РИСКА: {profile} | 📐 MULTI-TIMEFRAME (15m + 1H + 4H) АКТИВЕН")
         print("="*65)
 
-        if is_rest and not force_scan:
-            print(f"🌙 [Schedule] НОЧНОЙ РЕЖИМ СКАНИРОВАНИЯ. Сейчас {time_str} (с 19:00 до 07:00 МСК).")
-
-        if force_scan and is_rest:
-            print(f"⚡ [ForceScan] Ручной запуск /scan во время отдыха ({time_str}). Пропуск тихого режима!")
+        if force_scan:
+            print(f"⚡ [ForceScan] Ручной запуск /scan ({time_str}).")
 
         # Проверка Cooldown после серии убытков
         cooldown_until = getattr(self.services.trading_service, "cooldown_until", 0)
@@ -224,10 +221,7 @@ class TradingPipeline:
         any_signal_sent = False
         scan_summaries = []  # Сводка по каждому активу для отчёта ручного /scan
 
-        # QW Quiet Rest: Выход из цикла, если сейчас тихий час и нет force_scan
-        if is_rest and not force_scan:
-            print(f"⏸️ [Schedule] Тихий час. Позиции проверены. Пропуск новых сделок.")
-            return
+        # QW Quiet Rest disabled: Bot runs 24/7 (48 cycles per day at 30 min intervals)
 
         # Фильтруем активы: не сканируем то, что уже открыто
         selected_assets = [s for s in selected_assets if s not in self.services.trading_service.active_positions]
