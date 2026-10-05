@@ -342,7 +342,14 @@ class RiskManager(BaseAgent):
             # Fee and Funding Impact on RR
             derivatives_data = market_data.get("derivatives_data", {})
             fee_pct = float(derivatives_data.get("taker_fee_pct") or 0.0005) * 2 # Open + Close
-            funding_pct = abs(float(derivatives_data.get("funding_rate") or 0.0001))
+            funding_rate = float(derivatives_data.get("funding_rate") or 0.0001)
+            
+            # If LONG, positive funding rate means we PAY (cost). Negative means we EARN (rebate).
+            # If SHORT, positive funding rate means we EARN (rebate). Negative means we PAY (cost).
+            if decision == "LONG":
+                funding_cost_pct = funding_rate
+            else:
+                funding_cost_pct = -funding_rate
             
             # ═══ 4. Target Margin & Required Leverage ═══
             target_margin_pct = profile_rules.get("target_margin_pct", 0.10)
@@ -452,9 +459,9 @@ class RiskManager(BaseAgent):
             tp_price = round(tp_price, 6)
             liq_price = round(liq_price, 6)
             
-            # RR adjusted for fees
-            effective_tp_dist = distance_to_tp - (current_price * (fee_pct + funding_pct))
-            effective_sl_dist = distance_to_sl + (current_price * (fee_pct + funding_pct))
+            # RR adjusted for fees and directional funding
+            effective_tp_dist = distance_to_tp - (current_price * (fee_pct + funding_cost_pct))
+            effective_sl_dist = distance_to_sl + (current_price * (fee_pct + funding_cost_pct))
             rr_ratio = round(effective_tp_dist / effective_sl_dist if effective_sl_dist > 0 else 0, 2)
             
             # ═══ 7. Verify Actual Risk (using rounded contracts) ═══
