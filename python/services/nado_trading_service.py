@@ -308,7 +308,10 @@ class NadoTradingService(BaseTradingService):
             size_increment = params_dict["size_increment_x18"]
             price_increment = params_dict["price_increment_x18"]
             
-            amount_x18 = (amount_x18 // size_increment) * size_increment
+            abs_amount_x18 = abs(amount_x18)
+            abs_amount_x18 = (abs_amount_x18 // size_increment) * size_increment
+            amount_x18 = abs_amount_x18 if amount_x18 >= 0 else -abs_amount_x18
+            
             price_x18 = (price_x18 // price_increment) * price_increment
             
             if amount_x18 == 0:
@@ -1052,12 +1055,7 @@ class NadoTradingService(BaseTradingService):
             positions = await self.get_active_positions(bypass_cache=True)
             
             # Clean up local active positions that are no longer open on-chain
-            active_bases = {p["symbol"].split('-')[0].upper() for p in positions}
-            ghost_keys = [k for k in list(self.active_positions.keys()) if k.split('-')[0].upper() not in active_bases]
-            for k in ghost_keys:
-                logger.info(f"[NadoTradingService] 🧹 Removed closed position '{k}' from local tracking during sync.")
-                del self.active_positions[k]
-                
+            # DELEGATED to check_and_update_positions() to ensure PnL and Streaks are properly recorded.
             restored = 0
             for pos in positions:
                 symbol = pos["symbol"]

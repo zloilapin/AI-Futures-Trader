@@ -62,8 +62,9 @@ async def main():
     from services.nado_trading_service import NadoTradingService
     try:
         from core.nado_helper import create_configured_nado_client
+        signer_val = config.INK_PRIVATE_KEY.get_secret_value()
         global_nado_client = create_configured_nado_client(
-            signer=config.INK_PRIVATE_KEY.get_secret_value(),
+            signer=signer_val if signer_val else None,
             network_name=config.NADO_NETWORK
         )
         trading_service = NadoTradingService(nado_client=global_nado_client)
@@ -176,8 +177,7 @@ async def main():
                 while True:
                     try:
                         sentinel_interval = getattr(config, "SENTINEL_INTERVAL_SECONDS", 30)
-                        if len(trading_service.active_positions) > 0:
-                            await pipeline.run_sentinel_checks()
+                        await pipeline.run_sentinel_checks()
                     except Exception as e:
                         logger.error(f"[SentinelLoop] Ошибка: {e}")
                     await asyncio.sleep(sentinel_interval)

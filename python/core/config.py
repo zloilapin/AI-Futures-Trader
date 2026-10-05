@@ -22,8 +22,8 @@ class Settings(BaseSettings):
     INK_PRIVATE_KEY: SecretStr = Field(default=SecretStr(""))
     NADO_NETWORK: Literal["TESTNET", "MAINNET"] = Field(default="TESTNET")
     
-    LIVE_TRADING_ENABLED: bool = Field(default=True)
-    NADO_LIVE_TRADING_ENABLED: bool = Field(default=True)
+    LIVE_TRADING_ENABLED: bool = Field(default=False)
+    NADO_LIVE_TRADING_ENABLED: bool = Field(default=False)
     
     # Телеграм
     TELEGRAM_BOT_TOKEN: str = Field(default="")
@@ -46,8 +46,8 @@ class Settings(BaseSettings):
     
     # Настройки времени сна
     TIMEZONE_OFFSET: int = Field(default=3)
-    REST_START_TIME: str = Field(default="24:00")
-    REST_END_TIME: str = Field(default="00:00")
+    REST_START_TIME: str = Field(default="19:00")
+    REST_END_TIME: str = Field(default="07:00")
     
     # Настройки логирования
     LOG_LEVEL: str = Field(default="INFO")

@@ -13,7 +13,11 @@ class MemoryManager:
     """
     def __init__(self, logger: TradeLogger, storage_path: str = "data/memory/"):
         self.logger = logger
-        self.storage_path = storage_path
+        # Normalize to always be relative to python/ directory
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if storage_path.startswith("python/") or storage_path.startswith("python\\"):
+            storage_path = storage_path[7:]
+        self.storage_path = os.path.join(base_dir, storage_path)
         self.name = "Memory_Manager"
         
         # Создаем папку для хранения истории, если её еще нет

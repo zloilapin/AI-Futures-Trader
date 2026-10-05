@@ -35,7 +35,7 @@ class RiskManager(BaseAgent):
             return 0.0
         delta = conviction - min_conviction
         if delta < 5:
-            return 0.85
+            return 0.70
         elif delta < 15:
             return 1.00
         elif delta < 20:
@@ -324,13 +324,13 @@ class RiskManager(BaseAgent):
                 veto_reason = msg
             elif spread_pct > config.SPREAD_PENALTY_THRESHOLD:
                 notional_usd *= 0.8 # Cut notional by 20%
-                contracts = notional_usd / current_price if current_price > 0 else 0
+                contracts = notional_usd / execution_entry if execution_entry > 0 else 0
                 risk_amount_usd = contracts * distance_to_sl # Fix HIGH #4: Recalculate planned risk to match reduced position
             
             # Fee and Funding Impact on RR
             derivatives_data = market_data.get("derivatives_data", {})
-            fee_pct = float(derivatives_data.get("taker_fee_pct", 0.0005)) * 2 # Open + Close
-            funding_pct = abs(float(derivatives_data.get("funding_rate", 0.0001)))
+            fee_pct = float(derivatives_data.get("taker_fee_pct") or 0.0005) * 2 # Open + Close
+            funding_pct = abs(float(derivatives_data.get("funding_rate") or 0.0001))
             
             # ═══ 4. Target Margin & Required Leverage ═══
             target_margin_pct = profile_rules.get("target_margin_pct", 0.10)
@@ -379,7 +379,7 @@ class RiskManager(BaseAgent):
                         f"Reducing notional from ${notional_usd:.2f} to ${max_safe_notional:.2f}."
                     )
                     notional_usd = max_safe_notional
-                    contracts = notional_usd / current_price if current_price > 0 else 0
+                    contracts = notional_usd / execution_entry if execution_entry > 0 else 0
                     # Recalculate Risk USD based on reduced position size
                     risk_amount_usd = contracts * distance_to_sl
             
@@ -400,7 +400,7 @@ class RiskManager(BaseAgent):
             )
             
             # ═══ 7. Rounding & Final Math Alignment ═══
-            size_increment = float(derivatives_data.get("size_increment", 0.001))
+            size_increment = float(derivatives_data.get("size_increment") or 0.001)
             if size_increment > 0:
                 # Nado correctly floors the amount to size_increment, we should do the same
                 contracts = (contracts // size_increment) * size_increment
@@ -411,8 +411,8 @@ class RiskManager(BaseAgent):
             # --- 6. Maximum Notional Guard ---
             symbol = ceo_decision.get("symbol", "")
             
-            min_size = float(derivatives_data.get("min_size", 0.0))
-            min_notional = float(derivatives_data.get("min_notional", 0.0))
+            min_size = float(derivatives_data.get("min_size") or 0.0)
+            min_notional = float(derivatives_data.get("min_notional") or 0.0)
             
             # Sanity check: If reported min_size exceeds max possible notional of account, it's a testnet dummy artifact
             if min_size > 0 and (min_size * current_price) > max_notional_usd:

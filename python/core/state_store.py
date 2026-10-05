@@ -19,9 +19,19 @@ class StateStore:
         return cls._locks[filepath]
 
     @classmethod
+    def _normalize_path(cls, filepath: str) -> str:
+        if os.path.isabs(filepath):
+            return filepath
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if filepath.startswith("python/") or filepath.startswith("python\\"):
+            filepath = filepath[7:]
+        return os.path.join(base_dir, filepath)
+
+    @classmethod
     def load(cls, filepath: str, default: Any = None) -> Any:
         if default is None:
             default = {}
+        filepath = cls._normalize_path(filepath)
         if not os.path.exists(filepath):
             return default
             
@@ -35,6 +45,7 @@ class StateStore:
 
     @classmethod
     def save(cls, filepath: str, data: Any):
+        filepath = cls._normalize_path(filepath)
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         temp_filepath = f"{filepath}.tmp"
         
