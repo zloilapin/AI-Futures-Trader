@@ -495,10 +495,10 @@ class NadoTradingService(BaseTradingService):
             
             if direction.upper() == "LONG":
                 sl_type = "oracle_price_below"
-                tp_type = "oracle_price_above"
+                tp_type = "last_price_above"
             else:
                 sl_type = "oracle_price_above"
-                tp_type = "oracle_price_below"
+                tp_type = "last_price_below"
                 
             sl_digest = None
             price_increment_base = float(price_increment) / 1e18
