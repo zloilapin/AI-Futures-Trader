@@ -218,20 +218,27 @@ class RiskManager(BaseAgent):
                     "reasoning": f"Conviction {conviction} is below Win Rate Gate threshold {min_conviction}"
                 }
 
-            # Calculate ATR based SL and TP with a minimum floor to avoid noise
+            # --- WORST CASE EXECUTION (Compute FIRST) ---
+            expected_slippage_pct = config.EXPECTED_SLIPPAGE_PCT if hasattr(config, 'EXPECTED_SLIPPAGE_PCT') else 0.005
             if decision == "LONG":
-                sl_dist = max(atr_14 * sl_mult, current_price * config.MIN_SL_PCT)
-                tp_dist = max(atr_14 * tp_mult, current_price * config.MIN_TP_PCT)
-                sl_price = current_price - sl_dist
-                tp_price = current_price + tp_dist
+                execution_entry = current_price * (1.0 + expected_slippage_pct)
+            else:
+                execution_entry = current_price * (1.0 - expected_slippage_pct)
+
+            # Calculate ATR based SL and TP with a minimum floor, anchored to expected EXECUTION ENTRY
+            if decision == "LONG":
+                sl_dist = max(atr_14 * sl_mult, execution_entry * config.MIN_SL_PCT)
+                tp_dist = max(atr_14 * tp_mult, execution_entry * config.MIN_TP_PCT)
+                sl_price = execution_entry - sl_dist
+                tp_price = execution_entry + tp_dist
             else: # SHORT
-                sl_dist = max(atr_14 * sl_mult, current_price * config.MIN_SL_PCT)
-                tp_dist = max(atr_14 * tp_mult, current_price * config.MIN_TP_PCT)
-                sl_price = current_price + sl_dist
-                tp_price = current_price - tp_dist
+                sl_dist = max(atr_14 * sl_mult, execution_entry * config.MIN_SL_PCT)
+                tp_dist = max(atr_14 * tp_mult, execution_entry * config.MIN_TP_PCT)
+                sl_price = execution_entry + sl_dist
+                tp_price = execution_entry - tp_dist
                 
-            distance_to_sl = abs(current_price - sl_price)
-            distance_to_tp = abs(tp_price - current_price)
+            distance_to_sl = abs(execution_entry - sl_price)
+            distance_to_tp = abs(tp_price - execution_entry)
             
             # Slippage Penalty
             spread_pct = float(market_data.get("order_book_data", {}).get("spread_pct", 0))
@@ -288,15 +295,7 @@ class RiskManager(BaseAgent):
             # not a single price point for a single position. Adjusting SL based on a simplistic formula is dangerous.
             liq_price = 0.0
             
-            # --- WORST CASE EXECUTION ---
-            expected_slippage_pct = config.EXPECTED_SLIPPAGE_PCT if hasattr(config, 'EXPECTED_SLIPPAGE_PCT') else 0.005
-            if decision == "LONG":
-                execution_entry = current_price * (1.0 + expected_slippage_pct)
-            else:
-                execution_entry = current_price * (1.0 - expected_slippage_pct)
-                
-            # Recalculate distance after SL adjustment based on expected execution price
-            distance_to_sl = abs(execution_entry - sl_price)
+            # Execution entry already computed above, distance_to_sl is perfectly matched to expected entry.
 
             # ═══ 2. Position Sizing (canonical math) ═══
             # risk_amount_usd = how much USD we're willing to LOSE
