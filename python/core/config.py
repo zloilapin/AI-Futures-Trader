@@ -38,9 +38,9 @@ class Settings(BaseSettings):
     SENTINEL_COOLDOWN_SECONDS: int = Field(default=600, ge=10)
     
     # Настройки Sentinel (Risk Control)
-    SENTINEL_BE_ATR: float = Field(default=1.0)
-    SENTINEL_TRAIL_ACTIVATION_ATR: float = Field(default=1.5)
-    SENTINEL_TRAIL_DISTANCE_ATR: float = Field(default=1.5)
+    SENTINEL_BE_ATR: float = Field(default=2.0)
+    SENTINEL_TRAIL_ACTIVATION_ATR: float = Field(default=3.0)
+    SENTINEL_TRAIL_DISTANCE_ATR: float = Field(default=2.0)
     SENTINEL_MIN_IMPROVE_ATR: float = Field(default=0.25)
     SENTINEL_FAST_POLL_SEC: int = Field(default=5, ge=1)
     

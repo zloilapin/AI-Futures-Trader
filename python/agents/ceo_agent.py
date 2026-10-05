@@ -127,6 +127,9 @@ class CEOAgent(BaseAgent):
         if decision == "HOLD":
             self.logger.info(f"[{self.name}] Primary CEO decided HOLD. Bypassing escalation to save API costs.")
             print(f"⏩ [Escalation Bypassed] Рынок не имеет явного тренда (HOLD). Вторая модель ({self.escalation_llm.model_name}) не вызывается для экономии API.")
+        elif self.llm_client.model_name == self.escalation_llm.model_name:
+            self.logger.info(f"[{self.name}] Primary and Escalation models are identical ({self.llm_client.model_name}). Bypassing escalation to prevent echo chamber.")
+            print(f"⏩ [Escalation Bypassed] Основная и эскалационная модели совпали ({self.llm_client.model_name}). Эскалация отменена (предотвращение эхо-камеры).")
         elif conviction >= 80:
             self.logger.info(f"[{self.name}] High conviction {decision} (EntryQuality {conviction}% >= 80%). Bypassing escalation.")
             print(f"⏩ [Escalation Bypassed] Качество входа Primary CEO достаточно высоко ({conviction}%). Вторая модель ({self.escalation_llm.model_name}) не вызывается.")

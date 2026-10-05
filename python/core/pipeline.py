@@ -354,7 +354,10 @@ class TradingPipeline:
             tech_bulls = sum(1 for r in valid_reports if r.get("agent_name") != "News_Agent" and str(r.get("signal", "")).upper() in ["BULLISH", "LONG"])
             tech_bears = sum(1 for r in valid_reports if r.get("agent_name") != "News_Agent" and str(r.get("signal", "")).upper() in ["BEARISH", "SHORT"])
 
-            if mtf_alignment == "FULL_ALIGNMENT" and (tech_bulls >= 1 or tech_bears >= 1):
+            if mtf_alignment == "COUNTER_TREND_WARNING":
+                has_directional_signal = False
+                self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} ОТКЛОНЕН (Вход против макро-тренда 15m запрещен).")
+            elif mtf_alignment == "FULL_ALIGNMENT" and (tech_bulls >= 1 or tech_bears >= 1):
                 has_directional_signal = True
                 self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен из-за FULL_ALIGNMENT MTF trend + подтверждение аналитика.")
             elif tech_bulls >= 2 and tech_bears <= 1:
@@ -363,9 +366,6 @@ class TradingPipeline:
             elif tech_bears >= 2 and tech_bulls <= 1:
                 has_directional_signal = True
                 self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (Bearish консенсус {tech_bears} vs {tech_bulls}).")
-            elif mtf_alignment == "COUNTER_TREND_WARNING" and (tech_bulls >= 1 or tech_bears >= 1):
-                has_directional_signal = True
-                self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (COUNTER_TREND_WARNING с подтверждением).")
             else:
                 has_directional_signal = False
 
