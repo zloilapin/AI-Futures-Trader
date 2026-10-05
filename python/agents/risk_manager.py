@@ -154,8 +154,13 @@ class RiskManager(BaseAgent):
                     sl = float(pos.get("sl_price", 0))
                     amount = abs(float(pos.get("amount", 0)))
                     
-                    if entry > 0 and sl > 0 and amount > 0:
-                        pos_risk = amount * abs(entry - sl)
+                    if amount > 0:
+                        if entry > 0 and sl > 0:
+                            pos_risk = amount * abs(entry - sl)
+                        else:
+                            # Worst-case proxy: Unhedged position risks full notional!
+                            # This will naturally blow the risk budget and block new trades.
+                            pos_risk = float(pos.get("size_usd", amount * entry))
                     else:
                         pos_risk = 0.0
                         
