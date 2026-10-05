@@ -219,7 +219,15 @@ class RiskManager(BaseAgent):
                 }
 
             # --- WORST CASE EXECUTION (Compute FIRST) ---
-            expected_slippage_pct = config.EXPECTED_SLIPPAGE_PCT if hasattr(config, 'EXPECTED_SLIPPAGE_PCT') else 0.005
+            # Sync expected slippage dynamically with Nado execution logic
+            symbol = ceo_decision.get("symbol", "")
+            base_asset = symbol.split('-')[0].upper() if symbol else ""
+            
+            if base_asset in ["BTC", "ETH"]:
+                expected_slippage_pct = 0.005 # 0.5%
+            else:
+                expected_slippage_pct = 0.01  # 1.0%
+                
             if decision == "LONG":
                 execution_entry = current_price * (1.0 + expected_slippage_pct)
             else:
