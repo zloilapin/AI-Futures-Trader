@@ -459,10 +459,21 @@ class RiskManager(BaseAgent):
             tp_price = round(tp_price, 6)
             liq_price = round(liq_price, 6)
             
-            # RR adjusted for fees and directional funding
-            effective_tp_dist = distance_to_tp - (current_price * (fee_pct + funding_cost_pct))
-            effective_sl_dist = distance_to_sl + (current_price * (fee_pct + funding_cost_pct))
-            rr_ratio = round(effective_tp_dist / effective_sl_dist if effective_sl_dist > 0 else 0, 2)
+            # RR adjusted for exact nominal fees and directional funding
+            gross_profit = contracts * distance_to_tp
+            gross_loss = contracts * distance_to_sl
+            
+            single_side_fee_pct = fee_pct / 2
+            entry_fee = notional_usd * single_side_fee_pct
+            tp_exit_fee = (contracts * tp_price) * single_side_fee_pct
+            sl_exit_fee = (contracts * sl_price) * single_side_fee_pct
+            
+            funding_cost = notional_usd * funding_cost_pct
+            
+            net_profit = gross_profit - entry_fee - tp_exit_fee - funding_cost
+            net_loss = gross_loss + entry_fee + sl_exit_fee + funding_cost
+            
+            rr_ratio = round(net_profit / net_loss if net_loss > 0 else 0, 2)
             
             # ═══ 7. Verify Actual Risk (using rounded contracts) ═══
             actual_risk_usd = contracts * distance_to_sl
