@@ -348,15 +348,25 @@ class TradingPipeline:
             # --- PRE-CEO FILTER ---
             # Экономим токены LLM: если рынок в боковике/нет явного направленного перевеса, пропускаем актив
             has_directional_signal = False
-            mtf_alignment = market_data.get("multi_timeframe", {}).get("mtf_alignment")
+            mtf_data = market_data.get("multi_timeframe", {})
+            mtf_alignment = mtf_data.get("mtf_alignment")
+            trend_1h = mtf_data.get("trend_1h", "")
             
             # Оцениваем консенсус локальных технических аналитиков (исключая рыночно-широкий News_Agent)
             tech_bulls = sum(1 for r in valid_reports if r.get("agent_name") != "News_Agent" and str(r.get("signal", "")).upper() in ["BULLISH", "LONG"])
             tech_bears = sum(1 for r in valid_reports if r.get("agent_name") != "News_Agent" and str(r.get("signal", "")).upper() in ["BEARISH", "SHORT"])
 
             if mtf_alignment == "COUNTER_TREND_WARNING":
-                has_directional_signal = False
-                self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} ОТКЛОНЕН (Вход против макро-тренда 15m запрещен).")
+                # Разрешаем сделку, если консенсус аналитиков совпадает со старшим трендом (1H/4H)
+                if trend_1h == "BULLISH" and tech_bulls >= 2:
+                    has_directional_signal = True
+                    self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (Отскок по тренду: Bulls={tech_bulls}, 1H={trend_1h}).")
+                elif trend_1h == "BEARISH" and tech_bears >= 2:
+                    has_directional_signal = True
+                    self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (Откат по тренду: Bears={tech_bears}, 1H={trend_1h}).")
+                else:
+                    has_directional_signal = False
+                    self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} ОТКЛОНЕН (Попытка торговли против макро-тренда).")
             elif mtf_alignment == "FULL_ALIGNMENT" and (tech_bulls >= 1 or tech_bears >= 1):
                 has_directional_signal = True
                 self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен из-за FULL_ALIGNMENT MTF trend + подтверждение аналитика.")

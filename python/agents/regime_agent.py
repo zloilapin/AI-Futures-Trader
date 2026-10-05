@@ -143,11 +143,12 @@ class RegimeAgent(BaseAgent):
                     + str(result.get("reasoning_en", ""))
                 )
 
-            # Enforce Risk Hierarchy: HIGH_VOLATILITY -> CONSERVATIVE
+            # Enforce Risk Hierarchy: HIGH_VOLATILITY -> CONSERVATIVE only
             if regime == "HIGH_VOLATILITY":
                 profile = "CONSERVATIVE"
-            elif regime == "RANGE_CHOPPY" and profile == "AGGRESSIVE":
-                profile = "BALANCED"
+            # Note: RANGE_CHOPPY no longer forces downgrade from AGGRESSIVE.
+            # User-selected profile is respected; individual asset MTF alignment
+            # is checked per-asset in Pipeline and RiskManager.
 
             result["regime"] = regime
             result["recommended_profile"] = profile

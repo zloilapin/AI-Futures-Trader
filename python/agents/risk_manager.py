@@ -17,11 +17,11 @@ class RiskManager(BaseAgent):
 
     def _get_profile_rules(self, profile: str) -> dict:
         if profile == "AGGRESSIVE":
-            return {"min_conviction": 65, "base_risk": 0.015, "risk_cap": 0.015, "portfolio_risk_cap": 0.05, "sl_mult": 1.75, "tp_mult": 3.5, "target_margin_pct": 0.20, "max_margin_pct": 0.45, "max_leverage": 15, "sentinel_be_atr": 1.2, "sentinel_trail_atr": 2.0, "sentinel_trail_activation_atr": 1.2, "sentinel_trail_distance_atr": 1.0, "sentinel_min_improve_atr": 0.20}
+            return {"min_conviction": 65, "base_risk": 0.020, "risk_cap": 0.025, "portfolio_risk_cap": 0.06, "sl_mult": 1.75, "tp_mult": 3.5, "target_margin_pct": 0.20, "max_margin_pct": 0.45, "max_leverage": 15, "sentinel_be_atr": 2.0, "sentinel_trail_atr": 3.0, "sentinel_trail_activation_atr": 3.0, "sentinel_trail_distance_atr": 2.0, "sentinel_min_improve_atr": 0.25}
         elif profile == "CONSERVATIVE":
-            return {"min_conviction": 80, "base_risk": 0.005, "risk_cap": 0.01, "portfolio_risk_cap": 0.02, "sl_mult": 2.0, "tp_mult": 3.0, "target_margin_pct": 0.05, "max_margin_pct": 0.10, "max_leverage": 5, "sentinel_be_atr": 0.8, "sentinel_trail_atr": 1.2, "sentinel_trail_activation_atr": 1.8, "sentinel_trail_distance_atr": 2.0, "sentinel_min_improve_atr": 0.30}
+            return {"min_conviction": 80, "base_risk": 0.005, "risk_cap": 0.01, "portfolio_risk_cap": 0.02, "sl_mult": 2.0, "tp_mult": 3.0, "target_margin_pct": 0.05, "max_margin_pct": 0.10, "max_leverage": 5, "sentinel_be_atr": 1.5, "sentinel_trail_atr": 2.0, "sentinel_trail_activation_atr": 2.5, "sentinel_trail_distance_atr": 2.0, "sentinel_min_improve_atr": 0.30}
         else: # BALANCED
-            return {"min_conviction": 70, "base_risk": 0.01, "risk_cap": 0.015, "portfolio_risk_cap": 0.035, "sl_mult": 1.5, "tp_mult": 2.5, "target_margin_pct": 0.10, "max_margin_pct": 0.20, "max_leverage": 10, "sentinel_be_atr": 1.0, "sentinel_trail_atr": 1.5, "sentinel_trail_activation_atr": 1.5, "sentinel_trail_distance_atr": 1.5, "sentinel_min_improve_atr": 0.25}
+            return {"min_conviction": 70, "base_risk": 0.015, "risk_cap": 0.020, "portfolio_risk_cap": 0.04, "sl_mult": 1.5, "tp_mult": 2.5, "target_margin_pct": 0.10, "max_margin_pct": 0.20, "max_leverage": 10, "sentinel_be_atr": 2.0, "sentinel_trail_atr": 2.5, "sentinel_trail_activation_atr": 2.5, "sentinel_trail_distance_atr": 1.5, "sentinel_min_improve_atr": 0.25}
 
     def _get_conviction_multiplier(self, min_conviction: int, conviction: int) -> float:
         """
@@ -35,7 +35,7 @@ class RiskManager(BaseAgent):
             return 0.0
         delta = conviction - min_conviction
         if delta < 5:
-            return 0.70
+            return 0.85
         elif delta < 15:
             return 1.00
         elif delta < 20:
@@ -251,19 +251,6 @@ class RiskManager(BaseAgent):
                     "reasoning": msg
                 }
                 
-            if macro_regime == "RANGE_CHOPPY" and mtf_alignment != "FULL_ALIGNMENT":
-                msg = f"Macro Market Regime is RANGE_CHOPPY, but asset only has {mtf_alignment} alignment. Demanding FULL_ALIGNMENT to override global chop."
-                self.logger.warning(f"[{self.name}] 🚫 MACRO REGIME VETO: {msg}")
-                return {
-                    "approved": False,
-                    "veto_category": "MACRO_REGIME_VETO",
-                    "reasoning": msg
-                }
-            
-            regime_mult = 1.0
-            if mtf_alignment == "PARTIAL":
-                regime_mult = 0.70
-                self.logger.info(f"[{self.name}] Partial MTF alignment. Scaling down risk (x0.70).")
                 
             # Volume & Spread Quality Multiplier
             volume_mult = 1.0
@@ -290,10 +277,10 @@ class RiskManager(BaseAgent):
             # --- Dynamic Risk Calculation ---
             conf_mult = self._get_conviction_multiplier(min_conviction, conviction)
             action_mult = 0.75 if trade_action == "REDUCE_SIZE" else 1.0
-            dynamic_risk_pct = base_risk * conf_mult * regime_mult * quality_mult * dd_mult * action_mult
+            dynamic_risk_pct = base_risk * conf_mult * quality_mult * dd_mult * action_mult
             dynamic_risk_pct = min(dynamic_risk_pct, risk_cap)
             
-            self.logger.info(f"[{self.name}] Final Risk: {dynamic_risk_pct*100:.2f}% (Base: {base_risk*100}%, Conf: x{conf_mult}, Regime: x{regime_mult}, Quality: x{quality_mult:.2f}, DD: x{dd_mult}, Action: x{action_mult}, Cap: {risk_cap*100}%)")
+            self.logger.info(f"[{self.name}] Final Risk: {dynamic_risk_pct*100:.2f}% (Base: {base_risk*100}%, Conf: x{conf_mult}, Quality: x{quality_mult:.2f}, DD: x{dd_mult}, Action: x{action_mult}, Cap: {risk_cap*100}%)")
             
             # --- 1. Finalize SL ---
             # NOTE: Removed standalone liquidation price calculation.
