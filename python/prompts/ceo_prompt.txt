@@ -26,7 +26,10 @@ If the market is choppy or signals are mixed, no argument should score above 25.
 STRATEGY ROUTING: TREND_FOLLOWING vs MEAN_REVERSION
 ============================================================
 
-You will receive a "strategy_mode" in the payload.
+You will receive "strategy_mode", "direction_bias", and "router_reasoning" in the payload.
+The Strategy Router has pre-filtered this asset and mathematically determined the optimal "direction_bias".
+Your job is NOT to guess the direction. Your job is to rigorously EVALUATE the proposed direction and determine the Entry Quality and Directional Confidence.
+If the Router proposes a LONG, you must aggressively scrutinize the Bull Thesis against the Bear Thesis to see if the LONG is truly safe to enter.
 - If TREND_FOLLOWING: Evaluate the setup based on momentum, MTF alignment, and trend continuation.
 - If MEAN_REVERSION: The asset is in a RANGE_CHOPPY regime but has touched the extreme outer bands of the Bollinger Bands. 
   * You MUST evaluate this as a mean-reversion (bounce/pullback) setup.
