@@ -15,13 +15,29 @@ class RiskManager(BaseAgent):
     def __init__(self, logger: TradeLogger, llm_client: LLMClient):
         super().__init__("Risk_Manager", logger, llm_client)
 
-    def _get_profile_rules(self, profile: str) -> dict:
+    def _get_profile_rules(self, profile: str, strategy_mode: str = "TREND_FOLLOWING") -> dict:
         if profile == "AGGRESSIVE":
-            return {"min_conviction": 65, "base_risk": 0.020, "risk_cap": 0.025, "portfolio_risk_cap": 0.06, "sl_mult": 1.75, "tp_mult": 3.5, "target_margin_pct": 0.20, "max_margin_pct": 0.45, "max_leverage": 15, "sentinel_be_atr": 2.0, "sentinel_trail_atr": 3.0, "sentinel_trail_activation_atr": 3.0, "sentinel_trail_distance_atr": 2.0, "sentinel_min_improve_atr": 0.25}
+            rules = {"min_conviction": 65, "base_risk": 0.020, "risk_cap": 0.025, "portfolio_risk_cap": 0.06, "sl_mult": 1.75, "tp_mult": 3.5, "target_margin_pct": 0.20, "max_margin_pct": 0.45, "max_leverage": 15, "sentinel_be_atr": 2.0, "sentinel_trail_atr": 3.0, "sentinel_trail_activation_atr": 3.0, "sentinel_trail_distance_atr": 2.0, "sentinel_min_improve_atr": 0.25}
         elif profile == "CONSERVATIVE":
-            return {"min_conviction": 80, "base_risk": 0.005, "risk_cap": 0.01, "portfolio_risk_cap": 0.02, "sl_mult": 2.0, "tp_mult": 3.0, "target_margin_pct": 0.05, "max_margin_pct": 0.10, "max_leverage": 5, "sentinel_be_atr": 1.5, "sentinel_trail_atr": 2.0, "sentinel_trail_activation_atr": 2.5, "sentinel_trail_distance_atr": 2.0, "sentinel_min_improve_atr": 0.30}
+            rules = {"min_conviction": 80, "base_risk": 0.005, "risk_cap": 0.01, "portfolio_risk_cap": 0.02, "sl_mult": 2.0, "tp_mult": 3.0, "target_margin_pct": 0.05, "max_margin_pct": 0.10, "max_leverage": 5, "sentinel_be_atr": 1.5, "sentinel_trail_atr": 2.0, "sentinel_trail_activation_atr": 2.5, "sentinel_trail_distance_atr": 2.0, "sentinel_min_improve_atr": 0.30}
         else: # BALANCED
-            return {"min_conviction": 70, "base_risk": 0.015, "risk_cap": 0.020, "portfolio_risk_cap": 0.04, "sl_mult": 1.5, "tp_mult": 2.5, "target_margin_pct": 0.10, "max_margin_pct": 0.20, "max_leverage": 10, "sentinel_be_atr": 2.0, "sentinel_trail_atr": 2.5, "sentinel_trail_activation_atr": 2.5, "sentinel_trail_distance_atr": 1.5, "sentinel_min_improve_atr": 0.25}
+            rules = {"min_conviction": 70, "base_risk": 0.015, "risk_cap": 0.020, "portfolio_risk_cap": 0.04, "sl_mult": 1.5, "tp_mult": 2.5, "target_margin_pct": 0.10, "max_margin_pct": 0.20, "max_leverage": 10, "sentinel_be_atr": 2.0, "sentinel_trail_atr": 2.5, "sentinel_trail_activation_atr": 2.5, "sentinel_trail_distance_atr": 1.5, "sentinel_min_improve_atr": 0.25}
+            
+        # --- CENTRALIZED STRATEGY ROUTING ---
+        # Adjust base conviction thresholds based on the specific strategy detected by the pipeline.
+        # This overrides the generic macro regime conviction when a specialized sub-strategy is active.
+        if strategy_mode in ["BREAKOUT", "VOLATILITY_MOMENTUM"]:
+            rules["min_conviction"] = 65  # Fast/early entries naturally score lower initially
+        elif strategy_mode == "RELATIVE_MOMENTUM":
+            rules["min_conviction"] = 68
+        elif strategy_mode == "MEAN_REVERSION":
+            rules["min_conviction"] = 70
+            
+        # Slight penalty for non-trend strategies if the overall macro is highly conservative
+        if profile == "CONSERVATIVE" and strategy_mode != "TREND_FOLLOWING":
+            rules["min_conviction"] = min(90, rules["min_conviction"] + 5)
+            
+        return rules
 
     def _get_conviction_multiplier(self, min_conviction: int, conviction: int) -> float:
         """
@@ -90,7 +106,7 @@ class RiskManager(BaseAgent):
             contracts        — base asset amount = notional_usd / entry_price
             margin_pct       — margin_usd as % of total_balance
         """
-        profile_rules = self._get_profile_rules(effective_profile)
+        profile_rules = self._get_profile_rules(effective_profile, strategy_mode)
         min_conviction = profile_rules["min_conviction"]
         base_risk = profile_rules["base_risk"]
         risk_cap = profile_rules["risk_cap"]
@@ -102,10 +118,10 @@ class RiskManager(BaseAgent):
         
         # VOLATILITY_MOMENTUM OVERRIDE (Режим "Шампанское")
         if strategy_mode == "VOLATILITY_MOMENTUM":
-            min_conviction -= 5  # Lower the barrier slightly for aggressive quick trades
+            # min_conviction is already handled by Strategy Router logic inside _get_profile_rules
             sl_mult *= 0.5       # Cut stop loss distance in half (tight stop)
             tp_mult *= 0.5       # Cut take profit distance in half (quick grab)
-            self.logger.info(f"[{self.name}] 🔥 VOLATILITY_MOMENTUM MODE ACTIVATED: Tightening SL/TP, lowering conviction to {min_conviction}%.")
+            self.logger.info(f"[{self.name}] 🔥 VOLATILITY_MOMENTUM MODE ACTIVATED: Tightening SL/TP.")
             profile_name += "_VOL_MOMENTUM"
         
         self.logger.info(f"[{self.name}] Расчет математики риска по профилю: {profile_name} (Base Risk: {base_risk*100}%)...")
