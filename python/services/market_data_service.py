@@ -528,11 +528,11 @@ class MarketDataService:
                                 # 6. EMA-20 Distance (overextension check)
                                 ema_distance_pct = round(((current_price - ema_20) / ema_20) * 100, 2) if ema_20 > 0 else 0
 
-                                # 7. Statistical Arbitrage (Relative Strength)
+                                # 7. Relative Momentum (BTC Divergence)
                                 asset_return_24h = 0.0
                                 rs_divergence = 0.0
-                                if len(closes) >= 96: # 96 * 15m = 24h
-                                    past_price = closes[-96]
+                                if len(closes) >= 97: # 96 intervals of 15m = 24h
+                                    past_price = closes[-97]
                                     asset_return_24h = ((current_price - past_price) / past_price) * 100 if past_price > 0 else 0.0
                                     
                                     if symbol == "BTC-USD":

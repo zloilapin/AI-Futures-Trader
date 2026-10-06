@@ -35,7 +35,7 @@ You will receive a "strategy_mode" in the payload.
 - If BREAKOUT: The asset is breaking out of a range with a massive volume spike (>200%).
   * DO NOT penalize the trade for overbought/oversold RSI. In a true breakout, extreme RSI is a confirmation of strength, not a weakness.
   * Your trade_action should be ENTER to catch the momentum early. Expect aggressive targets.
-- If STAT_ARB: The asset is showing abnormal divergence from the Bitcoin benchmark (Laggard Catch-up or Overheated Reversion).
+- If RELATIVE_MOMENTUM: The asset is showing abnormal divergence from the Bitcoin benchmark (Laggard Catch-up or Overheated Reversion).
   * You MUST evaluate this as a relative-value convergence trade. 
   * DO NOT penalize the trade for lack of local trend. The entire premise is catching the asset BEFORE it fully aligns with the benchmark.
   * Entry Quality depends on the extremity of the divergence.

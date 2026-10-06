@@ -357,19 +357,19 @@ class TradingPipeline:
             tech_bulls = sum(1 for r in valid_reports if r.get("agent_name") != "News_Agent" and str(r.get("signal", "")).upper() in ["BULLISH", "LONG"])
             tech_bears = sum(1 for r in valid_reports if r.get("agent_name") != "News_Agent" and str(r.get("signal", "")).upper() in ["BEARISH", "SHORT"])
 
-            # Statistical Arbitrage (Laggard Catch-up / Reversion)
+            # Relative Momentum (Laggard Catch-up / Reversion)
             rs_divergence = indicators.get("rs_divergence", 0.0)
             btc_trend_1h = macro_cache.get("BTC-USD", {}).get("multi_timeframe", {}).get("trend_1h", "NEUTRAL") if "BTC-USD" in macro_cache else "NEUTRAL"
             
             if symbol != "BTC-USD":
                 if btc_trend_1h == "BULLISH" and rs_divergence <= -5.0 and tech_bulls >= 1:
                     has_directional_signal = True
-                    strategy_mode = "STAT_ARB"
-                    self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (STAT_ARB LONG: Отставание от BTC {rs_divergence}%).")
+                    strategy_mode = "RELATIVE_MOMENTUM"
+                    self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (RELATIVE_MOMENTUM LONG: Отставание от BTC {rs_divergence}%).")
                 elif btc_trend_1h in ["BEARISH", "NEUTRAL"] and rs_divergence >= 10.0 and tech_bears >= 1:
                     has_directional_signal = True
-                    strategy_mode = "STAT_ARB"
-                    self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (STAT_ARB SHORT: Аномальный памп {rs_divergence}%).")
+                    strategy_mode = "RELATIVE_MOMENTUM"
+                    self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (RELATIVE_MOMENTUM SHORT: Аномальный памп {rs_divergence}%).")
 
             # High-Frequency Scalping (Volatility Capture)
             bb_width_pct = indicators.get("bb_width_pct", 0.0)
