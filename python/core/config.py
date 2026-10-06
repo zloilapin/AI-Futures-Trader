@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     OPENROUTER_MODEL: str = Field(default="qwen/qwen-2.5-72b-instruct")
     OPENROUTER_MODEL_CHEAP: str = Field(default="deepseek/deepseek-chat")
     OPENROUTER_MODEL_CEO: str = Field(default="qwen/qwen-2.5-72b-instruct")
-    OPENROUTER_MODEL_ESCALATION: str = Field(default="z-ai/glm-4-9b-chat")
+    OPENROUTER_MODEL_ESCALATION: str = Field(default="meta-llama/llama-3.1-8b-instruct")
     KIE_API_KEY: str = Field(default="", validation_alias="KIE_API_KEY")
     KIE_MODEL: str = Field(default="DeepSeek-V3")
     

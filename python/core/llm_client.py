@@ -99,8 +99,8 @@ class LLMClient:
                 for alt in ["qwen/qwen-2.5-72b-instruct", "qwen/qwen-plus", "qwen/qwen-turbo"]:
                     if alt not in models_chain:
                         models_chain.append(alt)
-            elif "glm" in self.model_name:
-                for alt in ["z-ai/glm-4-9b-chat"]:
+            elif "llama" in self.model_name:
+                for alt in ["meta-llama/llama-3.1-8b-instruct", "meta-llama/llama-3.3-70b-instruct"]:
                     if alt not in models_chain:
                         models_chain.append(alt)
             elif "deepseek" in self.model_name:
