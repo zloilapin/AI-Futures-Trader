@@ -397,17 +397,18 @@ class MarketDataService:
                                     atr_14 = (atr_14 * 13 + tr_list[i]) / 14
                                 atr_pct = round((atr_14 / current_price) * 100, 2)
 
-                                # Efficiency Ratio (ER-14) - Trend Strength Measurement
-                                if len(closes) >= 15:
-                                    direction = abs(closes[-1] - closes[-15])
-                                    volatility = sum(abs(closes[i] - closes[i-1]) for i in range(len(closes)-14, len(closes)))
+                                # Efficiency Ratio (ER-14) - Trend Strength Measurement based on past CLOSED candles
+                                if len(closes) >= 16:
+                                    direction = abs(closes[-2] - closes[-16])
+                                    volatility = sum(abs(closes[i] - closes[i-1]) for i in range(len(closes)-15, len(closes)-1))
                                     er_14 = round(direction / volatility, 3) if volatility > 0 else 0.0
                                 else:
                                     er_14 = 0.0
-                                # Bollinger Bands (20, 2)
-                                if len(closes) >= 20:
-                                    sma_20 = sum(closes[-20:]) / 20
-                                    variance = sum((x - sma_20) ** 2 for x in closes[-20:]) / 20
+                                    
+                                # Bollinger Bands (20, 2) based on past CLOSED candles to prevent repainting
+                                if len(closes) >= 21:
+                                    sma_20 = sum(closes[-21:-1]) / 20
+                                    variance = sum((x - sma_20) ** 2 for x in closes[-21:-1]) / 20
                                     std_dev = variance ** 0.5
                                     bb_upper = round(sma_20 + (2 * std_dev), 6)
                                     bb_lower = round(sma_20 - (2 * std_dev), 6)
