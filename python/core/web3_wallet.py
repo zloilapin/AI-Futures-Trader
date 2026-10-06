@@ -11,7 +11,7 @@ class Web3Wallet:
     def __init__(self):
         from core.config import config
         self.network = config.NADO_NETWORK.upper()
-        self.private_key = os.getenv("INK_PRIVATE_KEY", "")
+        self.private_key = config.INK_PRIVATE_KEY.get_secret_value() if hasattr(config.INK_PRIVATE_KEY, 'get_secret_value') else str(config.INK_PRIVATE_KEY)
         self.wallet_address = os.getenv("INK_WALLET_ADDRESS", "")
         
         if self.network == "TESTNET":
