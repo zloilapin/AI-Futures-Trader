@@ -528,19 +528,11 @@ class MarketDataService:
                                 # 6. EMA-20 Distance (overextension check)
                                 ema_distance_pct = round(((current_price - ema_20) / ema_20) * 100, 2) if ema_20 > 0 else 0
 
-                                # 7. Relative Momentum (BTC Divergence)
+                                # 7. 24h Return (for Relative Momentum in Pipeline)
                                 asset_return_24h = 0.0
-                                rs_divergence = 0.0
                                 if len(closes) >= 97: # 96 intervals of 15m = 24h
                                     past_price = closes[-97]
                                     asset_return_24h = ((current_price - past_price) / past_price) * 100 if past_price > 0 else 0.0
-                                    
-                                    if symbol == "BTC-USD":
-                                        self._benchmark_return = asset_return_24h
-                                        rs_divergence = 0.0
-                                    else:
-                                        benchmark = getattr(self, "_benchmark_return", asset_return_24h)
-                                        rs_divergence = round(asset_return_24h - benchmark, 2)
 
                                 return {
                                     "symbol": symbol,
@@ -571,7 +563,7 @@ class MarketDataService:
                                         "liquidity_sweeps": sweeps_detected,
                                         "candle_patterns": candle_patterns
                                     },
-                                    "rs_divergence": rs_divergence
+                                    "asset_return_24h": round(asset_return_24h, 2)
                                 }
                             else:
                                 self._log(f"⚠️ [MarketDataService] Недостаточно истории для индикаторов {symbol} (нужно >= 35, есть {len(closes)}).")
@@ -593,7 +585,7 @@ class MarketDataService:
                                         "liquidity_sweeps": [],
                                         "candle_patterns": []
                                     },
-                                    "rs_divergence": 0.0
+                                    "asset_return_24h": 0.0
                                 }
                         else:
                             self._log(f"⚠️ [MarketDataService] Пустой массив свечей от Kraken для {symbol}.")
@@ -614,7 +606,8 @@ class MarketDataService:
                                     "macd_crossover": "none",
                                     "liquidity_sweeps": [],
                                     "candle_patterns": []
-                                }
+                                },
+                                "asset_return_24h": 0.0
                             }
 
         except Exception as e:

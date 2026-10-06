@@ -358,7 +358,10 @@ class TradingPipeline:
             tech_bears = sum(1 for r in valid_reports if r.get("agent_name") != "News_Agent" and str(r.get("signal", "")).upper() in ["BEARISH", "SHORT"])
 
             # Relative Momentum (Laggard Catch-up / Reversion)
-            rs_divergence = indicators.get("rs_divergence", 0.0)
+            asset_return_24h = indicators.get("asset_return_24h", 0.0)
+            btc_return_24h = macro_cache.get("BTC-USD", {}).get("indicators", {}).get("asset_return_24h", 0.0) if "BTC-USD" in macro_cache else 0.0
+            rs_divergence = round(asset_return_24h - btc_return_24h, 2)
+            
             btc_trend_1h = macro_cache.get("BTC-USD", {}).get("multi_timeframe", {}).get("trend_1h", "NEUTRAL") if "BTC-USD" in macro_cache else "NEUTRAL"
             
             if symbol != "BTC-USD":
