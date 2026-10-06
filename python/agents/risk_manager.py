@@ -333,6 +333,15 @@ class RiskManager(BaseAgent):
             if distance_to_sl > 0:
                 contracts = risk_amount_usd / distance_to_sl
                 notional_usd = contracts * execution_entry
+                
+                # --- Hard Cap on Max Notional ---
+                # If SL is extremely tight, notional_usd would explode to meet the risk budget.
+                # We must clamp it to the absolute maximum allowed leverage for the entire account.
+                if notional_usd > max_notional_usd:
+                    notional_usd = max_notional_usd
+                    contracts = notional_usd / execution_entry
+                    risk_amount_usd = contracts * distance_to_sl
+                    self.logger.info(f"[{self.name}] ⚠️ Notional clamped to Max Notional (${max_notional_usd:.2f}). Reduced risk amount to ${risk_amount_usd:.2f}.")
             else:
                 contracts = 0
                 notional_usd = 0
