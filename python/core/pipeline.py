@@ -379,12 +379,12 @@ class TradingPipeline:
             if not has_directional_signal and mtf_alignment in ["MIXED_CHOP", "COUNTER_TREND_WARNING"] and bb_width_pct > 10.0:
                 if ob_bull and tech_bulls >= 2:
                     has_directional_signal = True
-                    strategy_mode = "SCALPING"
-                    self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (SCALPING LONG: Волатильность {bb_width_pct}%, OrderBook=BULL).")
+                    strategy_mode = "VOLATILITY_MOMENTUM"
+                    self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (VOLATILITY_MOMENTUM LONG: Волатильность {bb_width_pct}%, OrderBook=BULL).")
                 elif ob_bear and tech_bears >= 2:
                     has_directional_signal = True
-                    strategy_mode = "SCALPING"
-                    self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (SCALPING SHORT: Волатильность {bb_width_pct}%, OrderBook=BEAR).")
+                    strategy_mode = "VOLATILITY_MOMENTUM"
+                    self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (VOLATILITY_MOMENTUM SHORT: Волатильность {bb_width_pct}%, OrderBook=BEAR).")
 
             if not has_directional_signal:
                 if mtf_alignment == "COUNTER_TREND_WARNING":
@@ -516,10 +516,10 @@ class TradingPipeline:
 
             min_conv = 65 if profile == "AGGRESSIVE" else (80 if profile == "CONSERVATIVE" else 70)
 
-            # В режиме SCALPING мы не можем ждать отката (нет времени на 15m свечах), поэтому либо входим по рынку, либо отменяем.
-            if strategy_mode == "SCALPING" and trade_action == "WAIT_FOR_PULLBACK" and conviction >= min_conv:
+            # В режиме VOLATILITY_MOMENTUM мы не можем ждать отката (нет времени на 15m свечах), поэтому либо входим по рынку, либо отменяем.
+            if strategy_mode == "VOLATILITY_MOMENTUM" and trade_action == "WAIT_FOR_PULLBACK" and conviction >= min_conv:
                 trade_action = "ENTER"
-                self.services.logger.info(f"[System_Core] ⚡ SCALPING: WAIT_FOR_PULLBACK конвертирован в ENTER из-за высокой скорости режима.")
+                self.services.logger.info(f"[System_Core] ⚡ VOLATILITY_MOMENTUM: WAIT_FOR_PULLBACK конвертирован в ENTER из-за высокой скорости режима.")
 
             # Execution Gate: Checks directional signal, conviction threshold, and WAIT_FOR_PULLBACK action
             if decision not in ["LONG", "SHORT"] or conviction < min_conv or trade_action == "WAIT_FOR_PULLBACK":

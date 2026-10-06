@@ -100,13 +100,13 @@ class RiskManager(BaseAgent):
         
         profile_name = effective_profile
         
-        # SCALPING OVERRIDE (Режим "Шампанское")
-        if strategy_mode == "SCALPING":
+        # VOLATILITY_MOMENTUM OVERRIDE (Режим "Шампанское")
+        if strategy_mode == "VOLATILITY_MOMENTUM":
             min_conviction -= 5  # Lower the barrier slightly for aggressive quick trades
             sl_mult *= 0.5       # Cut stop loss distance in half (tight stop)
             tp_mult *= 0.5       # Cut take profit distance in half (quick grab)
-            self.logger.info(f"[{self.name}] 🔥 SCALPING MODE ACTIVATED: Tightening SL/TP, lowering conviction to {min_conviction}%.")
-            profile_name += "_SCALP"
+            self.logger.info(f"[{self.name}] 🔥 VOLATILITY_MOMENTUM MODE ACTIVATED: Tightening SL/TP, lowering conviction to {min_conviction}%.")
+            profile_name += "_VOL_MOMENTUM"
         
         self.logger.info(f"[{self.name}] Расчет математики риска по профилю: {profile_name} (Base Risk: {base_risk*100}%)...")
         
@@ -286,13 +286,16 @@ class RiskManager(BaseAgent):
             mtf_alignment = mtf_data.get("mtf_alignment", "MIXED_CHOP")
             
             if mtf_alignment == "MIXED_CHOP":
-                msg = f"Asset local MTF alignment is MIXED_CHOP (15m: {mtf_data.get('trend_15m')}, 1h: {mtf_data.get('trend_1h')}). Trend-following system cannot trade in chop."
-                self.logger.warning(f"[{self.name}] 🚫 REGIME VETO: {msg}")
-                return {
-                    "approved": False,
-                    "veto_category": "REGIME",
-                    "reasoning": msg
-                }
+                if strategy_mode not in ["MEAN_REVERSION", "VOLATILITY_MOMENTUM", "STAT_ARB"]:
+                    msg = f"Asset local MTF alignment is MIXED_CHOP (15m: {mtf_data.get('trend_15m')}, 1h: {mtf_data.get('trend_1h')}). {strategy_mode} strategy cannot trade in chop."
+                    self.logger.warning(f"[{self.name}] 🚫 REGIME VETO: {msg}")
+                    return {
+                        "approved": False,
+                        "veto_category": "REGIME",
+                        "reasoning": msg
+                    }
+                else:
+                    self.logger.info(f"[{self.name}] ℹ️ MTF is MIXED_CHOP, but allowing {strategy_mode} strategy to proceed.")
                 
                 
             # Volume & Spread Quality Multiplier

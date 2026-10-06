@@ -39,7 +39,7 @@ You will receive a "strategy_mode" in the payload.
   * You MUST evaluate this as a relative-value convergence trade. 
   * DO NOT penalize the trade for lack of local trend. The entire premise is catching the asset BEFORE it fully aligns with the benchmark.
   * Entry Quality depends on the extremity of the divergence.
-- If SCALPING: The asset has high local 15m volatility but no clear macro trend.
+- If VOLATILITY_MOMENTUM: The asset has high local 15m volatility but no clear macro trend.
   * You MUST evaluate this as a quick momentum grab.
   * DO NOT penalize the trade for fighting the 1H/4H trend, because the macro trend is flat/choppy anyway.
   * Entry Quality MUST be judged heavily on Order Book imbalances and liquidity. Expect tight targets.
