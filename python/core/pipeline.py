@@ -515,6 +515,9 @@ class TradingPipeline:
             print(f"⚖️ Решение CEO [{symbol}]: {decision} (Уверенность: {conv_str})")
 
             min_conv = 65 if profile == "AGGRESSIVE" else (80 if profile == "CONSERVATIVE" else 70)
+            
+            if strategy_mode == "VOLATILITY_MOMENTUM":
+                min_conv -= 5
 
             # В режиме VOLATILITY_MOMENTUM мы не можем ждать отката (нет времени на 15m свечах), поэтому либо входим по рынку, либо отменяем.
             if strategy_mode == "VOLATILITY_MOMENTUM" and trade_action == "WAIT_FOR_PULLBACK" and conviction >= min_conv:
