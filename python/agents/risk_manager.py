@@ -78,7 +78,7 @@ class RiskManager(BaseAgent):
 
         return 1.0, "NORMAL"
 
-    async def analyze(self, ceo_decision: Dict[str, Any], portfolio_data: Dict[str, Any], market_data: Dict[str, Any], effective_profile: str = "BALANCED", macro_regime: str = "RANGE_CHOPPY") -> Dict[str, Any]:
+    async def analyze(self, ceo_decision: Dict[str, Any], portfolio_data: Dict[str, Any], market_data: Dict[str, Any], effective_profile: str = "BALANCED", macro_regime: str = "RANGE_CHOPPY", strategy_mode: str = "TREND_FOLLOWING") -> Dict[str, Any]:
         """
         Deterministic risk engine. All sizing is math-only, no LLM.
         
@@ -100,6 +100,14 @@ class RiskManager(BaseAgent):
         
         profile_name = effective_profile
         
+        # SCALPING OVERRIDE (Режим "Шампанское")
+        if strategy_mode == "SCALPING":
+            min_conviction -= 5  # Lower the barrier slightly for aggressive quick trades
+            sl_mult *= 0.5       # Cut stop loss distance in half (tight stop)
+            tp_mult *= 0.5       # Cut take profit distance in half (quick grab)
+            self.logger.info(f"[{self.name}] 🔥 SCALPING MODE ACTIVATED: Tightening SL/TP, lowering conviction to {min_conviction}%.")
+            profile_name += "_SCALP"
+        
         self.logger.info(f"[{self.name}] Расчет математики риска по профилю: {profile_name} (Base Risk: {base_risk*100}%)...")
         
         decision = ceo_decision.get("decision", "HOLD")
@@ -114,6 +122,8 @@ class RiskManager(BaseAgent):
         
         total_balance = float(portfolio_data.get("total_usd", portfolio_data.get("current_balance", 0.0)) or 0.0)
         available_margin = float(portfolio_data.get("available_margin", total_balance))
+        max_leverage = profile_rules.get("max_leverage", 10.0)
+        max_notional_usd = total_balance * max_leverage
         
         # Initialized output fields
         approved = None
@@ -354,7 +364,6 @@ class RiskManager(BaseAgent):
             
             # ═══ 4. Target Margin & Required Leverage ═══
             target_margin_pct = profile_rules.get("target_margin_pct", 0.10)
-            max_leverage = profile_rules.get("max_leverage", 10.0)
             
             # Target margin based on available margin rather than total balance
             # with a reserve buffer (e.g. max 80% of available margin can be used for target)

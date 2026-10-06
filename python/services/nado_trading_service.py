@@ -467,8 +467,8 @@ class NadoTradingService(BaseTradingService):
             expected_risk_usd = actual_base_amount * abs(entry_price - sl_price)
             actual_risk_usd = actual_base_amount * abs(actual_entry_price - sl_price)
             
-            # If slippage caused the risk to increase by more than 10% (with a strict $0.01 floor to ignore dust)
-            if sl_price > 0 and expected_risk_usd > 0 and actual_risk_usd > expected_risk_usd + max(expected_risk_usd * 0.10, 0.01):
+            # If slippage caused the risk to increase by more than 10% (with a strict $1.00 floor to ignore dust and normal spread)
+            if sl_price > 0 and expected_risk_usd > 0 and actual_risk_usd > expected_risk_usd + max(expected_risk_usd * 0.10, 1.00):
                 logger.error(
                     f"[NadoTradingService] ❌ FATAL SLIPPAGE: Actual risk (${actual_risk_usd:.2f}) exceeds approved risk "
                     f"(${expected_risk_usd:.2f}) due to bad execution price ({actual_entry_price:.4f} vs expected {entry_price:.4f}). "

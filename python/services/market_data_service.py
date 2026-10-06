@@ -201,19 +201,21 @@ class MarketDataService:
                 else:
                     atr = 0
                     
-                # 2. Calculate EMA-9
+                # 2. Calculate EMA-9 and EMA-21
                 ema_9 = closes[0]
+                ema_21 = closes[0]
                 if len(closes) > 1:
-                    multiplier = 2 / (9 + 1)
+                    mult_9 = 2 / (9 + 1)
+                    mult_21 = 2 / (21 + 1)
                     for c in closes[1:]:
-                        ema_9 = (c - ema_9) * multiplier + ema_9
+                        ema_9 = (c - ema_9) * mult_9 + ema_9
+                        ema_21 = (c - ema_21) * mult_21 + ema_21
                         
-                # 3. Determine Trend
-                price_change = current_price - closes[0]
+                # 3. Determine Trend using EMA Crossover + ATR Separation
                 trend = "NEUTRAL"
-                if current_price > ema_9 and price_change > (atr * 0.5):
+                if current_price > ema_9 and ema_9 > ema_21 and (current_price - ema_21) > (atr * 0.2):
                     trend = "BULLISH"
-                elif current_price < ema_9 and price_change < -(atr * 0.5):
+                elif current_price < ema_9 and ema_9 < ema_21 and (ema_21 - current_price) > (atr * 0.2):
                     trend = "BEARISH"
                 
                 # For compatibility with legacy logic, keep pct_diff calculation
@@ -249,8 +251,10 @@ class MarketDataService:
 
         if t15 == t1h == t4h and t15 != "NEUTRAL":
             alignment = "FULL_ALIGNMENT"
-        elif t1h == t4h and t15 != t1h:
+        elif t1h == t4h and t15 != t1h and t1h != "NEUTRAL":
             alignment = "COUNTER_TREND_WARNING"
+        elif t15 == t1h and t1h != t4h and t15 != "NEUTRAL":
+            alignment = "TRANSITION"
         else:
             alignment = "MIXED_CHOP"
 
@@ -393,6 +397,46 @@ class MarketDataService:
                                     atr_14 = (atr_14 * 13 + tr_list[i]) / 14
                                 atr_pct = round((atr_14 / current_price) * 100, 2)
 
+                                # Efficiency Ratio (ER-14) - Trend Strength Measurement
+                                if len(closes) >= 15:
+                                    direction = abs(closes[-1] - closes[-15])
+                                    volatility = sum(abs(closes[i] - closes[i-1]) for i in range(len(closes)-14, len(closes)))
+                                    er_14 = round(direction / volatility, 3) if volatility > 0 else 0.0
+                                else:
+                                    er_14 = 0.0
+                                # Bollinger Bands (20, 2)
+                                if len(closes) >= 20:
+                                    sma_20 = sum(closes[-20:]) / 20
+                                    variance = sum((x - sma_20) ** 2 for x in closes[-20:]) / 20
+                                    std_dev = variance ** 0.5
+                                    bb_upper = round(sma_20 + (2 * std_dev), 6)
+                                    bb_lower = round(sma_20 - (2 * std_dev), 6)
+                                    bb_width_pct = round(((bb_upper - bb_lower) / sma_20) * 100, 2) if sma_20 > 0 else 0.0
+                                    bb_position_pct = round(((current_price - bb_lower) / (bb_upper - bb_lower)) * 100, 2) if bb_upper > bb_lower else 50.0
+                                else:
+                                    sma_20 = 0.0
+                                    bb_upper = 0.0
+                                    bb_lower = 0.0
+                                    bb_width_pct = 0.0
+                                    bb_position_pct = 50.0
+
+                                # Breakout & Momentum (Volume Spike & Donchian 20)
+                                if len(candles) >= 21:
+                                    # Use past 20 completed candles for average and channel
+                                    past_20_vols = [float(c.get("volume", 0)) for c in candles[-21:-1]]
+                                    vol_sma_20 = sum(past_20_vols) / len(past_20_vols) if past_20_vols else 0
+                                    current_vol = float(candles[-1].get("volume", 0))
+                                    volume_spike_pct = round((current_vol / vol_sma_20) * 100, 2) if vol_sma_20 > 0 else 0.0
+                                    
+                                    past_20_highs = [float(c.get("high", 0)) for c in candles[-21:-1]]
+                                    past_20_lows = [float(c.get("low", 0)) for c in candles[-21:-1]]
+                                    donchian_high = max(past_20_highs) if past_20_highs else current_price
+                                    donchian_low = min(past_20_lows) if past_20_lows else current_price
+                                else:
+                                    volume_spike_pct = 0.0
+                                    donchian_high = current_price
+                                    donchian_low = current_price
+
                                 # === ALGORITHMIC SIGNALS (QW #2) ===
                                 # These are deterministic, computed in Python — no LLM guessing.
 
@@ -484,6 +528,20 @@ class MarketDataService:
                                 # 6. EMA-20 Distance (overextension check)
                                 ema_distance_pct = round(((current_price - ema_20) / ema_20) * 100, 2) if ema_20 > 0 else 0
 
+                                # 7. Statistical Arbitrage (Relative Strength)
+                                asset_return_24h = 0.0
+                                rs_divergence = 0.0
+                                if len(closes) >= 96: # 96 * 15m = 24h
+                                    past_price = closes[-96]
+                                    asset_return_24h = ((current_price - past_price) / past_price) * 100 if past_price > 0 else 0.0
+                                    
+                                    if symbol == "BTC-USD":
+                                        self._benchmark_return = asset_return_24h
+                                        rs_divergence = 0.0
+                                    else:
+                                        benchmark = getattr(self, "_benchmark_return", asset_return_24h)
+                                        rs_divergence = round(asset_return_24h - benchmark, 2)
+
                                 return {
                                     "symbol": symbol,
                                     "rsi_14": rsi,
@@ -498,13 +556,22 @@ class MarketDataService:
                                     "histogram_momentum": histogram_momentum,
                                     "atr_14": round(atr_14, 6),
                                     "atr_pct": atr_pct,
+                                    "er_14": er_14,
+                                    "bb_upper": bb_upper,
+                                    "bb_lower": bb_lower,
+                                    "bb_width_pct": bb_width_pct,
+                                    "bb_position_pct": bb_position_pct,
+                                    "volume_spike_pct": volume_spike_pct,
+                                    "donchian_high": donchian_high,
+                                    "donchian_low": donchian_low,
                                     # Algorithmic signals (deterministic, no LLM needed)
                                     "algo_signals": {
                                         "rsi_divergence": rsi_divergence,
                                         "macd_crossover": macd_crossover,
                                         "liquidity_sweeps": sweeps_detected,
                                         "candle_patterns": candle_patterns
-                                    }
+                                    },
+                                    "rs_divergence": rs_divergence
                                 }
                             else:
                                 self._log(f"⚠️ [MarketDataService] Недостаточно истории для индикаторов {symbol} (нужно >= 35, есть {len(closes)}).")
@@ -525,7 +592,8 @@ class MarketDataService:
                                         "macd_crossover": "none",
                                         "liquidity_sweeps": [],
                                         "candle_patterns": []
-                                    }
+                                    },
+                                    "rs_divergence": 0.0
                                 }
                         else:
                             self._log(f"⚠️ [MarketDataService] Пустой массив свечей от Kraken для {symbol}.")

@@ -23,6 +23,28 @@ You must act as a ruthless risk manager. Do NOT hand out high scores easily. LLM
 If the market is choppy or signals are mixed, no argument should score above 25.
 
 ============================================================
+STRATEGY ROUTING: TREND_FOLLOWING vs MEAN_REVERSION
+============================================================
+
+You will receive a "strategy_mode" in the payload.
+- If TREND_FOLLOWING: Evaluate the setup based on momentum, MTF alignment, and trend continuation.
+- If MEAN_REVERSION: The asset is in a RANGE_CHOPPY regime but has touched the extreme outer bands of the Bollinger Bands. 
+  * You MUST evaluate this as a mean-reversion (bounce/pullback) setup.
+  * DO NOT penalize the trade for fighting the trend, because the macro trend is flat/choppy.
+  * Set a strict Take Profit expectation (target the SMA-20, not a moonshot).
+- If BREAKOUT: The asset is breaking out of a range with a massive volume spike (>200%).
+  * DO NOT penalize the trade for overbought/oversold RSI. In a true breakout, extreme RSI is a confirmation of strength, not a weakness.
+  * Your trade_action should be ENTER to catch the momentum early. Expect aggressive targets.
+- If STAT_ARB: The asset is showing abnormal divergence from the Bitcoin benchmark (Laggard Catch-up or Overheated Reversion).
+  * You MUST evaluate this as a relative-value convergence trade. 
+  * DO NOT penalize the trade for lack of local trend. The entire premise is catching the asset BEFORE it fully aligns with the benchmark.
+  * Entry Quality depends on the extremity of the divergence.
+- If SCALPING: The asset has high local 15m volatility but no clear macro trend.
+  * You MUST evaluate this as a quick momentum grab.
+  * DO NOT penalize the trade for fighting the 1H/4H trend, because the macro trend is flat/choppy anyway.
+  * Entry Quality MUST be judged heavily on Order Book imbalances and liquidity. Expect tight targets.
+
+============================================================
 MANDATORY COUNTER-ARGUMENT AND RISK ACCOUNTING
 ============================================================
 

@@ -68,6 +68,7 @@ class CEOAgent(BaseAgent):
 
         payload = {
             "target_symbol": symbol,
+            "strategy_mode": data.get("strategy_mode", "TREND_FOLLOWING"),
             "multi_timeframe_context": clean_mtf,
             "bull_thesis": data.get("bull_thesis", {}),
             "bear_thesis": data.get("bear_thesis", {}),

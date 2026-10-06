@@ -14,9 +14,6 @@ class RegimeAgent(BaseAgent):
     """
     def __init__(self, logger: TradeLogger, llm_client: LLMClient):
         super().__init__("Regime_Agent", logger, llm_client)
-        prompt_path = os.path.join(os.path.dirname(__file__), "..", "prompts", "regime_prompt.txt")
-        with open(prompt_path, "r", encoding="utf-8") as f:
-            self.system_instruction = f.read()
 
     def _extract_asset_macro(self, raw_asset: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -45,6 +42,7 @@ class RegimeAgent(BaseAgent):
 
         atr_pct = float(indicators.get("atr_pct", 0.0) or 0.0)
         rsi_14 = float(indicators.get("rsi_14", 50.0) or 50.0)
+        er_14 = float(indicators.get("er_14", 0.0) or 0.0)
         ema_trend = indicators.get("ema_trend", "neutral")
         macd_label = indicators.get("macd_label") or indicators.get("macd_signal", "neutral")
 
@@ -62,6 +60,7 @@ class RegimeAgent(BaseAgent):
             "mtf_alignment": alignment,
             "atr_pct": atr_pct,
             "rsi_14": rsi_14,
+            "er_14": er_14,
             "ema_trend": ema_trend,
             "macd_label": macd_label,
             "funding_rate": funding_rate,
@@ -82,80 +81,64 @@ class RegimeAgent(BaseAgent):
         }
 
     async def analyze(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        self.logger.info(f"[{self.name}] Analyzing macro market regime...")
+        self.logger.info(f"[{self.name}] Analyzing macro market regime deterministically...")
 
-        # Distill macro summary (removes raw orderbooks, candles_20, and deep noise)
+        # Distill macro summary
         macro_summary = self._extract_macro_summary(data)
-        data_string = json.dumps(macro_summary, indent=2)
-        full_prompt = f"{self.system_instruction}\n\nMarket Data:\n{data_string}"
+        
+        btc_summary = macro_summary.get("BTC", {})
+        eth_summary = macro_summary.get("ETH", {})
 
-        fallback_result = {
-            "regime": "RANGE_CHOPPY",
-            "recommended_profile": "BALANCED",
-            "reasoning_en": "Fallback safe mode: default balanced risk profile."
+        def is_high_volatility(asset_summary: Dict[str, Any]) -> bool:
+            atr = float(asset_summary.get("atr_pct", 0.0) or 0.0)
+            fr_pct = abs(float(asset_summary.get("funding_rate", 0.0) or 0.0)) * 100
+            er_14 = float(asset_summary.get("er_14", 0.0) or 0.0)
+            if fr_pct >= 0.05:
+                return True
+            if atr >= 1.5 and er_14 < 0.25:
+                return True
+            return False
+
+        btc_high_vol = is_high_volatility(btc_summary)
+        eth_high_vol = is_high_volatility(eth_summary)
+        
+        btc_er = float(btc_summary.get("er_14", 0.0) or 0.0)
+        btc_align = btc_summary.get("mtf_alignment", "MIXED_CHOP")
+        eth_align = eth_summary.get("mtf_alignment", "MIXED_CHOP")
+
+        if btc_high_vol or eth_high_vol:
+            regime = "HIGH_VOLATILITY"
+            profile = "CONSERVATIVE"
+            reason = []
+            if btc_high_vol:
+                btc_fr_pct = float(btc_summary.get('funding_rate', 0.0) or 0.0) * 100
+                reason.append(f"BTC High Vol (ATR={btc_summary.get('atr_pct', 0)}%, FR={btc_fr_pct:.3f}%)")
+            if eth_high_vol:
+                eth_fr_pct = float(eth_summary.get('funding_rate', 0.0) or 0.0) * 100
+                reason.append(f"ETH High Vol (ATR={eth_summary.get('atr_pct', 0)}%, FR={eth_fr_pct:.3f}%)")
+            reasoning = "Deterministically triggered HIGH_VOLATILITY: " + " | ".join(reason)
+            
+        elif btc_er >= 0.35 and btc_align == "FULL_ALIGNMENT":
+            regime = "TRENDING"
+            profile = "AGGRESSIVE"
+            reasoning = f"Deterministically triggered TRENDING: BTC ER is {btc_er} (>=0.35) and MTF is FULL_ALIGNMENT."
+            
+        elif btc_er < 0.25 and btc_align == "MIXED_CHOP":
+            regime = "RANGE_CHOPPY"
+            profile = "BALANCED"
+            reasoning = f"Deterministically triggered RANGE_CHOPPY: BTC ER is {btc_er} (<0.25) and MTF is MIXED_CHOP. Price is oscillating without clear direction."
+            
+        else:
+            regime = "TRANSITION"
+            profile = "BALANCED"
+            reasoning = f"Deterministically triggered TRANSITION: BTC ER is {btc_er}, Alignment is {btc_align}. Market is either building a reversal or losing trend momentum."
+
+        result = {
+            "regime": regime,
+            "recommended_profile": profile,
+            "reasoning_en": reasoning
         }
 
-        try:
-            raw_result = await self.generate_json(
-                full_prompt,
-                required_keys=["regime", "recommended_profile", "reasoning_en"]
-            )
-
-            if not isinstance(raw_result, dict) or raw_result.get("signal") == "ERROR":
-                self.logger.warning(f"[{self.name}] LLM failed to return valid JSON. Applying safe fallback.")
-                return fallback_result
-
-            result = dict(raw_result)
-
-            valid_regimes = {"TRENDING", "RANGE_CHOPPY", "HIGH_VOLATILITY"}
-            valid_profiles = {"AGGRESSIVE", "BALANCED", "CONSERVATIVE"}
-
-            regime = str(result.get("regime", "")).strip().upper()
-            profile = str(result.get("recommended_profile", "")).strip().upper()
-
-            if regime not in valid_regimes or profile not in valid_profiles:
-                self.logger.warning(f"[{self.name}] Invalid regime ({regime}) or profile ({profile}) from LLM. Defaulting to safe values.")
-                regime = "RANGE_CHOPPY"
-                profile = "BALANCED"
-
-            # === DETERMINISTIC RISK OVERRIDE (Safety First) ===
-            btc_summary = macro_summary.get("BTC", {})
-            btc_atr = float(btc_summary.get("atr_pct", 0.0) or 0.0)
-            btc_fr = abs(float(btc_summary.get("funding_rate", 0.0) or 0.0))
-            btc_rsi = float(btc_summary.get("rsi_14", 50.0) or 50.0)
-
-            btc_is_high_vol = (
-                btc_atr >= 1.5
-                or btc_fr >= 0.05
-                or (btc_atr >= 1.2 and (btc_rsi < 25 or btc_rsi > 75))
-            )
-
-            # Rule: If BTC is in HIGH_VOLATILITY, the system CANNOT be AGGRESSIVE (BTC Risk Override)
-            if btc_is_high_vol:
-                self.logger.warning(
-                    f"[{self.name}] BTC Risk Override triggered: BTC is in high volatility "
-                    f"(ATR={btc_atr}%, FR={btc_fr}%, RSI={btc_rsi}). Forcing CONSERVATIVE profile."
-                )
-                regime = "HIGH_VOLATILITY"
-                profile = "CONSERVATIVE"
-                result["reasoning_en"] = (
-                    f"BTC Risk Override: BTC in high volatility (ATR {btc_atr}%, FR {btc_fr}%). "
-                    + str(result.get("reasoning_en", ""))
-                )
-
-            # Enforce Risk Hierarchy: HIGH_VOLATILITY -> CONSERVATIVE only
-            if regime == "HIGH_VOLATILITY":
-                profile = "CONSERVATIVE"
-            # Note: RANGE_CHOPPY no longer forces downgrade from AGGRESSIVE.
-            # User-selected profile is respected; individual asset MTF alignment
-            # is checked per-asset in Pipeline and RiskManager.
-
-            result["regime"] = regime
-            result["recommended_profile"] = profile
-            return result
-
-        except Exception as e:
-            self.logger.error(f"[{self.name}] Failed to evaluate market regime: {e}")
-            fallback_result["reasoning_en"] = f"Fallback due to exception: {e}"
-            return fallback_result
+        self.logger.info(f"[{self.name}] Final Regime: {regime} -> {profile}")
+        return result
 
