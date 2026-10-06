@@ -103,6 +103,9 @@ class RegimeAgent(BaseAgent):
         eth_high_vol = is_high_volatility(eth_summary)
         
         btc_er = float(btc_summary.get("er_14", 0.0) or 0.0)
+        eth_er = float(eth_summary.get("er_14", 0.0) or 0.0)
+        composite_er = (btc_er * 0.7) + (eth_er * 0.3)
+        
         btc_align = btc_summary.get("mtf_alignment", "MIXED_CHOP")
         eth_align = eth_summary.get("mtf_alignment", "MIXED_CHOP")
 
@@ -118,20 +121,20 @@ class RegimeAgent(BaseAgent):
                 reason.append(f"ETH High Vol (ATR={eth_summary.get('atr_pct', 0)}%, FR={eth_fr_pct:.3f}%)")
             reasoning = "Deterministically triggered HIGH_VOLATILITY: " + " | ".join(reason)
             
-        elif btc_er >= 0.35 and btc_align == "FULL_ALIGNMENT":
+        elif composite_er >= 0.35 and (btc_align == "FULL_ALIGNMENT" or eth_align == "FULL_ALIGNMENT"):
             regime = "TRENDING"
             profile = "AGGRESSIVE"
-            reasoning = f"Deterministically triggered TRENDING: BTC ER is {btc_er} (>=0.35) and MTF is FULL_ALIGNMENT."
+            reasoning = f"Deterministically triggered TRENDING: Composite ER is {composite_er:.2f} (>=0.35). BTC MTF: {btc_align}, ETH MTF: {eth_align}."
             
-        elif btc_er < 0.25 and btc_align == "MIXED_CHOP":
+        elif composite_er < 0.25 and (btc_align == "MIXED_CHOP" or eth_align == "MIXED_CHOP") and btc_align != "FULL_ALIGNMENT" and eth_align != "FULL_ALIGNMENT":
             regime = "RANGE_CHOPPY"
             profile = "BALANCED"
-            reasoning = f"Deterministically triggered RANGE_CHOPPY: BTC ER is {btc_er} (<0.25) and MTF is MIXED_CHOP. Price is oscillating without clear direction."
+            reasoning = f"Deterministically triggered RANGE_CHOPPY: Composite ER is {composite_er:.2f} (<0.25). BTC MTF: {btc_align}, ETH MTF: {eth_align}."
             
         else:
             regime = "TRANSITION"
             profile = "BALANCED"
-            reasoning = f"Deterministically triggered TRANSITION: BTC ER is {btc_er}, Alignment is {btc_align}. Market is either building a reversal or losing trend momentum."
+            reasoning = f"Deterministically triggered TRANSITION: Composite ER is {composite_er:.2f}. BTC: {btc_align}, ETH: {eth_align}."
 
         result = {
             "regime": regime,
