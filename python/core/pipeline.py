@@ -398,47 +398,47 @@ class TradingPipeline:
                     else:
                         has_directional_signal = False
                         self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} ОТКЛОНЕН (Попытка торговли против макро-тренда).")
-            elif mtf_alignment == "TRANSITION":
-                if volume_spike_pct >= 200.0 and current_price >= donchian_high and tech_bulls >= 1:
+                elif mtf_alignment == "TRANSITION":
+                    if volume_spike_pct >= 200.0 and current_price >= donchian_high and tech_bulls >= 1:
+                        has_directional_signal = True
+                        strategy_mode = "BREAKOUT"
+                        self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (BREAKOUT LONG: Пробой {donchian_high} с объемом {volume_spike_pct}%).")
+                    elif volume_spike_pct >= 200.0 and current_price <= donchian_low and tech_bears >= 1:
+                        has_directional_signal = True
+                        strategy_mode = "BREAKOUT"
+                        self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (BREAKOUT SHORT: Пробой {donchian_low} с объемом {volume_spike_pct}%).")
+                    elif trend_1h == "BULLISH" and tech_bulls >= 1 and tech_bears == 0:
+                        has_directional_signal = True
+                        self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (Ранний разворот в лонг: 15m/1H Bullish, Bulls={tech_bulls}).")
+                    elif trend_1h == "BEARISH" and tech_bears >= 1 and tech_bulls == 0:
+                        has_directional_signal = True
+                        self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (Ранний разворот в шорт: 15m/1H Bearish, Bears={tech_bears}).")
+                    else:
+                        has_directional_signal = False
+                        self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} ОТКЛОНЕН (TRANSITION, но нет чистого консенсуса локальных аналитиков).")
+                elif mtf_alignment == "FULL_ALIGNMENT" and (tech_bulls >= 1 or tech_bears >= 1):
                     has_directional_signal = True
-                    strategy_mode = "BREAKOUT"
-                    self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (BREAKOUT LONG: Пробой {donchian_high} с объемом {volume_spike_pct}%).")
-                elif volume_spike_pct >= 200.0 and current_price <= donchian_low and tech_bears >= 1:
+                    self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен из-за FULL_ALIGNMENT MTF trend + подтверждение аналитика.")
+                elif tech_bulls >= 2 and tech_bears <= 1:
                     has_directional_signal = True
-                    strategy_mode = "BREAKOUT"
-                    self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (BREAKOUT SHORT: Пробой {donchian_low} с объемом {volume_spike_pct}%).")
-                elif trend_1h == "BULLISH" and tech_bulls >= 1 and tech_bears == 0:
+                    self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (Bullish консенсус {tech_bulls} vs {tech_bears}).")
+                elif tech_bears >= 2 and tech_bulls <= 1:
                     has_directional_signal = True
-                    self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (Ранний разворот в лонг: 15m/1H Bullish, Bulls={tech_bulls}).")
-                elif trend_1h == "BEARISH" and tech_bears >= 1 and tech_bulls == 0:
-                    has_directional_signal = True
-                    self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (Ранний разворот в шорт: 15m/1H Bearish, Bears={tech_bears}).")
+                    self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (Bearish консенсус {tech_bears} vs {tech_bulls}).")
+                elif mtf_alignment == "MIXED_CHOP":
+                    if bb_position_pct <= 5.0 and tech_bulls >= 1:
+                        has_directional_signal = True
+                        strategy_mode = "MEAN_REVERSION"
+                        self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (MEAN_REVERSION LONG от нижней границы Bollinger, bb_pos={bb_position_pct}%).")
+                    elif bb_position_pct >= 95.0 and tech_bears >= 1:
+                        has_directional_signal = True
+                        strategy_mode = "MEAN_REVERSION"
+                        self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (MEAN_REVERSION SHORT от верхней границы Bollinger, bb_pos={bb_position_pct}%).")
+                    else:
+                        has_directional_signal = False
+                        self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} ОТКЛОНЕН (MIXED_CHOP, цена внутри канала, bb_pos={bb_position_pct}%).")
                 else:
                     has_directional_signal = False
-                    self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} ОТКЛОНЕН (TRANSITION, но нет чистого консенсуса локальных аналитиков).")
-            elif mtf_alignment == "FULL_ALIGNMENT" and (tech_bulls >= 1 or tech_bears >= 1):
-                has_directional_signal = True
-                self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен из-за FULL_ALIGNMENT MTF trend + подтверждение аналитика.")
-            elif tech_bulls >= 2 and tech_bears <= 1:
-                has_directional_signal = True
-                self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (Bullish консенсус {tech_bulls} vs {tech_bears}).")
-            elif tech_bears >= 2 and tech_bulls <= 1:
-                has_directional_signal = True
-                self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (Bearish консенсус {tech_bears} vs {tech_bulls}).")
-            elif mtf_alignment == "MIXED_CHOP":
-                if bb_position_pct <= 5.0 and tech_bulls >= 1:
-                    has_directional_signal = True
-                    strategy_mode = "MEAN_REVERSION"
-                    self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (MEAN_REVERSION LONG от нижней границы Bollinger, bb_pos={bb_position_pct}%).")
-                elif bb_position_pct >= 95.0 and tech_bears >= 1:
-                    has_directional_signal = True
-                    strategy_mode = "MEAN_REVERSION"
-                    self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (MEAN_REVERSION SHORT от верхней границы Bollinger, bb_pos={bb_position_pct}%).")
-                else:
-                    has_directional_signal = False
-                    self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} ОТКЛОНЕН (MIXED_CHOP, цена внутри канала, bb_pos={bb_position_pct}%).")
-            else:
-                has_directional_signal = False
 
             if not has_directional_signal:
                 msg = f"⏸️ Пропуск {symbol}. Причина: Боковик/нет консенсуса аналитиков (Pre-CEO Filter: bulls={tech_bulls}, bears={tech_bears}, MTF={mtf_alignment}). Экономим токены."
