@@ -419,12 +419,6 @@ class TradingPipeline:
                 elif mtf_alignment == "FULL_ALIGNMENT" and (tech_bulls >= 1 or tech_bears >= 1):
                     has_directional_signal = True
                     self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен из-за FULL_ALIGNMENT MTF trend + подтверждение аналитика.")
-                elif tech_bulls >= 2 and tech_bears <= 1:
-                    has_directional_signal = True
-                    self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (Bullish консенсус {tech_bulls} vs {tech_bears}).")
-                elif tech_bears >= 2 and tech_bulls <= 1:
-                    has_directional_signal = True
-                    self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (Bearish консенсус {tech_bears} vs {tech_bulls}).")
                 elif mtf_alignment == "MIXED_CHOP":
                     if bb_position_pct <= 5.0 and tech_bulls >= 1:
                         has_directional_signal = True
@@ -437,6 +431,12 @@ class TradingPipeline:
                     else:
                         has_directional_signal = False
                         self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} ОТКЛОНЕН (MIXED_CHOP, цена внутри канала, bb_pos={bb_position_pct}%).")
+                elif tech_bulls >= 2 and tech_bears <= 1:
+                    has_directional_signal = True
+                    self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (Bullish консенсус {tech_bulls} vs {tech_bears}).")
+                elif tech_bears >= 2 and tech_bulls <= 1:
+                    has_directional_signal = True
+                    self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (Bearish консенсус {tech_bears} vs {tech_bulls}).")
                 else:
                     has_directional_signal = False
 
