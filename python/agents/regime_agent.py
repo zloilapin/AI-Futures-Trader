@@ -89,52 +89,61 @@ class RegimeAgent(BaseAgent):
         btc_summary = macro_summary.get("BTC", {})
         eth_summary = macro_summary.get("ETH", {})
 
-        def is_high_volatility(asset_summary: Dict[str, Any]) -> bool:
-            atr = float(asset_summary.get("atr_pct", 0.0) or 0.0)
-            fr_pct = abs(float(asset_summary.get("funding_rate", 0.0) or 0.0)) * 100
-            er_14 = float(asset_summary.get("er_14", 0.0) or 0.0)
-            if fr_pct >= 0.05:
-                return True
-            if atr >= 1.5 and er_14 < 0.25:
-                return True
-            return False
+        def calculate_asset_scores(summary: Dict[str, Any]) -> Dict[str, float]:
+            atr = float(summary.get("atr_pct", 0.0) or 0.0)
+            fr_pct = abs(float(summary.get("funding_rate", 0.0) or 0.0)) * 100
+            er = float(summary.get("er_14", 0.0) or 0.0)
+            align = summary.get("mtf_alignment", "MIXED_CHOP")
+            rsi = float(summary.get("rsi_14", 50.0) or 50.0)
 
-        btc_high_vol = is_high_volatility(btc_summary)
-        eth_high_vol = is_high_volatility(eth_summary)
-        
-        btc_er = float(btc_summary.get("er_14", 0.0) or 0.0)
-        eth_er = float(eth_summary.get("er_14", 0.0) or 0.0)
-        composite_er = (btc_er * 0.7) + (eth_er * 0.3)
-        
-        btc_align = btc_summary.get("mtf_alignment", "MIXED_CHOP")
-        eth_align = eth_summary.get("mtf_alignment", "MIXED_CHOP")
+            # 1. Trend Score (0-100)
+            trend = min(100.0, (er / 0.5) * 40.0) # ER of 0.5 is very strong trend
+            if align == "FULL_ALIGNMENT": trend += 40.0
+            if align == "COUNTER_TREND_WARNING": trend -= 20.0
+            if rsi > 65 or rsi < 35: trend += 20.0
+            trend = max(0.0, min(100.0, trend))
 
-        if btc_high_vol or eth_high_vol:
+            # 2. Range Score (0-100)
+            range_sc = min(100.0, max(0.0, 100.0 - (er / 0.3) * 100.0)) # Low ER = High Range
+            if align == "MIXED_CHOP": range_sc += 40.0
+            if 40 <= rsi <= 60: range_sc += 20.0
+            range_sc = max(0.0, min(100.0, range_sc))
+
+            # 3. Volatility Score (0-100)
+            vol = min(100.0, (atr / 2.0) * 60.0) # ATR of 2.0% is very high
+            if fr_pct >= 0.05: vol += 40.0 # High funding = extreme leverage/vol
+            if er < 0.2 and atr > 1.5: vol += 20.0 # Noisy wide chop
+            vol = max(0.0, min(100.0, vol))
+            
+            return {"trend": trend, "range": range_sc, "volatility": vol}
+
+        btc_scores = calculate_asset_scores(btc_summary)
+        eth_scores = calculate_asset_scores(eth_summary)
+        
+        # Composite scoring (BTC 70%, ETH 30%)
+        trend_score = (btc_scores["trend"] * 0.7) + (eth_scores["trend"] * 0.3)
+        range_score = (btc_scores["range"] * 0.7) + (eth_scores["range"] * 0.3)
+        vol_score = (btc_scores["volatility"] * 0.7) + (eth_scores["volatility"] * 0.3)
+        
+        # Regime determination based on dominant score
+        if vol_score >= 75.0:
             regime = "HIGH_VOLATILITY"
             profile = "CONSERVATIVE"
-            reason = []
-            if btc_high_vol:
-                btc_fr_pct = float(btc_summary.get('funding_rate', 0.0) or 0.0) * 100
-                reason.append(f"BTC High Vol (ATR={btc_summary.get('atr_pct', 0)}%, FR={btc_fr_pct:.3f}%)")
-            if eth_high_vol:
-                eth_fr_pct = float(eth_summary.get('funding_rate', 0.0) or 0.0) * 100
-                reason.append(f"ETH High Vol (ATR={eth_summary.get('atr_pct', 0)}%, FR={eth_fr_pct:.3f}%)")
-            reasoning = "Deterministically triggered HIGH_VOLATILITY: " + " | ".join(reason)
-            
-        elif composite_er >= 0.28 and (btc_align == "FULL_ALIGNMENT" or eth_align == "FULL_ALIGNMENT"):
+        elif trend_score >= 60.0 and trend_score > range_score + 10.0:
             regime = "TRENDING"
             profile = "AGGRESSIVE"
-            reasoning = f"Deterministically triggered TRENDING: Composite ER is {composite_er:.2f} (>=0.28). BTC MTF: {btc_align}, ETH MTF: {eth_align}."
-            
-        elif composite_er < 0.32 and (btc_align == "MIXED_CHOP" or eth_align == "MIXED_CHOP") and btc_align != "FULL_ALIGNMENT" and eth_align != "FULL_ALIGNMENT":
+        elif range_score >= 60.0 and range_score > trend_score + 10.0:
             regime = "RANGE_CHOPPY"
             profile = "BALANCED"
-            reasoning = f"Deterministically triggered RANGE_CHOPPY: Composite ER is {composite_er:.2f} (<0.32). BTC MTF: {btc_align}, ETH MTF: {eth_align}."
-            
         else:
             regime = "TRANSITION"
             profile = "BALANCED"
-            reasoning = f"Deterministically triggered TRANSITION: Composite ER is {composite_er:.2f}. BTC: {btc_align}, ETH: {eth_align}."
+
+        reasoning = (
+            f"Multi-Factor Regime Scores -> TREND: {trend_score:.1f} | "
+            f"RANGE: {range_score:.1f} | VOLATILITY: {vol_score:.1f}. "
+            f"Determined Regime: {regime}."
+        )
 
         result = {
             "regime": regime,
@@ -142,6 +151,6 @@ class RegimeAgent(BaseAgent):
             "reasoning_en": reasoning
         }
 
-        self.logger.info(f"[{self.name}] Final Regime: {regime} -> {profile}")
+        self.logger.info(f"[{self.name}] {reasoning} Profile: {profile}")
         return result
 
