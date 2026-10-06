@@ -125,8 +125,11 @@ class RegimeAgent(BaseAgent):
         range_score = (btc_scores["range"] * 0.7) + (eth_scores["range"] * 0.3)
         vol_score = (btc_scores["volatility"] * 0.7) + (eth_scores["volatility"] * 0.3)
         
+        btc_atr = float(btc_summary.get("atr_pct", 0.0) or 0.0)
+        
         # Regime determination based on dominant score
-        if vol_score >= 75.0:
+        # High ATR / Extreme volatility must take precedence to protect capital
+        if vol_score >= 70.0 or btc_atr >= 1.5:
             regime = "HIGH_VOLATILITY"
             profile = "CONSERVATIVE"
         elif trend_score >= 60.0 and trend_score > range_score + 10.0:

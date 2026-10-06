@@ -424,6 +424,11 @@ class TradingPipeline:
 
             print(f"⚖️ Решение CEO [{symbol}]: {decision} (Уверенность: {conv_str})")
 
+            # Enrich scan_result with routing info for cycle logs
+            scan_result["strategy_mode"] = strategy_mode
+            scan_result["direction_bias"] = strategy_profile.direction_bias
+            scan_result["router_reasoning"] = strategy_profile.reasoning
+
             # Centralized Strategy Router Logic (unified with RiskManager)
             profile_rules = self.agents.risk._get_profile_rules(profile, strategy_mode)
             min_conv = profile_rules["min_conviction"]

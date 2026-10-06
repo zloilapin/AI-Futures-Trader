@@ -557,6 +557,7 @@ class MarketDataService:
                                     "volume_spike_pct": volume_spike_pct,
                                     "donchian_high": donchian_high,
                                     "donchian_low": donchian_low,
+                                    "last_closed_candle_close": closes[-2] if len(closes) >= 2 else current_price,
                                     # Algorithmic signals (deterministic, no LLM needed)
                                     "algo_signals": {
                                         "rsi_divergence": rsi_divergence,

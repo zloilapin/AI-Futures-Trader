@@ -289,11 +289,12 @@ class NadoTradingService(BaseTradingService):
                 
             amount_base = contracts if contracts > 0 else notional_usd / entry_price
             amount_x18 = int(amount_base * 10**18)
-            # entry_price (from RiskManager) already includes the expected slippage (execution_entry).
-            # We use it directly as the limit price to avoid double-slippage penalty.
-            limit_price = entry_price
-            
-            if direction.upper() == "SHORT":
+            # Apply aggressive slippage (0.5%) for the limit price to ensure the IOC order crosses the book.
+            # The actual execution price will still be determined by the best available liquidity in the order book.
+            if direction.upper() == "LONG":
+                limit_price = entry_price * 1.005
+            else:
+                limit_price = entry_price * 0.995
                 amount_x18 = -amount_x18
                 
             price_x18 = int(limit_price * 10**18)
@@ -746,9 +747,14 @@ class NadoTradingService(BaseTradingService):
                                 
                                 # Strict Time Check
                                 if open_time > 0 and hasattr(order, "timestamp"):
-                                    order_ts_sec = float(order.timestamp) / 1000.0 if len(str(order.timestamp)) > 10 else float(order.timestamp)
-                                    if order_ts_sec < open_time:
-                                        continue
+                                    ts = getattr(order, "timestamp", None)
+                                    if ts is not None and str(ts).strip() != "None":
+                                        try:
+                                            order_ts_sec = float(ts) / 1000.0 if len(str(ts)) > 10 else float(ts)
+                                            if order_ts_sec < open_time:
+                                                continue
+                                        except (ValueError, TypeError):
+                                            pass
                                         
                                 if (direction == "LONG" and bf < 0) or (direction == "SHORT" and bf > 0):
                                     if base > 0:

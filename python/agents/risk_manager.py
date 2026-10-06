@@ -228,18 +228,19 @@ class RiskManager(BaseAgent):
             else:
                 execution_entry = current_price * (1.0 - expected_slippage_pct)
 
-            # Calculate ATR based SL and TP with a minimum floor, anchored to expected EXECUTION ENTRY
+            # Calculate ATR based SL and TP with a minimum floor, anchored to REAL CURRENT PRICE (Signal Origin)
             if decision == "LONG":
-                sl_dist = max(atr_14 * sl_mult, execution_entry * config.MIN_SL_PCT)
-                tp_dist = max(atr_14 * tp_mult, execution_entry * config.MIN_TP_PCT)
-                sl_price = execution_entry - sl_dist
-                tp_price = execution_entry + tp_dist
+                sl_dist_base = max(atr_14 * sl_mult, current_price * config.MIN_SL_PCT)
+                tp_dist_base = max(atr_14 * tp_mult, current_price * config.MIN_TP_PCT)
+                sl_price = current_price - sl_dist_base
+                tp_price = current_price + tp_dist_base
             else: # SHORT
-                sl_dist = max(atr_14 * sl_mult, execution_entry * config.MIN_SL_PCT)
-                tp_dist = max(atr_14 * tp_mult, execution_entry * config.MIN_TP_PCT)
-                sl_price = execution_entry + sl_dist
-                tp_price = execution_entry - tp_dist
+                sl_dist_base = max(atr_14 * sl_mult, current_price * config.MIN_SL_PCT)
+                tp_dist_base = max(atr_14 * tp_mult, current_price * config.MIN_TP_PCT)
+                sl_price = current_price + sl_dist_base
+                tp_price = current_price - tp_dist_base
                 
+            # Compute actual risk distances from the EXPECTED EXECUTION ENTRY for conservative sizing & RR Math
             distance_to_sl = abs(execution_entry - sl_price)
             distance_to_tp = abs(tp_price - execution_entry)
             
