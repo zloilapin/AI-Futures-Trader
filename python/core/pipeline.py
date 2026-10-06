@@ -402,14 +402,14 @@ class TradingPipeline:
                         has_directional_signal = False
                         self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} ОТКЛОНЕН (Попытка торговли против макро-тренда).")
                 elif mtf_alignment == "TRANSITION":
-                    if volume_spike_pct >= 200.0 and current_price >= donchian_high and tech_bulls >= 1:
+                    if volume_spike_pct >= 200.0 and current_price >= donchian_high and tech_bulls >= 1 and ob_bull:
                         has_directional_signal = True
                         strategy_mode = "BREAKOUT"
-                        self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (BREAKOUT LONG: Пробой {donchian_high} с объемом {volume_spike_pct}%).")
-                    elif volume_spike_pct >= 200.0 and current_price <= donchian_low and tech_bears >= 1:
+                        self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (BREAKOUT LONG: Пробой {donchian_high} с объемом {volume_spike_pct}%, OB=BULL).")
+                    elif volume_spike_pct >= 200.0 and current_price <= donchian_low and tech_bears >= 1 and ob_bear:
                         has_directional_signal = True
                         strategy_mode = "BREAKOUT"
-                        self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (BREAKOUT SHORT: Пробой {donchian_low} с объемом {volume_spike_pct}%).")
+                        self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (BREAKOUT SHORT: Пробой {donchian_low} с объемом {volume_spike_pct}%, OB=BEAR).")
                     elif trend_1h == "BULLISH" and tech_bulls >= 1 and tech_bears == 0:
                         has_directional_signal = True
                         self.services.logger.info(f"[System_Core] Pre-CEO Filter: {symbol} допущен (Ранний разворот в лонг: 15m/1H Bullish, Bulls={tech_bulls}).")
