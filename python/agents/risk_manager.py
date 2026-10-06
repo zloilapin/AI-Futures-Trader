@@ -281,23 +281,7 @@ class RiskManager(BaseAgent):
             if spread_pct > config.SPREAD_PENALTY_THRESHOLD:
                 self.logger.warning(f"[{self.name}] High spread detected ({spread_pct}%). Applying slippage penalty.")
                 
-            # --- Market Regime Check (Trend-Following vs Chop) ---
-            mtf_data = market_data.get("multi_timeframe", {})
-            mtf_alignment = mtf_data.get("mtf_alignment", "MIXED_CHOP")
-            
-            if mtf_alignment == "MIXED_CHOP":
-                if strategy_mode not in ["MEAN_REVERSION", "VOLATILITY_MOMENTUM", "RELATIVE_MOMENTUM"]:
-                    msg = f"Asset local MTF alignment is MIXED_CHOP (15m: {mtf_data.get('trend_15m')}, 1h: {mtf_data.get('trend_1h')}). {strategy_mode} strategy cannot trade in chop."
-                    self.logger.warning(f"[{self.name}] 🚫 REGIME VETO: {msg}")
-                    return {
-                        "approved": False,
-                        "veto_category": "REGIME",
-                        "reasoning": msg
-                    }
-                else:
-                    self.logger.info(f"[{self.name}] ℹ️ MTF is MIXED_CHOP, but allowing {strategy_mode} strategy to proceed.")
-                
-                
+
             # Volume & Spread Quality Multiplier
             volume_mult = 1.0
             ohlcv = market_data.get("price_data", {}).get("ohlcv_1h", [])
