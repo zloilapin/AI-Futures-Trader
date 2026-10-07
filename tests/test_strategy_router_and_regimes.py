@@ -3,6 +3,8 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock
 from core.strategy_router import StrategyRouter, StrategyProfile
 from core.pipeline import TradingPipeline, AgentRegistry, ServiceRegistry
+from core.models import FinalTradeDecision, FinalRiskDecision
+from core.deterministic_guard import DeterministicGuard
 from agents.risk_manager import RiskManager
 from agents.ceo_agent import CEOAgent
 from core.logger import TradeLogger
@@ -764,3 +766,328 @@ async def test_full_pipeline_cycle_direction_guard_blocks_trade(mock_logger, moc
     assert services.trading_service.open_position.called is False
     assert ceo_verdict["decision"] == "HOLD"
     assert ceo_verdict["hold_category"] == "STRATEGY_GUARD_VETO"
+
+
+# ==============================================================================
+# 5. UNIFIED PIPELINE CONTRACT TESTS (Deterministic Guard -> RiskManager -> Execution)
+# ==============================================================================
+
+def test_deterministic_guard_produces_canonical_final_trade_decision(mock_logger, mock_llm):
+    """
+    Contract Test 1:
+    DeterministicGuard evaluates raw CEO proposal against strategy and market rules,
+    producing an immutable FinalTradeDecision with explicit actionability and rejection tags.
+    """
+    risk_manager = RiskManager(mock_logger, mock_llm)
+
+    # Scenario A: Direction bias contradiction in Breakout
+    profile_breakout = StrategyProfile(
+        has_directional_signal=True,
+        strategy_mode="BREAKOUT",
+        direction_bias="LONG",
+        reasoning="Donchian breakout long"
+    )
+    ceo_proposal_contra = {
+        "decision": "SHORT",
+        "conviction": 85,
+        "trade_action": "ENTER",
+        "reasoning_en": "Counter-trend idea"
+    }
+    decision_a = DeterministicGuard.evaluate(
+        strategy_profile=profile_breakout,
+        ceo_proposal=ceo_proposal_contra,
+        profile="BALANCED",
+        risk_manager=risk_manager,
+        symbol="BTC-USD"
+    )
+    assert isinstance(decision_a, FinalTradeDecision)
+    assert decision_a.decision == "HOLD"
+    assert decision_a.conviction == 0
+    assert decision_a.trade_action == "HOLD"
+    assert decision_a.is_actionable is False
+    assert decision_a.rejection_tag == "STRATEGY_GUARD_VETO"
+    assert decision_a.guard_status == "BLOCKED"
+
+    # Scenario B: Volatility Momentum Pullback Override
+    profile_vol = StrategyProfile(
+        has_directional_signal=True,
+        strategy_mode="VOLATILITY_MOMENTUM",
+        direction_bias="LONG",
+        reasoning="15m fast momentum"
+    )
+    ceo_proposal_pb = {
+        "decision": "LONG",
+        "conviction": 70,
+        "trade_action": "WAIT_FOR_PULLBACK",
+        "entry_quality": 65,
+        "directional_confidence": 75
+    }
+    decision_b = DeterministicGuard.evaluate(
+        strategy_profile=profile_vol,
+        ceo_proposal=ceo_proposal_pb,
+        profile="BALANCED",
+        risk_manager=risk_manager,
+        symbol="ETH-USD"
+    )
+    assert decision_b.decision == "LONG"
+    assert decision_b.trade_action == "ENTER"
+    assert decision_b.is_actionable is True
+    assert decision_b.guard_status == "PASSED"
+
+    # Scenario C: Extreme Funding Rate Gate
+    market_data_extreme_funding = {
+        "derivatives_data": {"funding_rate": 0.0008} # 0.08% > 0.05%
+    }
+    decision_c = DeterministicGuard.evaluate(
+        strategy_profile=profile_vol,
+        ceo_proposal={"decision": "LONG", "conviction": 80, "trade_action": "ENTER"},
+        profile="BALANCED",
+        risk_manager=risk_manager,
+        market_data=market_data_extreme_funding,
+        symbol="SOL-USD"
+    )
+    assert decision_c.decision == "LONG" # Decision itself preserved
+    assert decision_c.is_actionable is False # But marked non-actionable
+    assert decision_c.rejection_tag == "FUNDING_VETO"
+    assert decision_c.guard_status == "BLOCKED"
+
+    # Scenario D: Backward compatibility unpacking
+    dec, conv, act, m_conv = decision_b
+    assert dec == "LONG"
+    assert conv == 70
+    assert act == "ENTER"
+    assert m_conv == 65
+
+
+@pytest.mark.asyncio
+async def test_risk_manager_strict_contract_binary_approve_or_veto_only(mock_logger, mock_llm):
+    """
+    Contract Test 2:
+    RiskManager receives FinalTradeDecision.
+    It can ONLY APPROVE or VETO. It NEVER mutates 'decision'.
+    """
+    risk_manager = RiskManager(mock_logger, mock_llm)
+
+    # 1. Non-actionable candidate passed to RiskManager -> strictly VETO
+    blocked_trade = FinalTradeDecision(
+        symbol="BTC-USD",
+        decision="LONG",
+        conviction=80,
+        trade_action="ENTER",
+        strategy_mode="TREND_FOLLOWING",
+        direction_bias="LONG",
+        min_conviction=70,
+        is_actionable=False,
+        guard_status="BLOCKED",
+        guard_reason="Extreme funding rate",
+        rejection_tag="FUNDING_VETO"
+    )
+    portfolio_data = {"total_usd": 1000.0, "available_margin": 1000.0, "active_positions": {}}
+    market_data = {
+        "price_data": {"current_price": 100.0, "ohlcv_1h": [{"volume": 100}] * 10},
+        "indicators": {"atr_14": 1.0},
+        "derivatives_data": {"size_increment": 0.001}
+    }
+    risk_res_1 = await risk_manager.analyze(blocked_trade, portfolio_data, market_data)
+    assert risk_res_1["approved"] is False
+    assert risk_res_1["veto_category"] == "FUNDING_VETO"
+    assert blocked_trade.decision == "LONG" # NEVER mutated
+
+    # 2. Actionable candidate with healthy portfolio -> strictly APPROVE
+    valid_trade = FinalTradeDecision(
+        symbol="BTC-USD",
+        decision="LONG",
+        conviction=75,
+        trade_action="ENTER",
+        strategy_mode="TREND_FOLLOWING",
+        direction_bias="LONG",
+        min_conviction=70,
+        is_actionable=True,
+        guard_status="PASSED",
+        guard_reason="All checks passed."
+    )
+    risk_res_2 = await risk_manager.analyze(valid_trade, portfolio_data, market_data)
+    assert risk_res_2["approved"] is True
+    assert risk_res_2.get("veto_category") is None
+    assert risk_res_2["notional_size_usd"] > 0
+    assert valid_trade.decision == "LONG" # NEVER mutated
+
+
+@pytest.mark.asyncio
+async def test_pipeline_contract_immutable_decision_throughout_execution(mock_logger, mock_llm, monkeypatch):
+    """
+    Contract Test 3:
+    Full pipeline execution preserves the strict contract:
+    - FinalTradeDecision.decision is passed to open_position.
+    - If exchange rejects order, risk_verdict['approved'] remains True (RiskManager approved it),
+      while risk_verdict['execution_status'] is marked 'REJECTED_BY_EXCHANGE'.
+    """
+    pipeline, agents, services = create_test_pipeline(mock_logger, mock_llm)
+
+    market_data = {
+        "symbol": "BTC-USD",
+        "price_data": {
+            "current_price": 100.0,
+            "candles_20": [{"open": 99.0, "high": 101.0, "low": 98.0, "close": 100.0, "volume": 10.0}] * 20,
+            "ohlcv_1h": [{"volume": 100}] * 10,
+            "ohlcv_15m": [{"volume": 100, "close": 100.0, "open": 99.0}] * 10
+        },
+        "order_book_data": {"best_bid": 99.95, "best_ask": 100.05, "spread_pct": 0.05, "bid_volume": 100.0, "ask_volume": 100.0},
+        "indicators": {"atr_14": 1.0, "ema_20": 100.0, "bb_middle": 100.0, "bb_upper": 105.0, "bb_lower": 95.0, "bb_width_pct": 12.0, "volume_spike_pct": 120.0, "vol_15m_ratio": 2.5},
+        "multi_timeframe": {"mtf_alignment": "MIXED_CHOP", "trend_15m": "BULLISH", "trend_1h": "NEUTRAL", "trend_4h": "NEUTRAL", "vol_15m_ratio": 2.5},
+        "derivatives_data": {"size_increment": 0.001, "min_notional": 10.0, "min_size": 0.001, "funding_rate": 0.0001, "open_interest_trend": "rising"}
+    }
+    services.fetcher.fetch_all_market_data = AsyncMock(return_value=market_data)
+    services.fetcher.fetch_active_perps = AsyncMock(return_value=[{"symbol": "BTC-USD", "volume_24h": 50000000}])
+
+    # Simulate exchange rejection on open_position
+    services.trading_service.open_position = AsyncMock(return_value=False)
+
+    ceo_verdict = {
+        "symbol": "BTC-USD",
+        "decision": "LONG",
+        "conviction": 75,
+        "entry_quality": 75,
+        "directional_confidence": 80,
+        "trade_action": "ENTER",
+        "reasoning_en": "Strong setup"
+    }
+    agents.ceo.analyze = AsyncMock(return_value=ceo_verdict)
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+    await pipeline.run_cycle(1, force_scan=True)
+
+    # open_position was called with direction="LONG"
+    assert services.trading_service.open_position.called is True
+    call_args = services.trading_service.open_position.call_args[1]
+    assert call_args["direction"] == "LONG"
+
+    # Memory saved the cycle with approved risk assessment and REJECTED_BY_EXCHANGE execution status
+    assert agents.memory.save_cycle.called is True
+    saved_cycle = agents.memory.save_cycle.call_args[0][0]
+    assert saved_cycle["ceo_decision"]["decision"] == "LONG"
+    assert saved_cycle["risk_assessment"]["approved"] is True # RiskManager DID approve!
+    assert saved_cycle["risk_assessment"]["execution_status"] == "REJECTED_BY_EXCHANGE"
+
+
+def test_guard_cannot_originate_trade_when_ceo_chooses_hold(mock_logger, mock_llm):
+    """
+    Audit Check 1:
+    Verifies Guard cannot take a trade decision instead of CEO.
+    Even with strong strategy bias (e.g. BREAKOUT LONG), if CEO decides HOLD,
+    DeterministicGuard MUST NOT convert it to LONG/SHORT. is_actionable MUST be False.
+    """
+    risk_manager = RiskManager(mock_logger, mock_llm)
+    profile_breakout = StrategyProfile(
+        has_directional_signal=True,
+        strategy_mode="BREAKOUT",
+        direction_bias="LONG",
+        reasoning="Strong breakout setup"
+    )
+    ceo_hold = {
+        "decision": "HOLD",
+        "conviction": 40,
+        "trade_action": "HOLD",
+        "reasoning_en": "Market too uncertain"
+    }
+    decision = DeterministicGuard.evaluate(
+        strategy_profile=profile_breakout,
+        ceo_proposal=ceo_hold,
+        profile="BALANCED",
+        risk_manager=risk_manager,
+        symbol="BTC-USD"
+    )
+    assert decision.decision == "HOLD"
+    assert decision.is_actionable is False
+    assert decision.guard_status == "HOLD"
+
+
+def test_final_trade_decision_is_strictly_immutable(mock_logger, mock_llm):
+    """
+    Audit Check 2:
+    Verifies that FinalTradeDecision is frozen=True at runtime.
+    Any attempt to mutate 'decision' raises FrozenInstanceError.
+    """
+    from dataclasses import FrozenInstanceError
+    trade_decision = FinalTradeDecision(
+        symbol="ETH-USD",
+        decision="LONG",
+        conviction=75,
+        trade_action="ENTER",
+        strategy_mode="TREND_FOLLOWING",
+        direction_bias="LONG",
+        min_conviction=70,
+        is_actionable=True,
+        guard_status="PASSED",
+        guard_reason="OK"
+    )
+    with pytest.raises(FrozenInstanceError):
+        trade_decision.decision = "SHORT"
+
+
+@pytest.mark.asyncio
+async def test_execution_and_risk_strictly_blocks_wait_and_hold(mock_logger, mock_llm):
+    """
+    Audit Check 3:
+    Verifies neither RiskManager nor Execution can reinterpret WAIT or HOLD as a trade.
+    - RiskManager refuses WAIT_FOR_PULLBACK and HOLD.
+    - NadoTradingService.open_position immediately returns False if direction is 'HOLD' or 'WAIT'.
+    """
+    risk_manager = RiskManager(mock_logger, mock_llm)
+    portfolio_data = {"total_usd": 1000.0, "available_margin": 1000.0, "active_positions": {}}
+    market_data = {
+        "price_data": {"current_price": 100.0, "ohlcv_1h": [{"volume": 100}] * 10},
+        "indicators": {"atr_14": 1.0},
+        "derivatives_data": {"size_increment": 0.001}
+    }
+
+    # 1. RiskManager with trade_action WAIT_FOR_PULLBACK
+    wait_decision = FinalTradeDecision(
+        symbol="BTC-USD",
+        decision="LONG",
+        conviction=75,
+        trade_action="WAIT_FOR_PULLBACK",
+        strategy_mode="TREND_FOLLOWING",
+        direction_bias="LONG",
+        min_conviction=70,
+        is_actionable=False,
+        guard_status="BLOCKED",
+        guard_reason="Wait",
+        rejection_tag="WAIT_FOR_PULLBACK"
+    )
+    risk_res = await risk_manager.analyze(wait_decision, portfolio_data, market_data)
+    assert risk_res["approved"] is False
+
+    # 2. RiskManager with decision HOLD
+    hold_decision = FinalTradeDecision(
+        symbol="BTC-USD",
+        decision="HOLD",
+        conviction=0,
+        trade_action="HOLD",
+        strategy_mode="TREND_FOLLOWING",
+        direction_bias="LONG",
+        min_conviction=70,
+        is_actionable=False,
+        guard_status="HOLD",
+        guard_reason="Hold",
+        rejection_tag="CEO_HOLD"
+    )
+    risk_res_hold = await risk_manager.analyze(hold_decision, portfolio_data, market_data)
+    assert risk_res_hold["approved"] is False
+
+    # 3. NadoTradingService.open_position rejects non-directional values
+    from services.nado_trading_service import NadoTradingService
+    service = NadoTradingService(nado_client=MagicMock())
+    service.is_connected = True
+    service.product_map = {"BTC": 1, "BTC-USD": 1}
+    service._get_market_parameters = MagicMock(return_value={"size_increment_x18": 10**15, "price_increment_x18": 10**15})
+
+    # Passing "HOLD" must be immediately rejected with False, NOT executed as a short!
+    res_hold = await service.open_position("BTC-USD", "HOLD", 100.0, 100.0, 105.0, 95.0, 5)
+    assert res_hold is False
+
+    # Passing "WAIT_FOR_PULLBACK" must also be rejected
+    res_wait = await service.open_position("BTC-USD", "WAIT_FOR_PULLBACK", 100.0, 100.0, 105.0, 95.0, 5)
+    assert res_wait is False
+
+

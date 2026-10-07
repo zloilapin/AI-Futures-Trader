@@ -95,25 +95,121 @@ class RegimeAgent(BaseAgent):
             er = float(summary.get("er_14", 0.0) or 0.0)
             align = summary.get("mtf_alignment", "MIXED_CHOP")
             rsi = float(summary.get("rsi_14", 50.0) or 50.0)
+            ema_trend = str(summary.get("ema_trend", "neutral")).lower()
+            macd_label = str(summary.get("macd_label", "neutral")).lower()
 
-            # 1. Trend Score (0-100)
-            trend = min(100.0, (er / 0.5) * 40.0) # ER of 0.5 is very strong trend
-            if align == "FULL_ALIGNMENT": trend += 40.0
-            if align == "COUNTER_TREND_WARNING": trend -= 20.0
-            if rsi > 65 or rsi < 35: trend += 20.0
-            trend = max(0.0, min(100.0, trend))
+            mtf_trends = summary.get("mtf_trends", {})
+            t15 = str(mtf_trends.get("15m", "NEUTRAL")).upper()
+            t1h = str(mtf_trends.get("1h", "NEUTRAL")).upper()
+            t4h = str(mtf_trends.get("4h", "NEUTRAL")).upper()
 
-            # 2. Range Score (0-100)
-            range_sc = min(100.0, max(0.0, 100.0 - (er / 0.3) * 100.0)) # Low ER = High Range
-            if align == "MIXED_CHOP": range_sc += 40.0
-            if 40 <= rsi <= 60: range_sc += 20.0
-            range_sc = max(0.0, min(100.0, range_sc))
+            bull_votes = sum(1 for t in [t15, t1h, t4h] if t in ["BULLISH", "UP"])
+            bear_votes = sum(1 for t in [t15, t1h, t4h] if t in ["BEARISH", "DOWN"])
+            if bull_votes > bear_votes:
+                trend_dir = "BULLISH"
+            elif bear_votes > bull_votes:
+                trend_dir = "BEARISH"
+            else:
+                trend_dir = "NEUTRAL"
 
-            # 3. Volatility Score (0-100)
-            vol = min(100.0, (atr / 2.0) * 60.0) # ATR of 2.0% is very high
-            if fr_pct >= 0.05: vol += 40.0 # High funding = extreme leverage/vol
-            if er < 0.2 and atr > 1.5: vol += 20.0 # Noisy wide chop
-            vol = max(0.0, min(100.0, vol))
+            # --- 1. TREND SCORE (0-100) ---
+            # Pillar A: Multi-Timeframe Structural Trend (35 pts)
+            mtf_pts = 0.0
+            if align == "FULL_ALIGNMENT":
+                mtf_pts = 35.0
+            elif align in ["PARTIAL_ALIGNMENT", "STRONG_TREND"] or (bull_votes >= 2 or bear_votes >= 2):
+                mtf_pts = 20.0
+            elif align == "MIXED_CHOP":
+                mtf_pts = 5.0
+            elif align == "COUNTER_TREND_WARNING":
+                mtf_pts = 0.0
+
+            # Pillar B: Directional Efficiency (Kaufman ER-14) (30 pts)
+            # ER 0.50+ represents strong institutional directional flow
+            er_pts = min(30.0, (er / 0.50) * 30.0) if er > 0 else 0.0
+
+            # Pillar C: Moving Average & MACD Momentum Alignment (25 pts)
+            ma_pts = 0.0
+            if trend_dir == "BULLISH":
+                if ema_trend in ["up", "bullish", "strong_bullish"]:
+                    ma_pts += 15.0
+                elif ema_trend in ["down", "bearish", "strong_bearish"]:
+                    ma_pts -= 10.0
+                if macd_label in ["bullish", "buy"]:
+                    ma_pts += 10.0
+                elif macd_label in ["bearish", "sell"]:
+                    ma_pts -= 5.0
+            elif trend_dir == "BEARISH":
+                if ema_trend in ["down", "bearish", "strong_bearish"]:
+                    ma_pts += 15.0
+                elif ema_trend in ["up", "bullish", "strong_bullish"]:
+                    ma_pts -= 10.0
+                if macd_label in ["bearish", "sell"]:
+                    ma_pts += 10.0
+                elif macd_label in ["bullish", "buy"]:
+                    ma_pts -= 5.0
+            else:
+                # Neutral direction
+                if ema_trend in ["up", "bullish", "down", "bearish"]:
+                    ma_pts += 5.0
+                if macd_label in ["bullish", "bearish"]:
+                    ma_pts += 5.0
+
+            # Pillar D: RSI Trend Quality & Sustainability (10 pts, with Overbought/Oversold Guard)
+            # Replaces unproven flat "RSI > 65 -> +20" heuristic.
+            # Sustained momentum in trend direction is rewarded; exhaustion levels are guarded.
+            rsi_pts = 0.0
+            if trend_dir == "BULLISH":
+                if 50.0 <= rsi <= 68.0:
+                    rsi_pts = 10.0  # Healthy sustainable bull momentum corridor
+                elif 68.0 < rsi <= 75.0:
+                    rsi_pts = 5.0   # Extended momentum, approaching overbought
+                elif rsi > 75.0:
+                    rsi_pts = -10.0 # Overbought exhaustion / blow-off top warning
+                elif rsi < 40.0:
+                    rsi_pts = -10.0 # Bull trend broken by severe downside drop
+            elif trend_dir == "BEARISH":
+                if 32.0 <= rsi <= 50.0:
+                    rsi_pts = 10.0  # Healthy sustainable bear momentum corridor
+                elif 25.0 <= rsi < 32.0:
+                    rsi_pts = 5.0   # Extended momentum, approaching oversold
+                elif rsi < 25.0:
+                    rsi_pts = -10.0 # Oversold exhaustion / climax sell-off warning
+                elif rsi > 60.0:
+                    rsi_pts = -10.0 # Bear trend broken by strong upside bounce
+            else:
+                if 42.0 <= rsi <= 58.0:
+                    rsi_pts = 0.0
+                elif (52.0 <= rsi <= 65.0) or (35.0 <= rsi <= 48.0):
+                    rsi_pts = 5.0
+
+            trend = max(0.0, min(100.0, mtf_pts + er_pts + ma_pts + rsi_pts))
+
+            # --- 2. RANGE / CHOP SCORE (0-100) ---
+            # Low ER indicates non-directional oscillation
+            er_range_pts = max(0.0, 35.0 * (1.0 - (er / 0.30)))
+            mtf_range_pts = 35.0 if align == "MIXED_CHOP" else (15.0 if align in ["TRANSITION", "COUNTER_TREND_WARNING"] else 0.0)
+            
+            rsi_range_pts = 0.0
+            if 42.0 <= rsi <= 58.0:
+                rsi_range_pts = 15.0
+            elif 38.0 <= rsi <= 62.0:
+                rsi_range_pts = 8.0
+
+            ma_flat_pts = 0.0
+            if ema_trend in ["flat", "neutral", "none"]:
+                ma_flat_pts += 15.0
+            elif ma_pts <= 10.0:
+                ma_flat_pts += 8.0
+
+            range_sc = max(0.0, min(100.0, er_range_pts + mtf_range_pts + rsi_range_pts + ma_flat_pts))
+
+            # --- 3. VOLATILITY SCORE (0-100) ---
+            atr_vol_pts = min(50.0, (atr / 1.8) * 50.0)
+            fr_vol_pts = 30.0 if fr_pct >= 0.05 else (15.0 if fr_pct >= 0.02 else 0.0)
+            chop_vol_pts = 20.0 if (er < 0.20 and atr > 1.2) else 0.0
+
+            vol = max(0.0, min(100.0, atr_vol_pts + fr_vol_pts + chop_vol_pts))
             
             return {"trend": trend, "range": range_sc, "volatility": vol}
 
@@ -129,13 +225,13 @@ class RegimeAgent(BaseAgent):
         
         # Regime determination based on dominant score
         # High ATR / Extreme volatility must take precedence to protect capital
-        if vol_score >= 70.0 or btc_atr >= 1.5:
+        if vol_score >= 65.0 or btc_atr >= 1.5:
             regime = "HIGH_VOLATILITY"
             profile = "CONSERVATIVE"
-        elif trend_score >= 60.0 and trend_score > range_score + 10.0:
+        elif trend_score >= 60.0 and trend_score > range_score + 15.0:
             regime = "TRENDING"
             profile = "AGGRESSIVE"
-        elif range_score >= 60.0 and range_score > trend_score + 10.0:
+        elif range_score >= 55.0 and range_score > trend_score + 15.0:
             regime = "RANGE_CHOPPY"
             profile = "BALANCED"
         else:

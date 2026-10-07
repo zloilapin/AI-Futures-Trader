@@ -1,12 +1,14 @@
 import time
 import asyncio
 from dataclasses import dataclass
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 
 from core.utils import get_msk_status, _escape_md
 from core.config import config
 from core.diagnostics import tracker
 from core.strategy_router import StrategyRouter, StrategyProfile
+from core.models import FinalTradeDecision, FinalRiskDecision
+from core.deterministic_guard import DeterministicGuard
 
 from agents.universe_agent import UniverseAgent
 from agents.scanner_agent import ScannerAgent
@@ -78,53 +80,25 @@ class TradingPipeline:
         strategy_profile: StrategyProfile,
         ceo_verdict: Dict[str, Any],
         profile: str,
-        symbol: str = ""
-    ) -> Tuple[str, int, str, int]:
+        symbol: str = "",
+        market_data: Optional[Dict[str, Any]] = None
+    ) -> FinalTradeDecision:
         """
-        Applies Strategy Direction Guards, Volatility Momentum pullback override,
-        and synchronizes all state mutations back into ceo_verdict for downstream
-        components (RiskManager, Execution Gate, Memory, Reflector, Telegram).
-
-        Returns:
-            Tuple of (decision, conviction, trade_action, min_conv)
+        Deterministic Guard:
+        Enforces Strategy Direction Guards, Volatility Momentum pullback override,
+        funding rate protection, and conviction threshold validation.
+        Produces an immutable FinalTradeDecision (which also unpacks as a 4-tuple
+        (decision, conviction, trade_action, min_conv) for backward compatibility).
         """
-        strategy_mode = strategy_profile.strategy_mode
-        decision = str(ceo_verdict.get("decision", "HOLD")).upper()
-        conviction = ceo_verdict.get("conviction", 0)
-        trade_action = ceo_verdict.get("trade_action", "ENTER" if conviction >= 70 else "HOLD")
-
-        # Guard against reversing direction on specialized setups (Breakout and Mean Reversion)
-        if strategy_mode in ["BREAKOUT", "MEAN_REVERSION"] and decision in ["LONG", "SHORT"]:
-            if decision != strategy_profile.direction_bias:
-                guard_msg = f"🛡️ [Strategy Guard] Решение CEO {decision} противоречит {strategy_mode} bias ({strategy_profile.direction_bias}). Сделка отменена в HOLD для защиты капитала."
-                print(guard_msg)
-                self.services.logger.warning(f"[Pipeline] {guard_msg}")
-                decision = "HOLD"
-                conviction = 0
-                trade_action = "HOLD"
-                ceo_verdict["decision"] = "HOLD"
-                ceo_verdict["conviction"] = 0
-                ceo_verdict["trade_action"] = "HOLD"
-                ceo_verdict["hold_category"] = "STRATEGY_GUARD_VETO"
-                ceo_verdict["reasoning_en"] = f"{ceo_verdict.get('reasoning_en', '')}\n\n{guard_msg}".strip()
-
-        # Centralized Strategy Router Logic (unified with RiskManager)
-        profile_rules = self.agents.risk._get_profile_rules(profile, strategy_mode)
-        min_conv = profile_rules["min_conviction"]
-
-        # В режиме VOLATILITY_MOMENTUM мы не можем ждать отката (нет времени на 15m свечах), поэтому либо входим по рынку, либо отменяем.
-        if strategy_mode == "VOLATILITY_MOMENTUM" and trade_action == "WAIT_FOR_PULLBACK" and conviction >= min_conv:
-            trade_action = "ENTER"
-            self.services.logger.info(f"[System_Core] ⚡ VOLATILITY_MOMENTUM: WAIT_FOR_PULLBACK конвертирован в ENTER из-за высокой скорости режима.")
-
-        # Синхронизация модифицированных параметров пайплайна обратно в ceo_verdict для RiskManager и Execution Gate
-        if symbol:
-            ceo_verdict["symbol"] = symbol
-        ceo_verdict["decision"] = decision
-        ceo_verdict["conviction"] = conviction
-        ceo_verdict["trade_action"] = trade_action
-
-        return decision, conviction, trade_action, min_conv
+        return DeterministicGuard.evaluate(
+            strategy_profile=strategy_profile,
+            ceo_proposal=ceo_verdict,
+            profile=profile,
+            risk_manager=self.agents.risk,
+            market_data=market_data,
+            symbol=symbol,
+            logger=self.services.logger
+        )
 
     @staticmethod
     def _clean_mtf_for_llm(mtf: Dict[str, Any]) -> Dict[str, Any]:
@@ -470,9 +444,14 @@ class TradingPipeline:
             directional_conf = ceo_verdict.get("directional_confidence", ceo_verdict.get("conviction", 0))
             entry_qual = ceo_verdict.get("entry_quality", ceo_verdict.get("conviction", 0))
 
-            decision, conviction, trade_action, min_conv = self.apply_pipeline_guards_and_sync(
-                strategy_profile, ceo_verdict, profile, symbol=symbol
+            # STAGE 4.5: DETERMINISTIC GUARD -> FINAL TRADE DECISION
+            final_trade_decision = self.apply_pipeline_guards_and_sync(
+                strategy_profile, ceo_verdict, profile, symbol=symbol, market_data=market_data
             )
+            decision = final_trade_decision.decision
+            conviction = final_trade_decision.conviction
+            trade_action = final_trade_decision.trade_action
+            min_conv = final_trade_decision.min_conviction
 
             if decision == "HOLD":
                 conv_str = "N/A"
@@ -486,24 +465,9 @@ class TradingPipeline:
             scan_result["direction_bias"] = strategy_profile.direction_bias
             scan_result["router_reasoning"] = strategy_profile.reasoning
 
-            # Execution Gate: Checks directional signal, conviction threshold, and WAIT_FOR_PULLBACK action
-            if decision not in ["LONG", "SHORT"] or conviction < min_conv or trade_action == "WAIT_FOR_PULLBACK":
-                if trade_action == "WAIT_FOR_PULLBACK":
-                    msg = f"⏸️ Пропуск {symbol}. Действие: WAIT_FOR_PULLBACK (Рынок перегрет, качество входа {entry_qual}% < 70% при уверенности тренда {directional_conf}%)."
-                    print(msg)
-                    risk_reason = f"WAIT_FOR_PULLBACK: Перекупленность/перепроданность (Качество входа {entry_qual}% < 70%)"
-                    rejection_tag = "WAIT_FOR_PULLBACK"
-                elif decision not in ["LONG", "SHORT"]:
-                    msg = f"⏸️ Пропуск {symbol}. Решение: {decision} (Требуется LONG/SHORT)."
-                    print(msg)
-                    risk_reason = f"Пропущен из-за решения CEO ({decision})"
-                    rejection_tag = ceo_verdict.get("hold_category", "CEO_HOLD") if decision == "HOLD" else "NO_SIGNAL"
-                else:
-                    msg = f"⏸️ Пропуск {symbol}. Решение: {decision}, Уверенность: {conv_str} (Требуется >= {min_conv}% для профиля {profile})."
-                    print(msg)
-                    risk_reason = f"Пропущен из-за фильтра CEO (Уверенность {conviction}% < {min_conv}%)"
-                    rejection_tag = "LOW_CONFIDENCE"
-
+            # Execution Gate: Checks if Deterministic Guard approved candidate as actionable
+            if not final_trade_decision.is_actionable:
+                print(f"⏸️ Пропуск {symbol}. {final_trade_decision.guard_reason}")
                 scanner_status = "⚠️ ЗАБЛОКИРОВАН СКАНЕРОМ" if scanner_blocked else "✅ OK"
                 asset_summary = {
                     "symbol": symbol,
@@ -512,49 +476,12 @@ class TradingPipeline:
                     "scanner_status": scanner_status,
                     "scanner_reason": scanner_reason if scanner_blocked else None,
                     "risk_approved": False,
-                    "risk_reason": risk_reason,
+                    "risk_reason": final_trade_decision.guard_reason,
                     "ceo_reasoning": ceo_verdict.get("reasoning_en", ceo_verdict.get("reasoning", "")),
                     "status": "⏸️ НЕТ СИГНАЛА"
                 }
                 scan_summaries.append(asset_summary)
-                tracker.record_rejection(rejection_tag)
-                continue
-
-            # (Stage 4.5 Correlation Filter moved to RiskManager)
-            # СТАДИЯ 4.6: ФАНДИНГ ГЕЙТ (Funding Rate Gate)
-            funding_rate = market_data.get("derivatives_data", {}).get("funding_rate") or 0.0
-            if decision == "LONG" and funding_rate > 0.0005: # 0.05%
-                print(f"⏸️ Пропуск {symbol}. Фандинг гейт: Запрет LONG при экстремально положительном фандинге ({funding_rate*100:.3f}%).")
-                self.services.logger.info(f"[System_Core] Funding Gate: LONG denied for {symbol}. Funding = {funding_rate}")
-                scan_summaries.append({
-                    "symbol": symbol,
-                    "decision": decision,
-                    "conviction": conviction,
-                    "scanner_status": "✅ OK",
-                    "scanner_reason": None,
-                    "risk_approved": False,
-                    "risk_reason": f"Фандинг гейт (Funding = {funding_rate*100:.3f}%)",
-                    "ceo_reasoning": "Bypassed by Funding Gate",
-                    "status": "⏸️ НЕТ СИГНАЛА"
-                })
-                tracker.record_rejection("FUNDING_VETO")
-                continue
-
-            if decision == "SHORT" and funding_rate < -0.0005:
-                print(f"⏸️ Пропуск {symbol}. Фандинг гейт: Запрет SHORT при экстремально отрицательном фандинге ({funding_rate*100:.3f}%).")
-                self.services.logger.info(f"[System_Core] Funding Gate: SHORT denied for {symbol}. Funding = {funding_rate}")
-                scan_summaries.append({
-                    "symbol": symbol,
-                    "decision": decision,
-                    "conviction": conviction,
-                    "scanner_status": "✅ OK",
-                    "scanner_reason": None,
-                    "risk_approved": False,
-                    "risk_reason": f"Фандинг гейт (Funding = {funding_rate*100:.3f}%)",
-                    "ceo_reasoning": "Bypassed by Funding Gate",
-                    "status": "⏸️ НЕТ СИГНАЛА"
-                })
-                tracker.record_rejection("FUNDING_VETO")
+                tracker.record_rejection(final_trade_decision.rejection_tag or "NO_SIGNAL")
                 continue
 
             # СТАДИЯ 5: РИСК-МЕНЕДЖМЕНТ
@@ -591,7 +518,7 @@ class TradingPipeline:
             self.services.logger.info(f"[Stage 5] Risk Manager ({profile}, Regime: {detected_regime}) проверяет параметры сделки для {symbol}...")
             portfolio_data["active_positions"] = self.services.trading_service.active_positions
             risk_verdict = await self.agents.risk.analyze(
-                ceo_verdict, 
+                final_trade_decision, 
                 portfolio_data, 
                 market_data, 
                 effective_profile=profile,
@@ -606,23 +533,23 @@ class TradingPipeline:
                 # Автоматическая торговля 24/7 (полностью автономный режим)
                 trade_success = await self.services.trading_service.open_position(
                     symbol=symbol,
-                    direction=decision,
+                    direction=final_trade_decision.decision,
                     entry_price=current_price,
                     notional_usd=risk_verdict.get("notional_size_usd", 0),
                     tp_price=risk_verdict.get("take_profit_price", 0),
                     sl_price=risk_verdict.get("stop_loss_price", 0),
                     leverage=risk_verdict.get("leverage", 10),
-                    original_thesis=ceo_verdict.get("reasoning_en", ""),
+                    original_thesis=final_trade_decision.reasoning_en,
                     contracts=risk_verdict.get("contracts", 0.0)
                 )
 
                 if not trade_success:
                     print(f"❌ Ошибка открытия позиции на бирже для {symbol}.")
                     self.services.logger.error(f"❌ Status: REJECTED BY EXCHANGE ({symbol})")
-                    risk_verdict["approved"] = False
-                    risk_verdict["reasoning"] = "Биржа отклонила ордер (или ошибка сети/дубликат)."
+                    risk_verdict["execution_status"] = "REJECTED_BY_EXCHANGE"
                     tracker.record_execution_failed()
                 else:
+                    risk_verdict["execution_status"] = "SUCCESS"
                     tracker.record_trade()
             else:
                 self.services.logger.error(f"❌ Status: VETOED BY RISK MANAGER ({risk_verdict.get('reasoning')})")
@@ -650,7 +577,7 @@ class TradingPipeline:
 
                 final_trade_data = {
                     "symbol": symbol,
-                    "ceo_verdict": ceo_verdict,
+                    "ceo_verdict": final_trade_decision.to_dict(),
                     "risk_verdict": risk_verdict
                 }
                 tg_response = await self.agents.telegram.analyze(final_trade_data)
@@ -685,7 +612,7 @@ class TradingPipeline:
                 "symbol": symbol,
                 "market_conditions": scan_result,
                 "analysts": valid_reports,
-                "ceo_decision": ceo_verdict,
+                "ceo_decision": final_trade_decision.to_dict(),
                 "risk_assessment": risk_verdict,
                 "status": "APPROVED" if risk_verdict.get("approved") else "VETOED"
             }

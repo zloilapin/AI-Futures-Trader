@@ -167,3 +167,22 @@ async def test_scenario_7_reasoning_format(mock_logger, mock_llm):
     assert "TREND:" in res["reasoning_en"]
     assert "RANGE:" in res["reasoning_en"]
     assert "VOLATILITY:" in res["reasoning_en"]
+
+@pytest.mark.asyncio
+async def test_scenario_8_extreme_rsi_overbought_exhaustion_guard(mock_logger, mock_llm):
+    """
+    Overheated Impulse Guard:
+    An extreme RSI (e.g. 85.0 overbought blow-off) must NOT artificially pump the trend score
+    into AGGRESSIVE if momentum is exhausted. It receives an exhaustion penalty and avoids false AGGRESSIVE.
+    """
+    agent = RegimeAgent(mock_logger, mock_llm)
+
+    # Moderate trend with blow-off top RSI 84 (overbought exhaustion)
+    btc_overbought = make_raw_asset_data("BTC-USD", 95000.0, "PARTIAL_ALIGNMENT", 0.75, 84.0, "up", 0.005, trend="BULLISH", er_14=0.35)
+    eth_overbought = make_raw_asset_data("ETH-USD", 2700.0, "PARTIAL_ALIGNMENT", 0.85, 82.0, "up", 0.005, trend="BULLISH", er_14=0.35)
+
+    res = await agent.analyze({"btc_data": btc_overbought, "eth_data": eth_overbought})
+    # Due to exhaustion guard (-10 pts penalty for RSI > 75), it does not reach the 60+ threshold for AGGRESSIVE
+    assert res["recommended_profile"] != "AGGRESSIVE"
+    assert res["regime"] in ["TRANSITION", "RANGE_CHOPPY"]
+

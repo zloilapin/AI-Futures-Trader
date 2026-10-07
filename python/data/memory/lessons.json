@@ -33,5 +33,33 @@
         "root_cause": "Exit price of 0.0 due to on-chain position restoration failure or execution error.",
         "actionable_rule": "WARNING: Ensure on-chain position restoration is verified before execution. Implement safeguards to prevent trades with exit prices of 0.0.",
         "trade_outcome": "LOSS"
+    },
+    {
+        "symbol": "ETH-USD",
+        "reasoning": "The trade was executed as a LONG position based on restored on-chain positioning. Despite the bearish trend across all timeframes (15m, 1h, 4h), the trade resulted in a small profit. The entry price was $2500, and the exit price was $2594, yielding a 3.66% ROI. The bearish trend indicators (RSI at 23.15, MACD bearish crossover, and EMA trending down) suggest a high-risk environment for a LONG position.",
+        "root_cause": "Entered LONG into a multi-timeframe bearish trend (15m, 1h, 4h) with weak momentum indicators (RSI < 30, MACD bearish crossover).",
+        "actionable_rule": "WARNING: Avoid LONG positions when multi-timeframe trends are BEARISH and momentum indicators (RSI, MACD) confirm weak or bearish conditions.",
+        "trade_outcome": "WIN"
+    },
+    {
+        "symbol": "ETH-USD",
+        "reasoning": "The trade was executed as a LONG position based on restored on-chain positioning. Despite the bearish trends across 15m, 1h, and 4h timeframes, the trade resulted in a small profit. The market context showed a bearish alignment across multiple timeframes, but the trade managed to capitalize on a brief upward movement.",
+        "root_cause": "Entered LONG into a multi-timeframe bearish trend, but benefited from a short-term price recovery.",
+        "actionable_rule": "WARNING: Avoid entering LONG positions when multi-timeframe trends (15m, 1h, 4h) are fully aligned BEARISH, unless strong reversal signals are present.",
+        "trade_outcome": "WIN"
+    },
+    {
+        "symbol": "ETH-USD",
+        "reasoning": "The trade was a LONG position that resulted in a profit. The entry was made at 2500.0 and exited at 2560.8, yielding a positive ROI of 2.33%. The market context at the time of close showed a bearish trend across all timeframes (15m, 1h, 4h). Despite the bearish trend, the trade was profitable, possibly due to a short-term rebound or technical factors such as strong support levels or positive news sentiment. The RSI was at 35.93, indicating the asset was not overbought, and the MACD was showing a bullish signal, which may have contributed to the positive outcome.",
+        "root_cause": "Entry into a LONG position during a bearish trend, but with supportive technical indicators (RSI, MACD) and positive news sentiment.",
+        "actionable_rule": "CAUTION: Even in a bearish trend, consider entering LONG if RSI is below 50 and MACD shows a bullish signal, but be prepared for increased volatility and potential quick reversals.",
+        "trade_outcome": "WIN"
+    },
+    {
+        "symbol": "ETH-USD",
+        "reasoning": "The trade was a LONG position entered during a bearish trend on higher timeframes (1H and 4H) with a neutral 15m trend. Despite the bearish context, the trade managed to achieve a 2.44% ROI. The market showed a volume spike and the RSI was at 39.21, indicating potential oversold conditions.",
+        "root_cause": "Entered LONG during higher timeframe bearish trends (1H and 4H BEARISH) with only 15m trend neutral, counter-trading the dominant trend.",
+        "actionable_rule": "WARNING: Avoid entering LONG positions when higher timeframes (1H and 4H) are BEARISH unless there is strong confirmation of a trend reversal on the entry timeframe.",
+        "trade_outcome": "WIN"
     }
 ]

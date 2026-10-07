@@ -162,7 +162,16 @@ class RiskManager(BaseAgent):
         leverage = 1.0
         effective_leverage = 1.0
         
-        if atr_14 <= 0:
+        if hasattr(ceo_decision, "is_actionable") and not getattr(ceo_decision, "is_actionable", True):
+            veto_cat = getattr(ceo_decision, "rejection_tag", None) or "GUARD_VETO"
+            veto_reason = getattr(ceo_decision, "guard_reason", "") or f"Blocked by Deterministic Guard: {veto_cat}"
+            self.logger.warning(f"[{self.name}] 🚫 DETERMINISTIC GUARD VETO: {veto_reason}")
+            return {
+                "approved": False,
+                "veto_category": veto_cat,
+                "reasoning": veto_reason
+            }
+        elif atr_14 <= 0:
             self.logger.warning(f"[{self.name}] ❌ INVALID ATR: atr_14 is {atr_14}. Blocking trade to prevent corrupted risk sizing.")
             approved = False
             veto_category = "INVALID_ATR"

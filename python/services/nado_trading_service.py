@@ -289,13 +289,16 @@ class NadoTradingService(BaseTradingService):
                 
             amount_base = contracts if contracts > 0 else notional_usd / entry_price
             amount_x18 = int(amount_base * 10**18)
-            # Apply aggressive slippage (0.5%) for the limit price to ensure the IOC order crosses the book.
-            # The actual execution price will still be determined by the best available liquidity in the order book.
-            if direction.upper() == "LONG":
+            # Explicitly guard against non-directional execution (HOLD, WAIT, etc.)
+            dir_clean = str(direction).strip().upper()
+            if dir_clean == "LONG":
                 limit_price = entry_price * 1.005
-            else:
+            elif dir_clean == "SHORT":
                 limit_price = entry_price * 0.995
                 amount_x18 = -amount_x18
+            else:
+                logger.error(f"[NadoTradingService] ❌ Refusing execution: invalid direction '{direction}'. Only LONG or SHORT allowed!")
+                return False
                 
             price_x18 = int(limit_price * 10**18)
             
