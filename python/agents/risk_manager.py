@@ -238,12 +238,46 @@ class RiskManager(BaseAgent):
             if strategy_mode == "MEAN_REVERSION":
                 # Mean Reversion targets the middle of the channel (bb_middle / ema_20)
                 mean_target = float(indicators.get("bb_middle") or indicators.get("ema_20") or 0.0)
-                if mean_target > 0:
-                    dist_to_mean = abs(current_price - mean_target)
-                    # Target 90% of distance to mean to ensure fill before price bounces back
-                    tp_dist_base = max(dist_to_mean * 0.90, current_price * 0.010)
-                else:
-                    tp_dist_base = max(atr_14 * tp_mult, current_price * 0.010)
+                if mean_target <= 0:
+                    msg = "Missing or invalid mean target (bb_middle / ema_20) for MEAN_REVERSION."
+                    self.logger.warning(f"[{self.name}] ❌ INVALID_INDICATORS VETO: {msg}")
+                    return {
+                        "approved": False,
+                        "veto_category": "INVALID_INDICATORS",
+                        "reasoning": msg
+                    }
+
+                # Directional check: In Mean Reversion, price MUST be on the correct side of the mean
+                if decision == "LONG" and current_price >= mean_target:
+                    msg = f"Mean Reversion LONG invalid: current price ({current_price:.2f}) is already at or above mean target ({mean_target:.2f})."
+                    self.logger.warning(f"[{self.name}] ❌ INVALID_MEAN_TARGET VETO: {msg}")
+                    return {
+                        "approved": False,
+                        "veto_category": "INVALID_MEAN_TARGET",
+                        "reasoning": msg
+                    }
+                elif decision == "SHORT" and current_price <= mean_target:
+                    msg = f"Mean Reversion SHORT invalid: current price ({current_price:.2f}) is already at or below mean target ({mean_target:.2f})."
+                    self.logger.warning(f"[{self.name}] ❌ INVALID_MEAN_TARGET VETO: {msg}")
+                    return {
+                        "approved": False,
+                        "veto_category": "INVALID_MEAN_TARGET",
+                        "reasoning": msg
+                    }
+
+                dist_to_mean = abs(current_price - mean_target)
+                min_edge_pct = 0.008  # 0.8% minimum distance to mean to justify slippage & exchange fees
+                if dist_to_mean < (current_price * min_edge_pct):
+                    msg = f"Distance to mean ({dist_to_mean:.2f}, {dist_to_mean/current_price*100:.2f}%) is too narrow to cover fees/slippage (< {min_edge_pct*100:.1f}% min edge)."
+                    self.logger.warning(f"[{self.name}] ❌ LOW_EDGE VETO: {msg}")
+                    return {
+                        "approved": False,
+                        "veto_category": "LOW_EDGE",
+                        "reasoning": msg
+                    }
+
+                # Target 90% of distance to mean (NEVER floor with a fixed pct that pushes TP past the mean!)
+                tp_dist_base = dist_to_mean * 0.90
                 sl_dist_base = max(atr_14 * sl_mult, current_price * 0.008)
             elif strategy_mode == "VOLATILITY_MOMENTUM":
                 # Scalping mode with tight SL (0.5% min) and TP (1.0% min)
@@ -259,10 +293,37 @@ class RiskManager(BaseAgent):
             else: # SHORT
                 sl_price = current_price + sl_dist_base
                 tp_price = current_price - tp_dist_base
+
+            # Strict Mean Reversion Guard: TP must NEVER cross or touch the mean target
+            if strategy_mode == "MEAN_REVERSION" and mean_target > 0:
+                mean_buffer = max(mean_target * 0.001, dist_to_mean * 0.05)
+                if decision == "LONG":
+                    tp_price = min(tp_price, mean_target - mean_buffer)
+                else: # SHORT
+                    tp_price = max(tp_price, mean_target + mean_buffer)
                 
             # Compute actual risk distances from the EXPECTED EXECUTION ENTRY for conservative sizing & RR Math
             distance_to_sl = abs(execution_entry - sl_price)
             distance_to_tp = abs(tp_price - execution_entry)
+
+            # Slippage edge check for Mean Reversion: ensure expected execution entry doesn't consume all profit
+            if strategy_mode == "MEAN_REVERSION":
+                if decision == "LONG" and tp_price <= execution_entry:
+                    msg = f"Mean Reversion LONG TP ({tp_price:.2f}) is at or below expected execution entry ({execution_entry:.2f}) due to slippage."
+                    self.logger.warning(f"[{self.name}] ❌ LOW_EDGE VETO: {msg}")
+                    return {
+                        "approved": False,
+                        "veto_category": "LOW_EDGE",
+                        "reasoning": msg
+                    }
+                elif decision == "SHORT" and tp_price >= execution_entry:
+                    msg = f"Mean Reversion SHORT TP ({tp_price:.2f}) is at or above expected execution entry ({execution_entry:.2f}) due to slippage."
+                    self.logger.warning(f"[{self.name}] ❌ LOW_EDGE VETO: {msg}")
+                    return {
+                        "approved": False,
+                        "veto_category": "LOW_EDGE",
+                        "reasoning": msg
+                    }
             
             # --- Calculate Realized Unit RR for Expectancy Gate ---
             derivatives_data = market_data.get("derivatives_data", {})

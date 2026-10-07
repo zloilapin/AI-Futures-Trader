@@ -225,11 +225,122 @@ async def test_mean_reversion_sl_tp_targets_middle_band(mock_logger, mock_llm):
 
     assert verdict["approved"] is True
     # TP should be 90% of distance to EMA-20: 100 + (1.5 * 0.90) = 101.35
-    # Crucially, it must NOT be forced to 103.0 (+3%)
-    assert verdict["take_profit_price"] < 102.0
+    # Crucially, it must be strictly LESS than the mean target (101.5)
+    assert verdict["take_profit_price"] < ema_20
     assert verdict["take_profit_price"] >= 101.0
     # SL should be tight: ATR * 1.0 = 1.0 -> 99.0
     assert abs(verdict["stop_loss_price"] - 99.0) < 0.1
+
+@pytest.mark.asyncio
+async def test_mean_reversion_short_tp_strictly_before_mean(mock_logger, mock_llm):
+    """
+    Mean Reversion SHORT verification:
+    TP must be strictly GREATER than the mean target (ema_20 / bb_middle),
+    and must not cross the mean to the downside.
+    """
+    rm = RiskManager(mock_logger, mock_llm)
+    current_price = 100.0
+    ema_20 = 98.0 # 2.0% distance down to mean
+    atr_14 = 1.0
+
+    portfolio_data = {"total_usd": 1000.0, "available_margin": 1000.0, "active_positions": {}}
+    market_data = {
+        "price_data": {"current_price": current_price, "ohlcv_1h": [{"volume": 100}] * 10},
+        "indicators": {"atr_14": atr_14, "ema_20": ema_20, "bb_middle": ema_20},
+        "multi_timeframe": {"mtf_alignment": "MIXED_CHOP"},
+        "derivatives_data": {"size_increment": 0.001, "min_notional": 10.0}
+    }
+    ceo_decision = {
+        "decision": "SHORT",
+        "conviction": 80,
+        "entry_quality": 80,
+        "directional_confidence": 85,
+        "trade_action": "ENTER",
+        "symbol": "BTC-USD"
+    }
+
+    verdict = await rm.analyze(
+        ceo_decision, portfolio_data, market_data,
+        effective_profile="BALANCED", strategy_mode="MEAN_REVERSION"
+    )
+
+    assert verdict["approved"] is True
+    # TP must be strictly ABOVE the mean target for a SHORT
+    assert verdict["take_profit_price"] > ema_20
+    # 100 - (2.0 * 0.90) = 98.20
+    assert abs(verdict["take_profit_price"] - 98.20) < 0.05
+
+@pytest.mark.asyncio
+async def test_mean_reversion_narrow_edge_vetoed(mock_logger, mock_llm):
+    """
+    P1 Overshoot scenario:
+    If distance to mean is only 0.40% (current_price=100.0, mean=100.40),
+    fees and slippage destroy any statistical edge.
+    The RiskManager must veto with LOW_EDGE instead of setting an overshooting TP.
+    """
+    rm = RiskManager(mock_logger, mock_llm)
+    current_price = 100.0
+    ema_20 = 100.40 # Only 0.40% away
+    atr_14 = 0.5
+
+    portfolio_data = {"total_usd": 1000.0, "available_margin": 1000.0, "active_positions": {}}
+    market_data = {
+        "price_data": {"current_price": current_price, "ohlcv_1h": [{"volume": 100}] * 10},
+        "indicators": {"atr_14": atr_14, "ema_20": ema_20, "bb_middle": ema_20},
+        "multi_timeframe": {"mtf_alignment": "MIXED_CHOP"},
+        "derivatives_data": {"size_increment": 0.001, "min_notional": 10.0}
+    }
+    ceo_decision = {
+        "decision": "LONG",
+        "conviction": 80,
+        "entry_quality": 80,
+        "directional_confidence": 85,
+        "trade_action": "ENTER",
+        "symbol": "BTC-USD"
+    }
+
+    verdict = await rm.analyze(
+        ceo_decision, portfolio_data, market_data,
+        effective_profile="BALANCED", strategy_mode="MEAN_REVERSION"
+    )
+
+    assert verdict["approved"] is False
+    assert verdict["veto_category"] == "LOW_EDGE"
+
+@pytest.mark.asyncio
+async def test_mean_reversion_price_already_past_mean_vetoed(mock_logger, mock_llm):
+    """
+    If price is already above the mean for a LONG, reversion upwards to the mean is impossible.
+    Must veto with INVALID_MEAN_TARGET.
+    """
+    rm = RiskManager(mock_logger, mock_llm)
+    current_price = 101.0
+    ema_20 = 100.0 # Mean is BELOW current price
+    atr_14 = 1.0
+
+    portfolio_data = {"total_usd": 1000.0, "available_margin": 1000.0, "active_positions": {}}
+    market_data = {
+        "price_data": {"current_price": current_price, "ohlcv_1h": [{"volume": 100}] * 10},
+        "indicators": {"atr_14": atr_14, "ema_20": ema_20, "bb_middle": ema_20},
+        "multi_timeframe": {"mtf_alignment": "MIXED_CHOP"},
+        "derivatives_data": {"size_increment": 0.001, "min_notional": 10.0}
+    }
+    ceo_decision = {
+        "decision": "LONG",
+        "conviction": 80,
+        "entry_quality": 80,
+        "directional_confidence": 85,
+        "trade_action": "ENTER",
+        "symbol": "BTC-USD"
+    }
+
+    verdict = await rm.analyze(
+        ceo_decision, portfolio_data, market_data,
+        effective_profile="BALANCED", strategy_mode="MEAN_REVERSION"
+    )
+
+    assert verdict["approved"] is False
+    assert verdict["veto_category"] == "INVALID_MEAN_TARGET"
 
 @pytest.mark.asyncio
 async def test_volatility_momentum_tight_floors(mock_logger, mock_llm):
