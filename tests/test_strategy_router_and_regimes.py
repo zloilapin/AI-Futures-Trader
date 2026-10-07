@@ -322,23 +322,91 @@ async def test_ceo_payload_receives_direction_bias_and_regimes(mock_logger, mock
 
 def test_pipeline_direction_guard_logic():
     """
-    P2-1 Fix Verification:
+    P2-1 & P0-2 Fix Verification:
     If StrategyRouter set BREAKOUT LONG, and CEO tries to invert to SHORT,
-    the Guard must catch it and force decision to HOLD to prevent shorting a massive breakout.
+    the Guard must catch it and force decision to HOLD, and sync ceo_verdict directly
+    so downstream components (Memory, Reflector, Telegram) don't see split-brain state.
     """
     strategy_mode = "BREAKOUT"
     router_direction_bias = "LONG"
-    ceo_decision = "SHORT"
-    conviction = 75
-    trade_action = "ENTER"
+    ceo_verdict = {
+        "decision": "SHORT",
+        "conviction": 75,
+        "trade_action": "ENTER",
+        "reasoning_en": "Bearish thesis convinced CEO"
+    }
+    decision = ceo_verdict["decision"]
+    conviction = ceo_verdict["conviction"]
+    trade_action = ceo_verdict["trade_action"]
 
-    # Simulate the pipeline guard
-    if strategy_mode in ["BREAKOUT", "MEAN_REVERSION"] and ceo_decision in ["LONG", "SHORT"]:
-        if ceo_decision != router_direction_bias:
-            ceo_decision = "HOLD"
+    # Pipeline guard
+    if strategy_mode in ["BREAKOUT", "MEAN_REVERSION"] and decision in ["LONG", "SHORT"]:
+        if decision != router_direction_bias:
+            guard_msg = f"🛡️ [Strategy Guard] Решение CEO {decision} противоречит {strategy_mode} bias ({router_direction_bias})."
+            decision = "HOLD"
             conviction = 0
             trade_action = "HOLD"
+            ceo_verdict["decision"] = "HOLD"
+            ceo_verdict["conviction"] = 0
+            ceo_verdict["trade_action"] = "HOLD"
+            ceo_verdict["hold_category"] = "STRATEGY_GUARD_VETO"
+            ceo_verdict["reasoning_en"] = f"{ceo_verdict.get('reasoning_en', '')}\n\n{guard_msg}".strip()
 
-    assert ceo_decision == "HOLD"
+    assert decision == "HOLD"
     assert conviction == 0
     assert trade_action == "HOLD"
+    assert ceo_verdict["decision"] == "HOLD"
+    assert ceo_verdict["conviction"] == 0
+    assert ceo_verdict["trade_action"] == "HOLD"
+    assert ceo_verdict["hold_category"] == "STRATEGY_GUARD_VETO"
+    assert "Strategy Guard" in ceo_verdict["reasoning_en"]
+
+@pytest.mark.asyncio
+async def test_pipeline_syncs_ceo_verdict_for_volatility_momentum_pullback(mock_logger, mock_llm):
+    """
+    P0-1 Fix Verification:
+    When VOLATILITY_MOMENTUM converts WAIT_FOR_PULLBACK to ENTER,
+    ceo_verdict must be synced so that RiskManager does NOT veto with WAIT_FOR_PULLBACK.
+    """
+    strategy_mode = "VOLATILITY_MOMENTUM"
+    min_conv = 65
+    ceo_verdict = {
+        "decision": "LONG",
+        "conviction": 70,
+        "entry_quality": 70,
+        "directional_confidence": 75,
+        "trade_action": "WAIT_FOR_PULLBACK",
+        "symbol": "BTC-USD"
+    }
+    decision = ceo_verdict["decision"]
+    conviction = ceo_verdict["conviction"]
+    trade_action = ceo_verdict["trade_action"]
+
+    # Pipeline logic:
+    if strategy_mode == "VOLATILITY_MOMENTUM" and trade_action == "WAIT_FOR_PULLBACK" and conviction >= min_conv:
+        trade_action = "ENTER"
+
+    # Synchronization step
+    ceo_verdict["symbol"] = "BTC-USD"
+    ceo_verdict["decision"] = decision
+    ceo_verdict["conviction"] = conviction
+    ceo_verdict["trade_action"] = trade_action
+
+    assert ceo_verdict["trade_action"] == "ENTER"
+
+    # Pass to RiskManager
+    rm = RiskManager(mock_logger, mock_llm)
+    portfolio_data = {"total_usd": 1000.0, "available_margin": 1000.0, "active_positions": {}}
+    market_data = {
+        "price_data": {"current_price": 100.0, "ohlcv_1h": [{"volume": 100}] * 10},
+        "indicators": {"atr_14": 1.0},
+        "multi_timeframe": {"mtf_alignment": "MIXED_CHOP"},
+        "derivatives_data": {"size_increment": 0.001, "min_notional": 10.0}
+    }
+    risk_verdict = await rm.analyze(
+        ceo_verdict, portfolio_data, market_data,
+        effective_profile="BALANCED", strategy_mode=strategy_mode
+    )
+
+    assert risk_verdict["approved"] is True
+    assert risk_verdict.get("veto_category") is None

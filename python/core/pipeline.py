@@ -429,6 +429,11 @@ class TradingPipeline:
                     decision = "HOLD"
                     conviction = 0
                     trade_action = "HOLD"
+                    ceo_verdict["decision"] = "HOLD"
+                    ceo_verdict["conviction"] = 0
+                    ceo_verdict["trade_action"] = "HOLD"
+                    ceo_verdict["hold_category"] = "STRATEGY_GUARD_VETO"
+                    ceo_verdict["reasoning_en"] = f"{ceo_verdict.get('reasoning_en', '')}\n\n{guard_msg}".strip()
 
             if decision == "HOLD":
                 conv_str = "N/A"
@@ -450,6 +455,12 @@ class TradingPipeline:
             if strategy_mode == "VOLATILITY_MOMENTUM" and trade_action == "WAIT_FOR_PULLBACK" and conviction >= min_conv:
                 trade_action = "ENTER"
                 self.services.logger.info(f"[System_Core] ⚡ VOLATILITY_MOMENTUM: WAIT_FOR_PULLBACK конвертирован в ENTER из-за высокой скорости режима.")
+
+            # Синхронизация модифицированных параметров пайплайна обратно в ceo_verdict для RiskManager и Execution Gate
+            ceo_verdict["symbol"] = symbol
+            ceo_verdict["decision"] = decision
+            ceo_verdict["conviction"] = conviction
+            ceo_verdict["trade_action"] = trade_action
 
             # Execution Gate: Checks directional signal, conviction threshold, and WAIT_FOR_PULLBACK action
             if decision not in ["LONG", "SHORT"] or conviction < min_conv or trade_action == "WAIT_FOR_PULLBACK":
