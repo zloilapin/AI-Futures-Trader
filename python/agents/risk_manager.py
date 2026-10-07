@@ -116,13 +116,18 @@ class RiskManager(BaseAgent):
         
         profile_name = effective_profile
         
-        # VOLATILITY_MOMENTUM OVERRIDE (Режим "Шампанское")
+        # Strategy mode SL/TP overrides
         if strategy_mode == "VOLATILITY_MOMENTUM":
             # min_conviction is already handled by Strategy Router logic inside _get_profile_rules
             sl_mult *= 0.5       # Cut stop loss distance in half (tight stop)
             tp_mult *= 0.5       # Cut take profit distance in half (quick grab)
             self.logger.info(f"[{self.name}] 🔥 VOLATILITY_MOMENTUM MODE ACTIVATED: Tightening SL/TP.")
             profile_name += "_VOL_MOMENTUM"
+        elif strategy_mode == "MEAN_REVERSION":
+            sl_mult = 1.0        # Tight stop just beyond extreme band
+            tp_mult = 1.2        # Reversion multiplier
+            self.logger.info(f"[{self.name}] 🔄 MEAN_REVERSION MODE ACTIVATED: Targeting mean reversion to EMA-20.")
+            profile_name += "_MEAN_REVERSION"
         
         self.logger.info(f"[{self.name}] Расчет математики риска по профилю: {profile_name} (Base Risk: {base_risk*100}%)...")
         
@@ -155,6 +160,7 @@ class RiskManager(BaseAgent):
         rr_ratio = 0.0
         liq_price = 0.0
         leverage = 1.0
+        effective_leverage = 1.0
         
         if atr_14 <= 0:
             self.logger.warning(f"[{self.name}] ❌ INVALID ATR: atr_14 is {atr_14}. Blocking trade to prevent corrupted risk sizing.")
@@ -165,6 +171,14 @@ class RiskManager(BaseAgent):
             self.logger.warning(f"[{self.name}] ❌ INSUFFICIENT BALANCE: Total balance is {total_balance}. Blocking trade.")
             approved = False
             veto_category = "INSUFFICIENT_BALANCE"
+        elif ceo_decision.get("trade_action") == "WAIT_FOR_PULLBACK":
+            msg = "CEO recommended WAIT_FOR_PULLBACK (Overheated market condition). Blocking trade execution."
+            self.logger.warning(f"[{self.name}] 🚫 WAIT_FOR_PULLBACK VETO: {msg}")
+            return {
+                "approved": False,
+                "veto_category": "WAIT_FOR_PULLBACK",
+                "reasoning": msg
+            }
         elif decision in ["LONG", "SHORT"] and conviction >= min_conviction:
             
             # --- Total Open Risk Check ---
@@ -204,14 +218,6 @@ class RiskManager(BaseAgent):
                 }
 
             trade_action = ceo_decision.get("trade_action", "ENTER")
-            if trade_action == "WAIT_FOR_PULLBACK":
-                msg = f"CEO recommended WAIT_FOR_PULLBACK (Overheated market condition). Blocking trade execution."
-                self.logger.warning(f"[{self.name}] 🚫 WAIT_FOR_PULLBACK VETO: {msg}")
-                return {
-                    "approved": False,
-                    "veto_category": "WAIT_FOR_PULLBACK",
-                    "reasoning": msg
-                }
 
             # --- WORST CASE EXECUTION (Compute FIRST) ---
             # Sync expected slippage dynamically with Nado execution logic
@@ -228,15 +234,29 @@ class RiskManager(BaseAgent):
             else:
                 execution_entry = current_price * (1.0 - expected_slippage_pct)
 
-            # Calculate ATR based SL and TP with a minimum floor, anchored to REAL CURRENT PRICE (Signal Origin)
-            if decision == "LONG":
+            # Calculate SL and TP distances based on strategy mode
+            if strategy_mode == "MEAN_REVERSION":
+                # Mean Reversion targets the middle of the channel (bb_middle / ema_20)
+                mean_target = float(indicators.get("bb_middle") or indicators.get("ema_20") or 0.0)
+                if mean_target > 0:
+                    dist_to_mean = abs(current_price - mean_target)
+                    # Target 90% of distance to mean to ensure fill before price bounces back
+                    tp_dist_base = max(dist_to_mean * 0.90, current_price * 0.010)
+                else:
+                    tp_dist_base = max(atr_14 * tp_mult, current_price * 0.010)
+                sl_dist_base = max(atr_14 * sl_mult, current_price * 0.008)
+            elif strategy_mode == "VOLATILITY_MOMENTUM":
+                # Scalping mode with tight SL (0.5% min) and TP (1.0% min)
+                sl_dist_base = max(atr_14 * sl_mult, current_price * 0.005)
+                tp_dist_base = max(atr_14 * tp_mult, current_price * 0.010)
+            else:
                 sl_dist_base = max(atr_14 * sl_mult, current_price * config.MIN_SL_PCT)
                 tp_dist_base = max(atr_14 * tp_mult, current_price * config.MIN_TP_PCT)
+
+            if decision == "LONG":
                 sl_price = current_price - sl_dist_base
                 tp_price = current_price + tp_dist_base
             else: # SHORT
-                sl_dist_base = max(atr_14 * sl_mult, current_price * config.MIN_SL_PCT)
-                tp_dist_base = max(atr_14 * tp_mult, current_price * config.MIN_TP_PCT)
                 sl_price = current_price + sl_dist_base
                 tp_price = current_price - tp_dist_base
                 

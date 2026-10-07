@@ -94,6 +94,7 @@ async def test_sync_with_exchange_trigger_orders():
         "direction": "LONG",
         "entry_price": 2500.0,
         "size_usd": 150.0,
+        "amount": 0.06,
         "leverage": 10,
         "_product_id": 4
     }])
@@ -106,12 +107,14 @@ async def test_sync_with_exchange_trigger_orders():
     
     sl_order = MagicMock()
     sl_order.order.digest = "0xsl123"
+    sl_order.order.order.subaccount = "0x123"
     sl_order.order.order.amount = "-60000000000000000"
     sl_order.order.trigger.price_trigger.price_requirement = sl_req
     sl_order.placed_at = 100
     
     tp_order = MagicMock()
     tp_order.order.digest = "0xtp123"
+    tp_order.order.order.subaccount = "0x123"
     tp_order.order.order.amount = "-60000000000000000"
     tp_order.order.trigger.price_trigger.price_requirement = tp_req
     tp_order.placed_at = 100

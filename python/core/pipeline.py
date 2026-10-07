@@ -341,7 +341,10 @@ class TradingPipeline:
                 continue
 
             # --- STRATEGY ROUTER ---
-            strategy_profile = StrategyRouter.evaluate(symbol, market_data, valid_reports, macro_cache)
+            strategy_profile = StrategyRouter.evaluate(
+                symbol, market_data, valid_reports, macro_cache,
+                detected_regime=detected_regime, profile=profile
+            )
             has_directional_signal = strategy_profile.has_directional_signal
             strategy_mode = strategy_profile.strategy_mode
             
@@ -417,6 +420,16 @@ class TradingPipeline:
             entry_qual = ceo_verdict.get("entry_quality", conviction)
             trade_action = ceo_verdict.get("trade_action", "ENTER" if conviction >= 70 else "HOLD")
             
+            # Guard against reversing direction on specialized setups (Breakout and Mean Reversion)
+            if strategy_mode in ["BREAKOUT", "MEAN_REVERSION"] and decision in ["LONG", "SHORT"]:
+                if decision != strategy_profile.direction_bias:
+                    guard_msg = f"🛡️ [Strategy Guard] Решение CEO {decision} противоречит {strategy_mode} bias ({strategy_profile.direction_bias}). Сделка отменена в HOLD для защиты капитала."
+                    print(guard_msg)
+                    self.services.logger.warning(f"[Pipeline] {guard_msg}")
+                    decision = "HOLD"
+                    conviction = 0
+                    trade_action = "HOLD"
+
             if decision == "HOLD":
                 conv_str = "N/A"
             else:

@@ -69,6 +69,10 @@ class CEOAgent(BaseAgent):
         payload = {
             "target_symbol": symbol,
             "strategy_mode": data.get("strategy_mode", "TREND_FOLLOWING"),
+            "direction_bias": data.get("direction_bias", "NEUTRAL"),
+            "router_reasoning": data.get("router_reasoning", ""),
+            "macro_regime": data.get("macro_regime", "RANGE_CHOPPY"),
+            "macro_profile": data.get("macro_profile", "BALANCED"),
             "multi_timeframe_context": clean_mtf,
             "bull_thesis": data.get("bull_thesis", {}),
             "bear_thesis": data.get("bear_thesis", {}),

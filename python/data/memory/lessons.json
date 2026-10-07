@@ -26,5 +26,12 @@
         "root_cause": "The trade was closed due to a 'CLOSED_ON_CHAIN' event, indicating that the trade was not managed according to a predetermined strategy.",
         "actionable_rule": "WARNING: Always follow a predetermined trading strategy and do not close trades due to external events like 'CLOSED_ON_CHAIN'.",
         "trade_outcome": "LOSS"
+    },
+    {
+        "symbol": "ZEC-USD",
+        "reasoning": "The trade was triggered by a restored on-chain position, but the exit price was 0.0, resulting in a full loss. The market context showed bullish trends across multiple timeframes (15m, 1h, 4h), and indicators like RSI (62.58) and MACD (bullish) suggested favorable conditions. However, the trade failed due to the exit price being 0.0, indicating a potential issue with the on-chain position restoration or execution.",
+        "root_cause": "Exit price of 0.0 due to on-chain position restoration failure or execution error.",
+        "actionable_rule": "WARNING: Ensure on-chain position restoration is verified before execution. Implement safeguards to prevent trades with exit prices of 0.0.",
+        "trade_outcome": "LOSS"
     }
 ]

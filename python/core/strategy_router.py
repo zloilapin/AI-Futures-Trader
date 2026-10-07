@@ -15,7 +15,14 @@ class StrategyRouter:
     """
     
     @staticmethod
-    def evaluate(symbol: str, market_data: Dict[str, Any], valid_reports: List[Dict[str, Any]], macro_cache: Dict[str, Any]) -> StrategyProfile:
+    def evaluate(
+        symbol: str, 
+        market_data: Dict[str, Any], 
+        valid_reports: List[Dict[str, Any]], 
+        macro_cache: Dict[str, Any],
+        detected_regime: str = "RANGE_CHOPPY",
+        profile: str = "BALANCED"
+    ) -> StrategyProfile:
         mtf_data = market_data.get("multi_timeframe", {})
         mtf_alignment = mtf_data.get("mtf_alignment")
         trend_1h = mtf_data.get("trend_1h", "")
@@ -33,7 +40,16 @@ class StrategyRouter:
         ob_bull = any(r.get("agent_name") == "Order_Book_Agent" and str(r.get("signal", "")).upper() in ["BULLISH", "LONG"] for r in valid_reports)
         ob_bear = any(r.get("agent_name") == "Order_Book_Agent" and str(r.get("signal", "")).upper() in ["BEARISH", "SHORT"] for r in valid_reports)
 
-        # 1. Relative Momentum
+        last_closed_candle_close = indicators.get("last_closed_candle_close", current_price)
+
+        # 1. Breakout Strategy (Highest Priority Momentum - evaluated first so it is not intercepted by local scalping)
+        # We require the last CLOSED candle to pierce the channel to avoid fakeouts on active wicks
+        if volume_spike_pct >= 200.0 and last_closed_candle_close > donchian_high and tech_bulls >= 1 and ob_bull:
+            return StrategyProfile(True, "BREAKOUT", "LONG", f"BREAKOUT LONG: Пробой {donchian_high} (close={last_closed_candle_close}) с объемом {volume_spike_pct}%, OB=BULL")
+        if volume_spike_pct >= 200.0 and last_closed_candle_close < donchian_low and tech_bears >= 1 and ob_bear:
+            return StrategyProfile(True, "BREAKOUT", "SHORT", f"BREAKOUT SHORT: Пробой {donchian_low} (close={last_closed_candle_close}) с объемом {volume_spike_pct}%, OB=BEAR")
+
+        # 2. Relative Momentum
         asset_return_24h = indicators.get("asset_return_24h", 0.0)
         btc_return_24h = macro_cache.get("BTC-USD", {}).get("indicators", {}).get("asset_return_24h", 0.0) if "BTC-USD" in macro_cache else 0.0
         rs_divergence = round(asset_return_24h - btc_return_24h, 2)
@@ -46,21 +62,12 @@ class StrategyRouter:
             if btc_trend_1h in ["BEARISH", "NEUTRAL"] and rs_divergence >= 10.0 and tech_bears >= 2 and volume_spike_pct >= 50.0 and oi_trend in ["rising", "stable", "falling"]:
                 return StrategyProfile(True, "RELATIVE_MOMENTUM", "SHORT", f"RELATIVE_MOMENTUM SHORT: Аномальный памп {rs_divergence}%, Bears={tech_bears}, Vol={volume_spike_pct}%, OI={oi_trend}")
 
-        # 2. Volatility Momentum (Scalping)
+        # 3. Volatility Momentum (Scalping)
         if mtf_alignment in ["MIXED_CHOP", "COUNTER_TREND_WARNING"] and bb_width_pct > 10.0:
             if ob_bull and tech_bulls >= 2 and volume_spike_pct >= 100.0 and oi_trend == "rising":
                 return StrategyProfile(True, "VOLATILITY_MOMENTUM", "LONG", f"VOLATILITY_MOMENTUM LONG: Волатильность {bb_width_pct}%, Vol={volume_spike_pct}%, OI={oi_trend}")
             if ob_bear and tech_bears >= 2 and volume_spike_pct >= 100.0 and oi_trend == "rising":
                 return StrategyProfile(True, "VOLATILITY_MOMENTUM", "SHORT", f"VOLATILITY_MOMENTUM SHORT: Волатильность {bb_width_pct}%, Vol={volume_spike_pct}%, OI={oi_trend}")
-
-        last_closed_candle_close = indicators.get("last_closed_candle_close", current_price)
-
-        # 3. Breakout Strategy (Global, ignores MTF alignment if momentum is extreme)
-        # We require the last CLOSED candle to pierce the channel to avoid fakeouts on active wicks
-        if volume_spike_pct >= 200.0 and last_closed_candle_close > donchian_high and tech_bulls >= 1 and ob_bull:
-            return StrategyProfile(True, "BREAKOUT", "LONG", f"BREAKOUT LONG: Пробой {donchian_high} (close={last_closed_candle_close}) с объемом {volume_spike_pct}%, OB=BULL")
-        if volume_spike_pct >= 200.0 and last_closed_candle_close < donchian_low and tech_bears >= 1 and ob_bear:
-            return StrategyProfile(True, "BREAKOUT", "SHORT", f"BREAKOUT SHORT: Пробой {donchian_low} (close={last_closed_candle_close}) с объемом {volume_spike_pct}%, OB=BEAR")
 
         # 4. Macro Regimes Logic
         if mtf_alignment == "COUNTER_TREND_WARNING":
@@ -78,6 +85,10 @@ class StrategyRouter:
             return StrategyProfile(False, "TREND_FOLLOWING", "NEUTRAL", "ОТКЛОНЕН (TRANSITION, но нет чистого консенсуса).")
 
         if mtf_alignment == "MIXED_CHOP":
+            # Safety Guard: In high volatility macro regime, mean reversion is dangerous (risk of breakout/liquidation cascade)
+            if detected_regime == "HIGH_VOLATILITY":
+                return StrategyProfile(False, "MEAN_REVERSION", "NEUTRAL", f"ОТКЛОНЕН (MEAN_REVERSION заблокирован в макро-режиме HIGH_VOLATILITY, bb_pos={bb_position_pct}%).")
+
             if bb_position_pct <= 5.0 and tech_bulls >= 1:
                 return StrategyProfile(True, "MEAN_REVERSION", "LONG", f"MEAN_REVERSION LONG: от нижней границы Bollinger, bb_pos={bb_position_pct}%")
             if bb_position_pct >= 95.0 and tech_bears >= 1:
@@ -85,8 +96,16 @@ class StrategyRouter:
             return StrategyProfile(False, "MEAN_REVERSION", "NEUTRAL", f"ОТКЛОНЕН (MIXED_CHOP, цена внутри канала, bb_pos={bb_position_pct}%).")
 
         if mtf_alignment == "FULL_ALIGNMENT":
-            if tech_bulls >= 1 or tech_bears >= 1:
-                return StrategyProfile(True, "TREND_FOLLOWING", "LONG" if tech_bulls else "SHORT", "FULL_ALIGNMENT MTF trend + подтверждение.")
+            if tech_bulls > tech_bears:
+                return StrategyProfile(True, "TREND_FOLLOWING", "LONG", f"FULL_ALIGNMENT MTF trend + подтверждение быков ({tech_bulls} vs {tech_bears}).")
+            elif tech_bears > tech_bulls:
+                return StrategyProfile(True, "TREND_FOLLOWING", "SHORT", f"FULL_ALIGNMENT MTF trend + подтверждение медведей ({tech_bears} vs {tech_bulls}).")
+            elif tech_bulls == 0 and tech_bears == 0:
+                # All 3 timeframes fully aligned with 0 analyst opposition
+                if trend_1h == "BULLISH":
+                    return StrategyProfile(True, "TREND_FOLLOWING", "LONG", "FULL_ALIGNMENT MTF trend (15m/1h/4h Bullish), нет сопротивления аналитиков.")
+                elif trend_1h == "BEARISH":
+                    return StrategyProfile(True, "TREND_FOLLOWING", "SHORT", "FULL_ALIGNMENT MTF trend (15m/1h/4h Bearish), нет сопротивления аналитиков.")
 
         # Fallback to pure consensus
         if tech_bulls >= 2 and tech_bears <= 1:

@@ -17,7 +17,7 @@ def mock_llm():
     llm.generate = AsyncMock()
     return llm
 
-def make_raw_asset_data(symbol, price, mtf_alignment, atr_pct, rsi_14, ema_trend, funding_rate, trend="BULLISH"):
+def make_raw_asset_data(symbol, price, mtf_alignment, atr_pct, rsi_14, ema_trend, funding_rate, trend="BULLISH", er_14=0.0):
     return {
         "exchange": "Nado DEX",
         "symbol": symbol,
@@ -45,6 +45,7 @@ def make_raw_asset_data(symbol, price, mtf_alignment, atr_pct, rsi_14, ema_trend
         "indicators": {
             "atr_pct": atr_pct,
             "rsi_14": rsi_14,
+            "er_14": er_14,
             "ema_trend": ema_trend,
             "macd_label": "bullish" if trend == "BULLISH" else "bearish"
         },
@@ -55,8 +56,8 @@ def make_raw_asset_data(symbol, price, mtf_alignment, atr_pct, rsi_14, ema_trend
 
 def test_extract_macro_summary_cleanliness(mock_logger, mock_llm):
     agent = RegimeAgent(mock_logger, mock_llm)
-    raw_btc = make_raw_asset_data("BTC-USD", 92000.0, "FULL_ALIGNMENT", 0.8, 55.0, "up", 0.005)
-    raw_eth = make_raw_asset_data("ETH-USD", 2600.0, "FULL_ALIGNMENT", 1.1, 52.0, "up", 0.008)
+    raw_btc = make_raw_asset_data("BTC-USD", 92000.0, "FULL_ALIGNMENT", 0.8, 55.0, "up", 0.005, er_14=0.4)
+    raw_eth = make_raw_asset_data("ETH-USD", 2600.0, "FULL_ALIGNMENT", 1.1, 52.0, "up", 0.008, er_14=0.4)
 
     summary = agent._extract_macro_summary({"btc_data": raw_btc, "eth_data": raw_eth})
 
@@ -68,6 +69,7 @@ def test_extract_macro_summary_cleanliness(mock_logger, mock_llm):
     assert btc["mtf_alignment"] == "FULL_ALIGNMENT"
     assert btc["atr_pct"] == 0.8
     assert btc["rsi_14"] == 55.0
+    assert btc["er_14"] == 0.4
     assert btc["ema_trend"] == "up"
     assert btc["funding_rate"] == 0.005
     assert btc["open_interest_usd"] == 150000000.0
@@ -82,14 +84,9 @@ def test_extract_macro_summary_cleanliness(mock_logger, mock_llm):
 @pytest.mark.asyncio
 async def test_scenario_1_btc_full_alignment_low_atr_trending_aggressive(mock_logger, mock_llm):
     agent = RegimeAgent(mock_logger, mock_llm)
-    agent.generate_json = AsyncMock(return_value={
-        "regime": "TRENDING",
-        "recommended_profile": "AGGRESSIVE",
-        "reasoning_en": "BTC and ETH are in FULL_ALIGNMENT with controlled ATR < 1.5%."
-    })
 
-    btc = make_raw_asset_data("BTC-USD", 95000.0, "FULL_ALIGNMENT", 0.75, 58.0, "up", 0.005)
-    eth = make_raw_asset_data("ETH-USD", 2700.0, "FULL_ALIGNMENT", 0.90, 56.0, "up", 0.005)
+    btc = make_raw_asset_data("BTC-USD", 95000.0, "FULL_ALIGNMENT", 0.75, 68.0, "up", 0.005, er_14=0.6)
+    eth = make_raw_asset_data("ETH-USD", 2700.0, "FULL_ALIGNMENT", 0.90, 67.0, "up", 0.005, er_14=0.6)
 
     res = await agent.analyze({"btc_data": btc, "eth_data": eth})
     assert res["regime"] == "TRENDING"
@@ -98,14 +95,9 @@ async def test_scenario_1_btc_full_alignment_low_atr_trending_aggressive(mock_lo
 @pytest.mark.asyncio
 async def test_scenario_2_btc_mixed_chop_range_choppy_balanced(mock_logger, mock_llm):
     agent = RegimeAgent(mock_logger, mock_llm)
-    agent.generate_json = AsyncMock(return_value={
-        "regime": "RANGE_CHOPPY",
-        "recommended_profile": "BALANCED",
-        "reasoning_en": "Market in mixed chop, RSI between 45 and 55."
-    })
 
-    btc = make_raw_asset_data("BTC-USD", 94000.0, "MIXED_CHOP", 0.55, 48.0, "flat", 0.001, trend="NEUTRAL")
-    eth = make_raw_asset_data("ETH-USD", 2650.0, "MIXED_CHOP", 0.65, 52.0, "flat", 0.001, trend="NEUTRAL")
+    btc = make_raw_asset_data("BTC-USD", 94000.0, "MIXED_CHOP", 0.55, 48.0, "flat", 0.001, trend="NEUTRAL", er_14=0.05)
+    eth = make_raw_asset_data("ETH-USD", 2650.0, "MIXED_CHOP", 0.65, 52.0, "flat", 0.001, trend="NEUTRAL", er_14=0.05)
 
     res = await agent.analyze({"btc_data": btc, "eth_data": eth})
     assert res["regime"] == "RANGE_CHOPPY"
@@ -114,14 +106,9 @@ async def test_scenario_2_btc_mixed_chop_range_choppy_balanced(mock_logger, mock
 @pytest.mark.asyncio
 async def test_scenario_3_btc_high_atr_high_volatility_conservative(mock_logger, mock_llm):
     agent = RegimeAgent(mock_logger, mock_llm)
-    agent.generate_json = AsyncMock(return_value={
-        "regime": "HIGH_VOLATILITY",
-        "recommended_profile": "CONSERVATIVE",
-        "reasoning_en": "Severe ATR spike (2.1%) and extreme RSI (78)."
-    })
 
-    btc = make_raw_asset_data("BTC-USD", 93000.0, "FULL_ALIGNMENT", 2.1, 78.0, "up", 0.06)
-    eth = make_raw_asset_data("ETH-USD", 2600.0, "FULL_ALIGNMENT", 1.8, 75.0, "up", 0.04)
+    btc = make_raw_asset_data("BTC-USD", 93000.0, "FULL_ALIGNMENT", 2.1, 78.0, "up", 0.06, er_14=0.5)
+    eth = make_raw_asset_data("ETH-USD", 2600.0, "FULL_ALIGNMENT", 1.8, 75.0, "up", 0.04, er_14=0.5)
 
     res = await agent.analyze({"btc_data": btc, "eth_data": eth})
     assert res["regime"] == "HIGH_VOLATILITY"
@@ -130,67 +117,53 @@ async def test_scenario_3_btc_high_atr_high_volatility_conservative(mock_logger,
 @pytest.mark.asyncio
 async def test_scenario_4_btc_risk_override_btc_high_vol_eth_trending(mock_logger, mock_llm):
     """
-    CRITICAL TEST: Even if LLM erroneously outputs AGGRESSIVE because ETH is trending,
-    the deterministic BTC Risk Override catches BTC's HIGH_VOLATILITY and forces CONSERVATIVE.
+    BTC High ATR Override:
+    Even if ETH is trending, BTC has severe volatility (ATR = 2.1% >= 1.5%)
+    which forces HIGH_VOLATILITY and CONSERVATIVE profile.
     """
     agent = RegimeAgent(mock_logger, mock_llm)
-    # LLM hallucinating AGGRESSIVE because of ETH
-    agent.generate_json = AsyncMock(return_value={
-        "regime": "TRENDING",
-        "recommended_profile": "AGGRESSIVE",
-        "reasoning_en": "ETH is trending strongly, recommending aggressive."
-    })
 
-    # BTC has severe volatility (ATR = 2.1% >= 1.5%)
-    btc = make_raw_asset_data("BTC-USD", 90000.0, "FULL_ALIGNMENT", 2.1, 78.0, "up", 0.02)
-    # ETH looks clean
-    eth = make_raw_asset_data("ETH-USD", 2600.0, "FULL_ALIGNMENT", 0.8, 55.0, "up", 0.005)
+    btc = make_raw_asset_data("BTC-USD", 90000.0, "FULL_ALIGNMENT", 2.1, 78.0, "up", 0.02, er_14=0.1)
+    eth = make_raw_asset_data("ETH-USD", 2600.0, "FULL_ALIGNMENT", 0.8, 55.0, "up", 0.005, er_14=0.6)
 
     res = await agent.analyze({"btc_data": btc, "eth_data": eth})
     assert res["regime"] == "HIGH_VOLATILITY"
     assert res["recommended_profile"] == "CONSERVATIVE"
-    assert "BTC Risk Override" in res["reasoning_en"]
 
 @pytest.mark.asyncio
-async def test_scenario_5_llm_failure_or_invalid_json_safe_fallback(mock_logger, mock_llm):
+async def test_scenario_5_high_funding_rate_volatility(mock_logger, mock_llm):
+    """Extreme funding rate (> 0.05%) signals liquidation cascades and triggers HIGH_VOLATILITY."""
     agent = RegimeAgent(mock_logger, mock_llm)
-    # LLM returns error dict
-    agent.generate_json = AsyncMock(return_value={"signal": "ERROR", "decision": "ERROR"})
 
-    btc = make_raw_asset_data("BTC-USD", 94000.0, "MIXED_CHOP", 0.6, 50.0, "flat", 0.0)
-    eth = make_raw_asset_data("ETH-USD", 2600.0, "MIXED_CHOP", 0.6, 50.0, "flat", 0.0)
-
-    res = await agent.analyze({"btc_data": btc, "eth_data": eth})
-    assert res["regime"] == "RANGE_CHOPPY"
-    assert res["recommended_profile"] == "BALANCED"
-    assert "Fallback" in res["reasoning_en"]
-
-@pytest.mark.asyncio
-async def test_scenario_6_llm_exception_fallback(mock_logger, mock_llm):
-    agent = RegimeAgent(mock_logger, mock_llm)
-    agent.generate_json = AsyncMock(side_effect=RuntimeError("OpenRouter 503 Service Unavailable"))
-
-    btc = make_raw_asset_data("BTC-USD", 94000.0, "MIXED_CHOP", 0.6, 50.0, "flat", 0.0)
-    eth = make_raw_asset_data("ETH-USD", 2600.0, "MIXED_CHOP", 0.6, 50.0, "flat", 0.0)
-
-    res = await agent.analyze({"btc_data": btc, "eth_data": eth})
-    assert res["regime"] == "RANGE_CHOPPY"
-    assert res["recommended_profile"] == "BALANCED"
-    assert "Fallback" in res["reasoning_en"]
-
-@pytest.mark.asyncio
-async def test_scenario_7_risk_hierarchy_enforced(mock_logger, mock_llm):
-    """If LLM says HIGH_VOLATILITY but recommends AGGRESSIVE, profile must be CONSERVATIVE."""
-    agent = RegimeAgent(mock_logger, mock_llm)
-    agent.generate_json = AsyncMock(return_value={
-        "regime": "HIGH_VOLATILITY",
-        "recommended_profile": "AGGRESSIVE",
-        "reasoning_en": "High volatility detected."
-    })
-
-    btc = make_raw_asset_data("BTC-USD", 94000.0, "MIXED_CHOP", 1.0, 50.0, "flat", 0.0)
-    eth = make_raw_asset_data("ETH-USD", 2600.0, "MIXED_CHOP", 1.0, 50.0, "flat", 0.0)
+    btc = make_raw_asset_data("BTC-USD", 94000.0, "MIXED_CHOP", 1.6, 50.0, "flat", 0.06, er_14=0.1)
+    eth = make_raw_asset_data("ETH-USD", 2600.0, "MIXED_CHOP", 1.6, 50.0, "flat", 0.06, er_14=0.1)
 
     res = await agent.analyze({"btc_data": btc, "eth_data": eth})
     assert res["regime"] == "HIGH_VOLATILITY"
     assert res["recommended_profile"] == "CONSERVATIVE"
+
+@pytest.mark.asyncio
+async def test_scenario_6_transition_regime(mock_logger, mock_llm):
+    """When scores are balanced between trend and range, TRANSITION regime is detected."""
+    agent = RegimeAgent(mock_logger, mock_llm)
+
+    btc = make_raw_asset_data("BTC-USD", 94000.0, "TRANSITION", 0.9, 52.0, "flat", 0.001, er_14=0.25)
+    eth = make_raw_asset_data("ETH-USD", 2600.0, "TRANSITION", 0.9, 52.0, "flat", 0.001, er_14=0.25)
+
+    res = await agent.analyze({"btc_data": btc, "eth_data": eth})
+    assert res["regime"] == "TRANSITION"
+    assert res["recommended_profile"] == "BALANCED"
+
+@pytest.mark.asyncio
+async def test_scenario_7_reasoning_format(mock_logger, mock_llm):
+    """Verify that reasoning includes detailed multi-factor scores."""
+    agent = RegimeAgent(mock_logger, mock_llm)
+
+    btc = make_raw_asset_data("BTC-USD", 94000.0, "MIXED_CHOP", 0.6, 50.0, "flat", 0.0, er_14=0.05)
+    eth = make_raw_asset_data("ETH-USD", 2600.0, "MIXED_CHOP", 0.6, 50.0, "flat", 0.0, er_14=0.05)
+
+    res = await agent.analyze({"btc_data": btc, "eth_data": eth})
+    assert "Multi-Factor Regime Scores" in res["reasoning_en"]
+    assert "TREND:" in res["reasoning_en"]
+    assert "RANGE:" in res["reasoning_en"]
+    assert "VOLATILITY:" in res["reasoning_en"]

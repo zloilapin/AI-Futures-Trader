@@ -552,6 +552,8 @@ class MarketDataService:
                                     "er_14": er_14,
                                     "bb_upper": bb_upper,
                                     "bb_lower": bb_lower,
+                                    "bb_middle": sma_20,
+                                    "sma_20": sma_20,
                                     "bb_width_pct": bb_width_pct,
                                     "bb_position_pct": bb_position_pct,
                                     "volume_spike_pct": volume_spike_pct,

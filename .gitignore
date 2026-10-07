@@ -11,7 +11,12 @@
 # =========================
 logs/
 data/memory/
+python/data/memory/cycle_*.json
+python/data/memory/active_positions.json
+python/data/memory/nado_state.json
 *.log
+bot_debug_log.txt
+dump_trades.py
 
 # =========================
 # Python окружение
