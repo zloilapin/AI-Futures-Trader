@@ -1,6 +1,8 @@
+import asyncio
 import pytest
 from unittest.mock import MagicMock, AsyncMock
 from core.strategy_router import StrategyRouter, StrategyProfile
+from core.pipeline import TradingPipeline, AgentRegistry, ServiceRegistry
 from agents.risk_manager import RiskManager
 from agents.ceo_agent import CEOAgent
 from core.logger import TradeLogger
@@ -431,38 +433,105 @@ async def test_ceo_payload_receives_direction_bias_and_regimes(mock_logger, mock
     assert '"macro_regime": "TRENDING"' in captured_prompt
     assert '"macro_profile": "AGGRESSIVE"' in captured_prompt
 
-def test_pipeline_direction_guard_logic():
+# ==============================================================================
+# 4. PIPELINE GUARDS & FULL INTEGRATION TESTS (P0 & P1 Audited Fixes)
+# ==============================================================================
+
+def create_test_pipeline(mock_logger, mock_llm):
+    """Factory helper to build a fully wired TradingPipeline for unit and integration testing."""
+    risk_manager = RiskManager(mock_logger, mock_llm)
+
+    mock_services = MagicMock(spec=ServiceRegistry)
+    mock_services.logger = mock_logger
+    mock_services.fetcher = MagicMock()
+    mock_services.tg_sender = MagicMock()
+    mock_services.tg_sender.send_message = AsyncMock()
+    mock_services.tg_sender.broadcast_to_channel = AsyncMock()
+    mock_services.trading_service = MagicMock()
+    mock_services.trading_service.active_positions = {}
+    mock_services.trading_service.cooldown_until = 0
+    mock_services.trading_service.recent_streak = []
+    mock_services.trading_service.sync_with_exchange = AsyncMock()
+    mock_services.trading_service.get_portfolio_summary = AsyncMock(return_value={
+        "total_usd": 1000.0,
+        "available_margin": 1000.0,
+        "active_positions": {}
+    })
+    mock_services.trading_service.get_market_limits = AsyncMock(return_value={
+        "size_increment": 0.001,
+        "min_notional": 10.0,
+        "min_size": 0.001
+    })
+    mock_services.trading_service.open_position = AsyncMock(return_value=True)
+
+    mock_agents = MagicMock(spec=AgentRegistry)
+    mock_agents.risk = risk_manager
+    mock_agents.universe = MagicMock()
+    mock_agents.universe.analyze = AsyncMock(return_value={"selected_pairs": ["BTC-USD"]})
+    mock_agents.regime = MagicMock()
+    mock_agents.regime.analyze = AsyncMock(return_value={"regime": "RANGE_CHOPPY", "recommended_profile": "BALANCED", "reasoning_en": "Balanced chop"})
+    mock_agents.scanner = MagicMock()
+    mock_agents.scanner.analyze = AsyncMock(return_value={"proceed": True, "reasoning": "Valid"})
+
+    analyst_names = {
+        "candle": "Candle_Agent",
+        "orderbook": "Order_Book_Agent",
+        "oi_funding": "OI_Funding_Agent",
+        "news": "News_Agent",
+        "indicator": "Indicator_Agent"
+    }
+    for analyst_attr, agent_name in analyst_names.items():
+        analyst = MagicMock()
+        analyst.name = agent_name
+        analyst.analyze = AsyncMock(return_value={"signal": "BULLISH", "confidence": 80, "status": "COMPLETED"})
+        setattr(mock_agents, analyst_attr, analyst)
+
+    mock_agents.bull = MagicMock()
+    mock_agents.bull.analyze = AsyncMock(return_value={"summary": "Bull debate thesis"})
+    mock_agents.bear = MagicMock()
+    mock_agents.bear.analyze = AsyncMock(return_value={"summary": "Bear debate thesis"})
+    mock_agents.ceo = MagicMock()
+    mock_agents.sentinel = MagicMock()
+    mock_agents.sentinel.analyze = AsyncMock(return_value={})
+    mock_agents.telegram = MagicMock()
+    mock_agents.telegram.analyze = AsyncMock(return_value={"message": "Trade summary"})
+    mock_agents.reflector = MagicMock()
+    mock_agents.reflector.get_lessons = MagicMock(return_value=[])
+    mock_agents.memory = MagicMock()
+    mock_agents.memory.get_recent_context = MagicMock(return_value=[])
+    mock_agents.memory.save_cycle = MagicMock()
+
+    pipeline = TradingPipeline(mock_agents, mock_services, "nado")
+    return pipeline, mock_agents, mock_services
+
+
+def test_pipeline_direction_guard_logic(mock_logger, mock_llm):
     """
     P2-1 & P0-2 Fix Verification:
+    Tests the REAL TradingPipeline.apply_pipeline_guards_and_sync() method.
     If StrategyRouter set BREAKOUT LONG, and CEO tries to invert to SHORT,
-    the Guard must catch it and force decision to HOLD, and sync ceo_verdict directly
-    so downstream components (Memory, Reflector, Telegram) don't see split-brain state.
+    the Guard in TradingPipeline must catch it, force decision to HOLD, and sync ceo_verdict.
     """
-    strategy_mode = "BREAKOUT"
-    router_direction_bias = "LONG"
+    pipeline, agents, services = create_test_pipeline(mock_logger, mock_llm)
+    strategy_profile = StrategyProfile(
+        has_directional_signal=True,
+        strategy_mode="BREAKOUT",
+        direction_bias="LONG",
+        reasoning="Breakout setup with strong volume"
+    )
     ceo_verdict = {
         "decision": "SHORT",
         "conviction": 75,
         "trade_action": "ENTER",
-        "reasoning_en": "Bearish thesis convinced CEO"
+        "reasoning_en": "Bearish counter-thesis convinced CEO"
     }
-    decision = ceo_verdict["decision"]
-    conviction = ceo_verdict["conviction"]
-    trade_action = ceo_verdict["trade_action"]
 
-    # Pipeline guard
-    if strategy_mode in ["BREAKOUT", "MEAN_REVERSION"] and decision in ["LONG", "SHORT"]:
-        if decision != router_direction_bias:
-            guard_msg = f"🛡️ [Strategy Guard] Решение CEO {decision} противоречит {strategy_mode} bias ({router_direction_bias})."
-            decision = "HOLD"
-            conviction = 0
-            trade_action = "HOLD"
-            ceo_verdict["decision"] = "HOLD"
-            ceo_verdict["conviction"] = 0
-            ceo_verdict["trade_action"] = "HOLD"
-            ceo_verdict["hold_category"] = "STRATEGY_GUARD_VETO"
-            ceo_verdict["reasoning_en"] = f"{ceo_verdict.get('reasoning_en', '')}\n\n{guard_msg}".strip()
+    # ACT: Run real production pipeline method
+    decision, conviction, trade_action, min_conv = pipeline.apply_pipeline_guards_and_sync(
+        strategy_profile, ceo_verdict, "BALANCED", symbol="BTC-USD"
+    )
 
+    # ASSERT: The production pipeline guarded and synchronized the state
     assert decision == "HOLD"
     assert conviction == 0
     assert trade_action == "HOLD"
@@ -472,15 +541,22 @@ def test_pipeline_direction_guard_logic():
     assert ceo_verdict["hold_category"] == "STRATEGY_GUARD_VETO"
     assert "Strategy Guard" in ceo_verdict["reasoning_en"]
 
+
 @pytest.mark.asyncio
 async def test_pipeline_syncs_ceo_verdict_for_volatility_momentum_pullback(mock_logger, mock_llm):
     """
     P0-1 Fix Verification:
-    When VOLATILITY_MOMENTUM converts WAIT_FOR_PULLBACK to ENTER,
-    ceo_verdict must be synced so that RiskManager does NOT veto with WAIT_FOR_PULLBACK.
+    Tests TradingPipeline.apply_pipeline_guards_and_sync() followed by real RiskManager.analyze().
+    When VOLATILITY_MOMENTUM converts WAIT_FOR_PULLBACK to ENTER, ceo_verdict must be synced
+    so that RiskManager does NOT veto with WAIT_FOR_PULLBACK.
     """
-    strategy_mode = "VOLATILITY_MOMENTUM"
-    min_conv = 65
+    pipeline, agents, services = create_test_pipeline(mock_logger, mock_llm)
+    strategy_profile = StrategyProfile(
+        has_directional_signal=True,
+        strategy_mode="VOLATILITY_MOMENTUM",
+        direction_bias="LONG",
+        reasoning="15m volatility momentum"
+    )
     ceo_verdict = {
         "decision": "LONG",
         "conviction": 70,
@@ -489,24 +565,18 @@ async def test_pipeline_syncs_ceo_verdict_for_volatility_momentum_pullback(mock_
         "trade_action": "WAIT_FOR_PULLBACK",
         "symbol": "BTC-USD"
     }
-    decision = ceo_verdict["decision"]
-    conviction = ceo_verdict["conviction"]
-    trade_action = ceo_verdict["trade_action"]
 
-    # Pipeline logic:
-    if strategy_mode == "VOLATILITY_MOMENTUM" and trade_action == "WAIT_FOR_PULLBACK" and conviction >= min_conv:
-        trade_action = "ENTER"
+    # ACT: Run real production pipeline method
+    decision, conviction, trade_action, min_conv = pipeline.apply_pipeline_guards_and_sync(
+        strategy_profile, ceo_verdict, "BALANCED", symbol="BTC-USD"
+    )
 
-    # Synchronization step
-    ceo_verdict["symbol"] = "BTC-USD"
-    ceo_verdict["decision"] = decision
-    ceo_verdict["conviction"] = conviction
-    ceo_verdict["trade_action"] = trade_action
-
+    # ASSERT: Pipeline converted trade_action and synchronized ceo_verdict
+    assert decision == "LONG"
+    assert trade_action == "ENTER"
     assert ceo_verdict["trade_action"] == "ENTER"
 
-    # Pass to RiskManager
-    rm = RiskManager(mock_logger, mock_llm)
+    # Pass directly into real RiskManager to verify approval
     portfolio_data = {"total_usd": 1000.0, "available_margin": 1000.0, "active_positions": {}}
     market_data = {
         "price_data": {"current_price": 100.0, "ohlcv_1h": [{"volume": 100}] * 10},
@@ -514,10 +584,183 @@ async def test_pipeline_syncs_ceo_verdict_for_volatility_momentum_pullback(mock_
         "multi_timeframe": {"mtf_alignment": "MIXED_CHOP"},
         "derivatives_data": {"size_increment": 0.001, "min_notional": 10.0}
     }
-    risk_verdict = await rm.analyze(
+    risk_verdict = await agents.risk.analyze(
         ceo_verdict, portfolio_data, market_data,
-        effective_profile="BALANCED", strategy_mode=strategy_mode
+        effective_profile="BALANCED", strategy_mode="VOLATILITY_MOMENTUM"
     )
 
     assert risk_verdict["approved"] is True
     assert risk_verdict.get("veto_category") is None
+
+
+@pytest.mark.asyncio
+async def test_full_pipeline_cycle_volatility_momentum_pullback_to_risk_execution(mock_logger, mock_llm, monkeypatch):
+    """
+    P0 Full End-to-End Integration Test:
+    CEO (WAIT_FOR_PULLBACK)
+      ↓
+    pipeline.run_cycle()
+      ↓
+    VOLATILITY_MOMENTUM override (trade_action -> ENTER)
+      ↓
+    ceo_verdict synced in pipeline
+      ↓
+    Real RiskManager.analyze (approved: True, not vetoed)
+      ↓
+    trading_service.open_position (CALLED!)
+    """
+    pipeline, agents, services = create_test_pipeline(mock_logger, mock_llm)
+
+    candles = [
+        {"open": 99.0, "high": 101.0, "low": 98.0, "close": 100.0, "volume": 10.0}
+        for _ in range(20)
+    ]
+    market_data = {
+        "symbol": "BTC-USD",
+        "price_data": {
+            "current_price": 100.0,
+            "candles_20": candles,
+            "ohlcv_1h": [{"volume": 100}] * 10,
+            "ohlcv_15m": [{"volume": 100, "close": 100.0, "open": 99.0}] * 10
+        },
+        "order_book_data": {
+            "best_bid": 99.95,
+            "best_ask": 100.05,
+            "spread_pct": 0.05,
+            "bid_volume": 100.0,
+            "ask_volume": 100.0
+        },
+        "indicators": {
+            "atr_14": 1.0,
+            "ema_20": 100.0,
+            "bb_middle": 100.0,
+            "bb_upper": 105.0,
+            "bb_lower": 95.0,
+            "bb_width_pct": 12.0,
+            "volume_spike_pct": 120.0,
+            "vol_15m_ratio": 2.5
+        },
+        "multi_timeframe": {
+            "mtf_alignment": "MIXED_CHOP",
+            "trend_15m": "BULLISH",
+            "trend_1h": "NEUTRAL",
+            "trend_4h": "NEUTRAL",
+            "vol_15m_ratio": 2.5
+        },
+        "derivatives_data": {
+            "size_increment": 0.001,
+            "min_notional": 10.0,
+            "min_size": 0.001,
+            "funding_rate": 0.0001,
+            "open_interest_trend": "rising"
+        }
+    }
+
+    services.fetcher.fetch_all_market_data = AsyncMock(return_value=market_data)
+    services.fetcher.fetch_active_perps = AsyncMock(return_value=[{"symbol": "BTC-USD", "volume_24h": 50000000}])
+
+    # CEO Agent originally outputs WAIT_FOR_PULLBACK
+    ceo_verdict = {
+        "symbol": "BTC-USD",
+        "decision": "LONG",
+        "conviction": 70,
+        "entry_quality": 60,
+        "directional_confidence": 75,
+        "trade_action": "WAIT_FOR_PULLBACK",
+        "reasoning_en": "Fast momentum breakout, but waiting for slight pullback"
+    }
+    agents.ceo.analyze = AsyncMock(return_value=ceo_verdict)
+
+    # Patch sleep so the test completes instantaneously
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+    # EXECUTE FULL REAL PIPELINE CYCLE
+    await pipeline.run_cycle(1, force_scan=True)
+
+    # VERIFY: open_position was called with LONG
+    # If the P0 bug existed (ceo_verdict not synced), RiskManager would veto with WAIT_FOR_PULLBACK,
+    # and open_position would never be called!
+    assert services.trading_service.open_position.called is True
+    call_args = services.trading_service.open_position.call_args[1]
+    assert call_args["symbol"] == "BTC-USD"
+    assert call_args["direction"] == "LONG"
+    assert call_args["notional_usd"] > 0
+    assert ceo_verdict["trade_action"] == "ENTER"
+
+
+@pytest.mark.asyncio
+async def test_full_pipeline_cycle_direction_guard_blocks_trade(mock_logger, mock_llm, monkeypatch):
+    """
+    Direction Guard Full End-to-End Integration Test:
+    StrategyRouter (BREAKOUT LONG)
+      ↓
+    CEO Agent (attempts SHORT)
+      ↓
+    pipeline Direction Guard (converts to HOLD, hold_category=STRATEGY_GUARD_VETO)
+      ↓
+    Execution Gate (BLOCKED, open_position NEVER called)
+    """
+    pipeline, agents, services = create_test_pipeline(mock_logger, mock_llm)
+
+    candles = [
+        {"open": 102.0, "high": 104.0, "low": 101.0, "close": 103.0, "volume": 25.0}
+        for _ in range(20)
+    ]
+    market_data = {
+        "symbol": "BTC-USD",
+        "price_data": {
+            "current_price": 103.0,
+            "candles_20": candles,
+            "ohlcv_1h": [{"volume": 100}] * 10
+        },
+        "order_book_data": {
+            "best_bid": 102.95,
+            "best_ask": 103.05,
+            "spread_pct": 0.05,
+            "bid_volume": 100.0,
+            "ask_volume": 100.0
+        },
+        "indicators": {
+            "volume_spike_pct": 250.0,
+            "bb_width_pct": 14.0,
+            "donchian_high": 100.0,
+            "donchian_low": 90.0,
+            "last_closed_candle_close": 102.0,
+            "atr_14": 1.0
+        },
+        "multi_timeframe": {
+            "mtf_alignment": "MIXED_CHOP",
+            "trend_1h": "BULLISH"
+        },
+        "derivatives_data": {
+            "size_increment": 0.001,
+            "min_notional": 10.0,
+            "min_size": 0.001,
+            "open_interest_trend": "rising",
+            "funding_rate": 0.0001
+        }
+    }
+
+    services.fetcher.fetch_all_market_data = AsyncMock(return_value=market_data)
+    services.fetcher.fetch_active_perps = AsyncMock(return_value=[{"symbol": "BTC-USD", "volume_24h": 50000000}])
+
+    # CEO tries to contradict Breakout LONG with a SHORT decision
+    ceo_verdict = {
+        "symbol": "BTC-USD",
+        "decision": "SHORT",
+        "conviction": 80,
+        "entry_quality": 80,
+        "directional_confidence": 85,
+        "trade_action": "ENTER",
+        "reasoning_en": "Counter-trend bear argument convinced CEO"
+    }
+    agents.ceo.analyze = AsyncMock(return_value=ceo_verdict)
+
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+    await pipeline.run_cycle(1, force_scan=True)
+
+    # Guard must block the trade: open_position must NOT be called
+    assert services.trading_service.open_position.called is False
+    assert ceo_verdict["decision"] == "HOLD"
+    assert ceo_verdict["hold_category"] == "STRATEGY_GUARD_VETO"

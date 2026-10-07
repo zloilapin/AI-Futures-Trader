@@ -1,12 +1,12 @@
 import time
 import asyncio
 from dataclasses import dataclass
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 
 from core.utils import get_msk_status, _escape_md
 from core.config import config
 from core.diagnostics import tracker
-from core.strategy_router import StrategyRouter
+from core.strategy_router import StrategyRouter, StrategyProfile
 
 from agents.universe_agent import UniverseAgent
 from agents.scanner_agent import ScannerAgent
@@ -72,6 +72,59 @@ class TradingPipeline:
         self.data_guard = DataQualityGuard(self.services.logger)
         self._cycle_running = False
         self._effective_profile = getattr(config, "TRADING_PROFILE", "BALANCED")
+
+    def apply_pipeline_guards_and_sync(
+        self,
+        strategy_profile: StrategyProfile,
+        ceo_verdict: Dict[str, Any],
+        profile: str,
+        symbol: str = ""
+    ) -> Tuple[str, int, str, int]:
+        """
+        Applies Strategy Direction Guards, Volatility Momentum pullback override,
+        and synchronizes all state mutations back into ceo_verdict for downstream
+        components (RiskManager, Execution Gate, Memory, Reflector, Telegram).
+
+        Returns:
+            Tuple of (decision, conviction, trade_action, min_conv)
+        """
+        strategy_mode = strategy_profile.strategy_mode
+        decision = str(ceo_verdict.get("decision", "HOLD")).upper()
+        conviction = ceo_verdict.get("conviction", 0)
+        trade_action = ceo_verdict.get("trade_action", "ENTER" if conviction >= 70 else "HOLD")
+
+        # Guard against reversing direction on specialized setups (Breakout and Mean Reversion)
+        if strategy_mode in ["BREAKOUT", "MEAN_REVERSION"] and decision in ["LONG", "SHORT"]:
+            if decision != strategy_profile.direction_bias:
+                guard_msg = f"🛡️ [Strategy Guard] Решение CEO {decision} противоречит {strategy_mode} bias ({strategy_profile.direction_bias}). Сделка отменена в HOLD для защиты капитала."
+                print(guard_msg)
+                self.services.logger.warning(f"[Pipeline] {guard_msg}")
+                decision = "HOLD"
+                conviction = 0
+                trade_action = "HOLD"
+                ceo_verdict["decision"] = "HOLD"
+                ceo_verdict["conviction"] = 0
+                ceo_verdict["trade_action"] = "HOLD"
+                ceo_verdict["hold_category"] = "STRATEGY_GUARD_VETO"
+                ceo_verdict["reasoning_en"] = f"{ceo_verdict.get('reasoning_en', '')}\n\n{guard_msg}".strip()
+
+        # Centralized Strategy Router Logic (unified with RiskManager)
+        profile_rules = self.agents.risk._get_profile_rules(profile, strategy_mode)
+        min_conv = profile_rules["min_conviction"]
+
+        # В режиме VOLATILITY_MOMENTUM мы не можем ждать отката (нет времени на 15m свечах), поэтому либо входим по рынку, либо отменяем.
+        if strategy_mode == "VOLATILITY_MOMENTUM" and trade_action == "WAIT_FOR_PULLBACK" and conviction >= min_conv:
+            trade_action = "ENTER"
+            self.services.logger.info(f"[System_Core] ⚡ VOLATILITY_MOMENTUM: WAIT_FOR_PULLBACK конвертирован в ENTER из-за высокой скорости режима.")
+
+        # Синхронизация модифицированных параметров пайплайна обратно в ceo_verdict для RiskManager и Execution Gate
+        if symbol:
+            ceo_verdict["symbol"] = symbol
+        ceo_verdict["decision"] = decision
+        ceo_verdict["conviction"] = conviction
+        ceo_verdict["trade_action"] = trade_action
+
+        return decision, conviction, trade_action, min_conv
 
     @staticmethod
     def _clean_mtf_for_llm(mtf: Dict[str, Any]) -> Dict[str, Any]:
@@ -414,26 +467,12 @@ class TradingPipeline:
             }
             ceo_verdict = await self.agents.ceo.analyze(ceo_payload)
 
-            decision = str(ceo_verdict.get("decision", "HOLD")).upper()
-            conviction = ceo_verdict.get("conviction", 0)
-            directional_conf = ceo_verdict.get("directional_confidence", conviction)
-            entry_qual = ceo_verdict.get("entry_quality", conviction)
-            trade_action = ceo_verdict.get("trade_action", "ENTER" if conviction >= 70 else "HOLD")
-            
-            # Guard against reversing direction on specialized setups (Breakout and Mean Reversion)
-            if strategy_mode in ["BREAKOUT", "MEAN_REVERSION"] and decision in ["LONG", "SHORT"]:
-                if decision != strategy_profile.direction_bias:
-                    guard_msg = f"🛡️ [Strategy Guard] Решение CEO {decision} противоречит {strategy_mode} bias ({strategy_profile.direction_bias}). Сделка отменена в HOLD для защиты капитала."
-                    print(guard_msg)
-                    self.services.logger.warning(f"[Pipeline] {guard_msg}")
-                    decision = "HOLD"
-                    conviction = 0
-                    trade_action = "HOLD"
-                    ceo_verdict["decision"] = "HOLD"
-                    ceo_verdict["conviction"] = 0
-                    ceo_verdict["trade_action"] = "HOLD"
-                    ceo_verdict["hold_category"] = "STRATEGY_GUARD_VETO"
-                    ceo_verdict["reasoning_en"] = f"{ceo_verdict.get('reasoning_en', '')}\n\n{guard_msg}".strip()
+            directional_conf = ceo_verdict.get("directional_confidence", ceo_verdict.get("conviction", 0))
+            entry_qual = ceo_verdict.get("entry_quality", ceo_verdict.get("conviction", 0))
+
+            decision, conviction, trade_action, min_conv = self.apply_pipeline_guards_and_sync(
+                strategy_profile, ceo_verdict, profile, symbol=symbol
+            )
 
             if decision == "HOLD":
                 conv_str = "N/A"
@@ -446,21 +485,6 @@ class TradingPipeline:
             scan_result["strategy_mode"] = strategy_mode
             scan_result["direction_bias"] = strategy_profile.direction_bias
             scan_result["router_reasoning"] = strategy_profile.reasoning
-
-            # Centralized Strategy Router Logic (unified with RiskManager)
-            profile_rules = self.agents.risk._get_profile_rules(profile, strategy_mode)
-            min_conv = profile_rules["min_conviction"]
-
-            # В режиме VOLATILITY_MOMENTUM мы не можем ждать отката (нет времени на 15m свечах), поэтому либо входим по рынку, либо отменяем.
-            if strategy_mode == "VOLATILITY_MOMENTUM" and trade_action == "WAIT_FOR_PULLBACK" and conviction >= min_conv:
-                trade_action = "ENTER"
-                self.services.logger.info(f"[System_Core] ⚡ VOLATILITY_MOMENTUM: WAIT_FOR_PULLBACK конвертирован в ENTER из-за высокой скорости режима.")
-
-            # Синхронизация модифицированных параметров пайплайна обратно в ceo_verdict для RiskManager и Execution Gate
-            ceo_verdict["symbol"] = symbol
-            ceo_verdict["decision"] = decision
-            ceo_verdict["conviction"] = conviction
-            ceo_verdict["trade_action"] = trade_action
 
             # Execution Gate: Checks directional signal, conviction threshold, and WAIT_FOR_PULLBACK action
             if decision not in ["LONG", "SHORT"] or conviction < min_conv or trade_action == "WAIT_FOR_PULLBACK":
