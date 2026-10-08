@@ -18,7 +18,7 @@ class BaseTradingService(ABC):
         pass
         
     @abstractmethod
-    async def open_position(self, symbol: str, direction: str, entry_price: float, size_usd: float, tp_price: float, sl_price: float, leverage: int, original_thesis: str = "") -> bool:
+    async def open_position(self, symbol: str, direction: str, entry_price: float, size_usd: float, tp_price: float, sl_price: float, leverage: int, original_thesis: str = "", contracts: float = 0.0, atr_value: float = 0.0) -> bool:
         """Opens a new position on the exchange."""
         pass
         

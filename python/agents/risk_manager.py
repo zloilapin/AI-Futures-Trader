@@ -17,11 +17,11 @@ class RiskManager(BaseAgent):
 
     def _get_profile_rules(self, profile: str, strategy_mode: str = "TREND_FOLLOWING") -> dict:
         if profile == "AGGRESSIVE":
-            rules = {"min_conviction": 65, "base_risk": 0.020, "risk_cap": 0.025, "portfolio_risk_cap": 0.06, "sl_mult": 1.75, "tp_mult": 3.5, "target_margin_pct": 0.20, "max_margin_pct": 0.45, "max_leverage": 15, "sentinel_be_atr": 2.0, "sentinel_trail_atr": 3.0, "sentinel_trail_activation_atr": 3.0, "sentinel_trail_distance_atr": 2.0, "sentinel_min_improve_atr": 0.25}
+            rules = {"min_conviction": 65, "base_risk": 0.020, "risk_cap": 0.025, "portfolio_risk_cap": 0.06, "sl_mult": 1.75, "tp_mult": 3.0, "target_margin_pct": 0.20, "max_margin_pct": 0.45, "max_leverage": 15, "sentinel_be_atr": 2.2, "sentinel_trail_atr": 3.0, "sentinel_trail_activation_atr": 3.0, "sentinel_trail_distance_atr": 2.0, "sentinel_min_improve_atr": 0.25}
         elif profile == "CONSERVATIVE":
             rules = {"min_conviction": 80, "base_risk": 0.005, "risk_cap": 0.01, "portfolio_risk_cap": 0.02, "sl_mult": 2.0, "tp_mult": 3.0, "target_margin_pct": 0.05, "max_margin_pct": 0.10, "max_leverage": 5, "sentinel_be_atr": 1.5, "sentinel_trail_atr": 2.0, "sentinel_trail_activation_atr": 2.5, "sentinel_trail_distance_atr": 2.0, "sentinel_min_improve_atr": 0.30}
         else: # BALANCED
-            rules = {"min_conviction": 70, "base_risk": 0.015, "risk_cap": 0.020, "portfolio_risk_cap": 0.04, "sl_mult": 1.5, "tp_mult": 2.5, "target_margin_pct": 0.10, "max_margin_pct": 0.20, "max_leverage": 10, "sentinel_be_atr": 2.0, "sentinel_trail_atr": 2.5, "sentinel_trail_activation_atr": 2.5, "sentinel_trail_distance_atr": 1.5, "sentinel_min_improve_atr": 0.25}
+            rules = {"min_conviction": 70, "base_risk": 0.015, "risk_cap": 0.020, "portfolio_risk_cap": 0.04, "sl_mult": 1.5, "tp_mult": 2.2, "target_margin_pct": 0.10, "max_margin_pct": 0.20, "max_leverage": 10, "sentinel_be_atr": 1.8, "sentinel_trail_atr": 2.5, "sentinel_trail_activation_atr": 2.5, "sentinel_trail_distance_atr": 1.5, "sentinel_min_improve_atr": 0.25}
             
         # --- CENTRALIZED STRATEGY ROUTING ---
         # Adjust base conviction thresholds based on the specific strategy detected by the pipeline.

@@ -560,6 +560,7 @@ class TradingPipeline:
                 print(f"💰 Position Amount: ${risk_verdict.get('notional_size_usd', 0):,.2f} ({risk_verdict.get('position_size_pct', 0)}% of portfolio)")
                 print(f"🟢 Take Profit (TP): ${risk_verdict.get('take_profit_price', 0):,.2f} (+{risk_verdict.get('take_profit_pct', 0)}%)")
                 # Автоматическая торговля 24/7 (полностью автономный режим)
+                atr_14_val = float(market_data.get("indicators", {}).get("atr_14", 0) or 0)
                 trade_success = await self.services.trading_service.open_position(
                     symbol=symbol,
                     direction=final_trade_decision.decision,
@@ -569,7 +570,8 @@ class TradingPipeline:
                     sl_price=risk_verdict.get("stop_loss_price", 0),
                     leverage=risk_verdict.get("leverage", 10),
                     original_thesis=final_trade_decision.reasoning_en,
-                    contracts=risk_verdict.get("contracts", 0.0)
+                    contracts=risk_verdict.get("contracts", 0.0),
+                    atr_value=atr_14_val
                 )
 
                 if not trade_success:

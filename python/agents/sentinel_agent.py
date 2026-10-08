@@ -27,8 +27,15 @@ class SentinelAgent:
         lowest = float(pos.get("lowest_price", entry))
         current_state = pos.get("protection_state", "PROTECTED")
 
-        if current_price <= 0 or atr_value <= 0:
-            return {"new_sl": None, "state": current_state, "reasoning": "Invalid price or ATR data."}
+        if current_price <= 0:
+            return {"new_sl": None, "state": current_state, "reasoning": "Invalid price data."}
+
+        # Use the ATR at the time of entry to prevent shrinking thresholds when volatility drops
+        ref_atr = float(pos.get("atr_reference", 0))
+        eval_atr = ref_atr if ref_atr > 0 else atr_value
+
+        if eval_atr <= 0:
+            return {"new_sl": None, "state": current_state, "reasoning": "Invalid ATR data."}
 
         # Profile parameters (fallback to defaults if not provided)
         from core.config import config
@@ -51,7 +58,7 @@ class SentinelAgent:
             profit_distance = current_price - entry
             
             # 1. Break-Even Check
-            if profit_distance >= (be_atr * atr_value):
+            if profit_distance >= (be_atr * eval_atr):
                 be_target = entry + cost_buffer
                 if current_sl < be_target:
                     candidate_sl = be_target
@@ -59,8 +66,8 @@ class SentinelAgent:
                     reasoning = f"Price passed {be_atr}x ATR. SL moved to Break-Even + cost buffer."
                     
             # 2. Trailing Check
-            if profit_distance >= (trail_activation * atr_value):
-                trail_target = highest - (trail_dist * atr_value)
+            if profit_distance >= (trail_activation * eval_atr):
+                trail_target = highest - (trail_dist * eval_atr)
                 if candidate_sl is None or trail_target > candidate_sl:
                     candidate_sl = trail_target
                     new_state = "TRAILING"
@@ -70,14 +77,14 @@ class SentinelAgent:
             if candidate_sl is not None:
                 new_sl = max(current_sl, candidate_sl) if current_sl > 0 else candidate_sl
                 # Check minimum improvement threshold
-                if current_sl == 0 or (new_sl - current_sl) >= (min_improve * atr_value):
+                if current_sl == 0 or (new_sl - current_sl) >= (min_improve * eval_atr):
                     return {"new_sl": new_sl, "state": new_state, "reasoning": reasoning}
 
         else: # SHORT
             profit_distance = entry - current_price
             
             # 1. Break-Even Check
-            if profit_distance >= (be_atr * atr_value):
+            if profit_distance >= (be_atr * eval_atr):
                 be_target = entry - cost_buffer
                 if current_sl > be_target or current_sl == 0:
                     candidate_sl = be_target
@@ -85,8 +92,8 @@ class SentinelAgent:
                     reasoning = f"Price passed {be_atr}x ATR. SL moved to Break-Even + cost buffer."
                     
             # 2. Trailing Check
-            if profit_distance >= (trail_activation * atr_value):
-                trail_target = lowest + (trail_dist * atr_value)
+            if profit_distance >= (trail_activation * eval_atr):
+                trail_target = lowest + (trail_dist * eval_atr)
                 if candidate_sl is None or trail_target < candidate_sl:
                     candidate_sl = trail_target
                     new_state = "TRAILING"
@@ -96,7 +103,7 @@ class SentinelAgent:
             if candidate_sl is not None:
                 new_sl = min(current_sl, candidate_sl) if current_sl > 0 else candidate_sl
                 # Check minimum improvement threshold
-                if current_sl == 0 or (current_sl - new_sl) >= (min_improve * atr_value):
+                if current_sl == 0 or (current_sl - new_sl) >= (min_improve * eval_atr):
                     return {"new_sl": new_sl, "state": new_state, "reasoning": reasoning}
 
         return {"new_sl": None, "state": current_state, "reasoning": "No update required."}
