@@ -169,3 +169,43 @@ def test_deterministic_guard_trend_pullback_conversion():
     assert decision.decision == "SHORT"
     assert decision.trade_action == "WAIT_FOR_PULLBACK"
     assert decision.guard_status == "PULLBACK_WATCHLIST"
+
+
+@pytest.mark.asyncio
+async def test_ceo_hold_bypasses_escalation_without_unbound_error():
+    """
+    Test that when Primary CEO returns HOLD, escalation is cleanly bypassed
+    and the return dictionary contains 'disputed_arbitration': False without UnboundLocalError.
+    """
+    logger = MagicMock()
+    primary_llm = MagicMock()
+    primary_llm.model_name = "qwen/qwen-plus"
+    esc_llm = MagicMock()
+    esc_llm.model_name = "meta-llama/llama-3.1-8b-instruct"
+
+    ceo = CEOAgent(logger, primary_llm, esc_llm)
+    ceo.generate_json = AsyncMock(return_value={
+        "decision": "HOLD",
+        "score_breakdown": {
+            "bull_argument": 10,
+            "bear_argument": 10,
+            "mtf_trend": 0,
+            "risk_penalties": {"total": 0}
+        },
+        "reasoning_en": "No directional edge, staying in cash.",
+        "consensus_summary": "Hold."
+    })
+
+    payload = {
+        "symbol": "SOL-USD",
+        "subordinate_analyst_reports": [],
+        "multi_timeframe_context": {},
+        "historical_context": {}
+    }
+
+    verdict = await ceo.analyze(payload)
+    assert verdict["decision"] == "HOLD"
+    assert verdict["escalated"] is False
+    assert verdict["disputed_arbitration"] is False
+    assert "conviction" in verdict
+    assert "entry_quality" in verdict

@@ -127,6 +127,7 @@ class CEOAgent(BaseAgent):
         escalated = False
         esc_decision_log = "N/A"
         esc_conv_log = "N/A"
+        disputed_arbitration = False
         
         if decision == "HOLD":
             self.logger.info(f"[{self.name}] Primary CEO decided HOLD. Bypassing escalation to save API costs.")
