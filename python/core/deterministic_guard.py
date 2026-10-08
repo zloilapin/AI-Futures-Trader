@@ -67,12 +67,41 @@ class DeterministicGuard:
                 guard_reason = guard_msg
                 reasoning_en = f"{reasoning_en}\n\n{guard_msg}".strip()
 
-        # 2. Volatility Momentum Override: No time to wait for pullback on 15m fast momentum
-        if strategy_mode == "VOLATILITY_MOMENTUM" and trade_action == "WAIT_FOR_PULLBACK" and conviction >= min_conv and decision in ["LONG", "SHORT"]:
+        # 2. Volatility Momentum & Breakout: Confirmed impulse breakdown/breakout enters immediately
+        is_confirmed_breakout = False
+        breakout_reason = ""
+        if strategy_mode in ["BREAKOUT", "VOLATILITY_MOMENTUM"]:
+            is_confirmed_breakout = True
+            breakout_reason = f"стратегия {strategy_mode}"
+        elif market_data and decision in ["LONG", "SHORT"]:
+            indicators = market_data.get("indicators", {})
+            donchian_high = float(indicators.get("donchian_high") or 0.0)
+            donchian_low = float(indicators.get("donchian_low") or 0.0)
+            vol_spike = float(indicators.get("volume_spike_pct") or 0.0)
+            cur_price = float(market_data.get("price_data", {}).get("current_price") or 0.0)
+            if decision == "LONG" and donchian_high > 0 and cur_price > donchian_high and vol_spike >= 120.0:
+                is_confirmed_breakout = True
+                breakout_reason = f"пробой Donchian High ({donchian_high}) с объемом {vol_spike:.1f}%"
+            elif decision == "SHORT" and donchian_low > 0 and cur_price < donchian_low and vol_spike >= 100.0:
+                is_confirmed_breakout = True
+                breakout_reason = f"пробой Donchian Low ({donchian_low}) с объемом {vol_spike:.1f}%"
+
+        if is_confirmed_breakout and trade_action == "WAIT_FOR_PULLBACK" and conviction >= min_conv and decision in ["LONG", "SHORT"]:
             trade_action = "ENTER"
-            vm_msg = "⚡ VOLATILITY_MOMENTUM: WAIT_FOR_PULLBACK конвертирован в ENTER из-за высокой скорости режима."
+            vm_msg = f"Подтвержденный импульс и пробой ({breakout_reason}). Вход по стратегии BREAKOUT без ожидания отката."
+            try:
+                print(f"⚡ [Breakout Override] {symbol}: {vm_msg}")
+            except UnicodeEncodeError:
+                print(f"[Breakout Override] {symbol}: {vm_msg}")
             if logger:
                 logger.info(f"[System_Core] {vm_msg}")
+
+        # 2.5. Disputed Arbitration Guard: Never allow full ENTER on disputed setups
+        if ceo_proposal.get("disputed_arbitration") and trade_action == "ENTER":
+            trade_action = "REDUCE_SIZE"
+            da_msg = "⚖️ [Disputed Arbitration] Размер позиции ограничен REDUCE_SIZE из-за арбитражного спора."
+            if logger:
+                logger.info(f"[System_Core] {da_msg}")
 
         # 3. Actionability, Conviction & Pullback Checks
         is_actionable = True
@@ -83,9 +112,16 @@ class DeterministicGuard:
             guard_reason = f"Пропущен из-за решения CEO ({decision})" if not rejection_tag or rejection_tag == "CEO_HOLD" else guard_reason
         elif trade_action == "WAIT_FOR_PULLBACK":
             is_actionable = False
-            guard_status = "BLOCKED"
+            guard_status = "PULLBACK_WATCHLIST"
             rejection_tag = "WAIT_FOR_PULLBACK"
-            guard_reason = f"WAIT_FOR_PULLBACK: Перекупленность/перепроданность (Качество входа {entry_qual}% < 70% при уверенности тренда {dir_conf}%)"
+            guard_reason = f"WAIT_FOR_PULLBACK: Цена оторвана от базы (Качество входа {entry_qual}% < 70% при уверенности тренда {dir_conf}%). Сетап зарегистрирован в Pullback Watchlist для непрерывного мониторинга отката."
+        elif entry_qual < 60:
+            # Rule: Не снижать порог с 60% просто ради увеличения числа сделок.
+            # Если вход запоздал, правильное действие — дождаться нового сетапа или пропустить сделку, а не принудительно открыть позицию.
+            is_actionable = False
+            guard_status = "BLOCKED"
+            rejection_tag = "POOR_ENTRY_QUALITY"
+            guard_reason = f"Низкое качество входа: Entry Quality ({entry_qual}% < 60%). Вход запоздал или несет невыгодный Risk/Reward. Принудительное открытие запрещено."
         elif conviction < min_conv:
             is_actionable = False
             guard_status = "BLOCKED"

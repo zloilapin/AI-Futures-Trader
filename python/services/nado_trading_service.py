@@ -13,8 +13,10 @@ class NadoTradingService(BaseTradingService):
     """
     
     def __init__(self, nado_client=None):
+        import time
         self.wallet = Web3Wallet()
         self.logger = logger
+        self._start_time = time.time()
         
         self.client = None
         self.is_connected = False
@@ -740,7 +742,7 @@ class NadoTradingService(BaseTradingService):
                         
                         if history and history.orders:
                             expected_base = abs(float(pos.get("trigger_amount_x18", 0)) / 1e18) if "trigger_amount_x18" in pos else 0
-                            open_time = float(pos.get("open_time", 0))
+                            open_time = float(pos.get("open_time", 0) or pos.get("timestamp", 0) or getattr(self, "_start_time", 0))
 
                             # 1. Match closing order (opposite sign of position direction)
                             for order in history.orders:
@@ -748,16 +750,19 @@ class NadoTradingService(BaseTradingService):
                                 base = abs(float(order.base_filled))
                                 bf = float(order.base_filled)
                                 
-                                # Strict Time Check
-                                if open_time > 0 and hasattr(order, "timestamp"):
+                                # Strict Time Check: Must have executed AFTER position was opened/started
+                                if hasattr(order, "timestamp"):
                                     ts = getattr(order, "timestamp", None)
                                     if ts is not None and str(ts).strip() != "None":
                                         try:
                                             order_ts_sec = float(ts) / 1000.0 if len(str(ts)) > 10 else float(ts)
-                                            if order_ts_sec < open_time:
+                                            if open_time > 0 and order_ts_sec < open_time:
                                                 continue
                                         except (ValueError, TypeError):
                                             pass
+                                elif open_time > 0:
+                                    # Order has no timestamp, cannot safely attribute
+                                    continue
                                         
                                 if (direction == "LONG" and bf < 0) or (direction == "SHORT" and bf > 0):
                                     if base > 0:
@@ -1039,7 +1044,7 @@ class NadoTradingService(BaseTradingService):
             
         return []
 
-    async def sync_with_exchange(self) -> None:
+    async def sync_with_exchange(self, is_startup: bool = False) -> None:
         """Syncs local state with active positions on Nado."""
         if not self.is_connected:
             return
@@ -1058,7 +1063,18 @@ class NadoTradingService(BaseTradingService):
 
             positions = await self.get_active_positions(bypass_cache=True)
             
-            # Clean up local active positions that are no longer open on-chain
+            # If on startup, immediately purge any local tracked positions that are not active on-chain.
+            # They were closed while the bot was offline and must not trigger phantom closures/PnL alerts.
+            if is_startup:
+                on_chain_bases = {p["symbol"].split('-')[0].upper() for p in positions}
+                orphans = [k for k in list(self.active_positions.keys()) if k.split('-')[0].upper() not in on_chain_bases]
+                for k in orphans:
+                    logger.info(f"[NadoTradingService] 🧹 [Startup] Purged stale orphan local position '{k}' (not active on-chain).")
+                    del self.active_positions[k]
+                if orphans:
+                    self._save_positions()
+
+            # Clean up local active positions that are no longer open on-chain during runtime
             # DELEGATED to check_and_update_positions() to ensure PnL and Streaks are properly recorded.
             restored = 0
             for pos in positions:

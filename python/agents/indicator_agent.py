@@ -32,13 +32,29 @@ class IndicatorAgent(BaseAgent):
         bull_score = 0
         bear_score = 0
 
+        mtf = market_data.get("multi_timeframe", {})
+        trend_1h = mtf.get("trend_1h", "NEUTRAL")
+        trend_4h = mtf.get("trend_4h", "NEUTRAL")
+        is_macro_bearish = (trend_1h == "BEARISH" or trend_4h == "BEARISH")
+        is_macro_bullish = (trend_1h == "BULLISH" or trend_4h == "BULLISH")
+
         if rsi is not None:
             if rsi < 30:
-                bull_score += 2
-                reason_parts.append(f"RSI перепродан ({rsi:.1f})")
+                if is_macro_bearish and not is_macro_bullish:
+                    # In a dominant bearish trend, RSI < 30 confirms aggressive downward momentum
+                    bear_score += 2
+                    reason_parts.append(f"RSI в зоне сильного импульса продаж ({rsi:.1f})")
+                else:
+                    bull_score += 2
+                    reason_parts.append(f"RSI перепродан ({rsi:.1f})")
             elif rsi > 70:
-                bear_score += 2
-                reason_parts.append(f"RSI перекуплен ({rsi:.1f})")
+                if is_macro_bullish and not is_macro_bearish:
+                    # In a dominant bullish trend, RSI > 70 confirms strong upward momentum
+                    bull_score += 2
+                    reason_parts.append(f"RSI в зоне сильного импульса покупок ({rsi:.1f})")
+                else:
+                    bear_score += 2
+                    reason_parts.append(f"RSI перекуплен ({rsi:.1f})")
             else:
                 if rsi > 55: bull_score += 1
                 elif rsi < 45: bear_score += 1

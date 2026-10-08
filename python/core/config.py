@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     SCAN_INTERVAL_MINUTES: int = Field(default=30, ge=1)
     SENTINEL_INTERVAL_SECONDS: int = Field(default=30, ge=5)
     SENTINEL_COOLDOWN_SECONDS: int = Field(default=600, ge=10)
+    FAST_RADAR_INTERVAL_SECONDS: int = Field(default=45, ge=10)
     
     # Настройки Sentinel (Risk Control)
     SENTINEL_BE_ATR: float = Field(default=2.0)

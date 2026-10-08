@@ -81,7 +81,7 @@ async def main():
         print("🔄 [P0.3 Startup Sync] Синхронизация состояния с биржей при старте...")
         while True:
             try:
-                await trading_service.sync_with_exchange()
+                await trading_service.sync_with_exchange(is_startup=True)
                 print(f"✅ [P0.3 Startup Sync] Состояние синхронизировано. Активных позиций: {len(trading_service.active_positions)}")
                 break
             except Exception as e:
@@ -181,8 +181,40 @@ async def main():
                     except Exception as e:
                         logger.error(f"[SentinelLoop] Ошибка: {e}")
                     await asyncio.sleep(sentinel_interval)
+
+            wake_up_event = asyncio.Event()
+
+            async def fast_radar_loop():
+                """
+                Continuous Fast Market Radar (0 LLM tokens).
+                Polls top assets and watchlist every 45-60s.
+                If a registered pullback reaches entry zone, or a major breakout occurs,
+                it wakes up the pipeline immediately instead of waiting for the 30m sleep.
+                """
+                radar_interval = getattr(config, "FAST_RADAR_INTERVAL_SECONDS", 45)
+                while True:
+                    try:
+                        await asyncio.sleep(radar_interval)
+                        if not getattr(pipeline, "_cycle_running", False):
+                            # 1. Pullback Watchlist check (highest priority: entry point ready)
+                            pb_triggered, pb_sym, pb_reason = await pipeline.check_pullback_watchlist()
+                            if pb_triggered:
+                                print(f"\n⚡ [Pullback Radar] {pb_sym}: {pb_reason}! Прерываем сон для входа на откате...")
+                                logger.info(f"[PullbackRadar] Triggered on {pb_sym}: {pb_reason}. Waking pipeline.")
+                                wake_up_event.set()
+                                continue
+
+                            # 2. General Market Momentum check
+                            triggered, sym, reason = await pipeline.check_fast_market_momentum()
+                            if triggered:
+                                print(f"\n🚨 [Fast Radar] Обнаружен сильный импульс на {sym} ({reason})! Прерываем сон...")
+                                logger.info(f"[FastRadar] Momentum triggered on {sym}: {reason}. Waking pipeline.")
+                                wake_up_event.set()
+                    except Exception as e:
+                        logger.debug(f"[FastRadarLoop] Ошибка: {e}")
             
             asyncio.create_task(sentinel_loop())
+            asyncio.create_task(fast_radar_loop())
             asyncio.create_task(bot_listener.start_listening())
 
             try:
@@ -201,7 +233,12 @@ async def main():
                     
                     cycle_number += 1
                     print(f"\n⏳ Ожидание {int(scan_interval/60)} мин. до следующего цикла сканирования...")
-                    await asyncio.sleep(scan_interval)
+                    try:
+                        await asyncio.wait_for(wake_up_event.wait(), timeout=scan_interval)
+                        wake_up_event.clear()
+                        print("\n⚡ [Fast Radar Trigger] Внеочередной запуск сканирования рынка по сигналу радара...")
+                    except asyncio.TimeoutError:
+                        pass
             except (KeyboardInterrupt, asyncio.CancelledError):
                 print("\n🛑 Автономный торговый бот остановлен.")
     finally:

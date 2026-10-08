@@ -42,12 +42,19 @@ class StrategyRouter:
 
         last_closed_candle_close = indicators.get("last_closed_candle_close", current_price)
 
+        candle_report = next((r for r in valid_reports if r.get("agent_name") == "Candle_Agent"), {})
+        candle_signal = str(candle_report.get("signal", "")).upper()
+
         # 1. Breakout Strategy (Highest Priority Momentum - evaluated first so it is not intercepted by local scalping)
         # We require the last CLOSED candle to pierce the channel to avoid fakeouts on active wicks
-        if volume_spike_pct >= 200.0 and last_closed_candle_close > donchian_high and tech_bulls >= 1 and ob_bull:
-            return StrategyProfile(True, "BREAKOUT", "LONG", f"BREAKOUT LONG: Пробой {donchian_high} (close={last_closed_candle_close}) с объемом {volume_spike_pct}%, OB=BULL")
-        if volume_spike_pct >= 200.0 and last_closed_candle_close < donchian_low and tech_bears >= 1 and ob_bear:
-            return StrategyProfile(True, "BREAKOUT", "SHORT", f"BREAKOUT SHORT: Пробой {donchian_low} (close={last_closed_candle_close}) с объемом {volume_spike_pct}%, OB=BEAR")
+        if last_closed_candle_close > donchian_high and tech_bulls >= 1 and (
+            (volume_spike_pct >= 200.0 and ob_bull) or (volume_spike_pct >= 120.0 and trend_1h == "BULLISH")
+        ):
+            return StrategyProfile(True, "BREAKOUT", "LONG", f"BREAKOUT LONG: Пробой {donchian_high} (close={last_closed_candle_close}) с объемом {volume_spike_pct}%, OB={'BULL' if ob_bull else 'NEUTRAL'}")
+        if last_closed_candle_close < donchian_low and tech_bears >= 1 and (
+            (volume_spike_pct >= 200.0 and ob_bear) or (volume_spike_pct >= 100.0 and trend_1h == "BEARISH")
+        ):
+            return StrategyProfile(True, "BREAKOUT", "SHORT", f"BREAKOUT SHORT: Пробой {donchian_low} (close={last_closed_candle_close}) с объемом {volume_spike_pct}%, OB={'BEAR' if ob_bear else 'NEUTRAL'}")
 
         # 2. Relative Momentum
         asset_return_24h = indicators.get("asset_return_24h", 0.0)
@@ -73,8 +80,8 @@ class StrategyRouter:
         if mtf_alignment == "COUNTER_TREND_WARNING":
             if trend_1h == "BULLISH" and tech_bulls >= 2:
                 return StrategyProfile(True, "TREND_FOLLOWING", "LONG", f"Отскок по тренду: Bulls={tech_bulls}, 1H={trend_1h}")
-            if trend_1h == "BEARISH" and tech_bears >= 2:
-                return StrategyProfile(True, "TREND_FOLLOWING", "SHORT", f"Откат по тренду: Bears={tech_bears}, 1H={trend_1h}")
+            if trend_1h == "BEARISH" and (tech_bears >= 2 or (tech_bears >= 1 and candle_signal in ["BEARISH", "SHORT"] and volume_spike_pct >= 50.0)):
+                return StrategyProfile(True, "TREND_FOLLOWING", "SHORT", f"Импульс/откат по тренду: Bears={tech_bears}, 1H={trend_1h}, Vol={volume_spike_pct}%")
             return StrategyProfile(False, "TREND_FOLLOWING", "NEUTRAL", "ОТКЛОНЕН (Попытка торговли против макро-тренда).")
 
         if mtf_alignment == "TRANSITION":

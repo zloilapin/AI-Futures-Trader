@@ -73,6 +73,9 @@ class TradingPipeline:
         self.exchange_name = exchange_name
         self.data_guard = DataQualityGuard(self.services.logger)
         self._cycle_running = False
+        self._fast_radar_cooldowns: Dict[str, float] = {}
+        self._pullback_watchlist: Dict[str, Dict[str, Any]] = {}
+        self._priority_symbol: Optional[str] = None
         self._effective_profile = getattr(config, "TRADING_PROFILE", "BALANCED")
 
     def apply_pipeline_guards_and_sync(
@@ -253,6 +256,17 @@ class TradingPipeline:
 
         # Фильтруем активы: не сканируем то, что уже открыто
         selected_assets = [s for s in selected_assets if s not in self.services.trading_service.active_positions]
+
+        # Приоритет для актива с подтвержденным откатом (PULLBACK_RETEST)
+        if getattr(self, "_priority_symbol", None):
+            pri_sym = self._priority_symbol
+            self._priority_symbol = None
+            if pri_sym in selected_assets:
+                selected_assets = [pri_sym] + [s for s in selected_assets if s != pri_sym]
+                print(f"🎯 [Pullback Priority] {pri_sym} перемещен в начало очереди анализа (PULLBACK_RETEST).")
+            elif pri_sym not in self.services.trading_service.active_positions:
+                selected_assets = [pri_sym] + selected_assets
+                print(f"🎯 [Pullback Priority] {pri_sym} добавлен первым в очередь анализа (PULLBACK_RETEST).")
 
         # ИТЕРАЦИЯ ПО ВСЕМ АКТИВАМ
         for symbol in selected_assets:
@@ -467,8 +481,23 @@ class TradingPipeline:
 
             # Execution Gate: Checks if Deterministic Guard approved candidate as actionable
             if not final_trade_decision.is_actionable:
+                # Регистрация в Pullback Watchlist для непрерывного фонового отслеживания отката (0 LLM токенов)
+                if final_trade_decision.trade_action == "WAIT_FOR_PULLBACK" and final_trade_decision.decision in ["LONG", "SHORT"]:
+                    self.register_pullback_candidate(
+                        symbol=symbol,
+                        decision=final_trade_decision.decision,
+                        current_price=current_price,
+                        directional_conf=directional_conf,
+                        conviction=conviction,
+                        strategy_mode=strategy_mode,
+                        market_data=market_data,
+                        ceo_verdict=ceo_verdict,
+                        strategy_profile=strategy_profile
+                    )
+
                 print(f"⏸️ Пропуск {symbol}. {final_trade_decision.guard_reason}")
                 scanner_status = "⚠️ ЗАБЛОКИРОВАН СКАНЕРОМ" if scanner_blocked else "✅ OK"
+                status_text = "⏳ ОЖИДАНИЕ ОТКАТА" if final_trade_decision.trade_action == "WAIT_FOR_PULLBACK" else "⏸️ НЕТ СИГНАЛА"
                 asset_summary = {
                     "symbol": symbol,
                     "decision": decision,
@@ -478,7 +507,7 @@ class TradingPipeline:
                     "risk_approved": False,
                     "risk_reason": final_trade_decision.guard_reason,
                     "ceo_reasoning": ceo_verdict.get("reasoning_en", ceo_verdict.get("reasoning", "")),
-                    "status": "⏸️ НЕТ СИГНАЛА"
+                    "status": status_text
                 }
                 scan_summaries.append(asset_summary)
                 tracker.record_rejection(final_trade_decision.rejection_tag or "NO_SIGNAL")
@@ -758,3 +787,201 @@ class TradingPipeline:
                         
             except Exception as e:
                 print(f"❌ Ошибка проверки позиции {symbol}: {e}")
+
+    async def check_fast_market_momentum(self) -> Tuple[bool, str, str]:
+        """
+        Lightweight deterministic radar (0 LLM tokens).
+        Checks top assets for sharp breakdowns, price dumps, or momentum breakouts.
+        Returns: (spike_detected, symbol, reason)
+        """
+        if self._cycle_running:
+            return False, "", "Cycle currently running"
+
+        now_ts = time.time()
+        core_symbols = ["BTC-USD", "ETH-USD", "SOL-USD"]
+
+        for symbol in core_symbols:
+            if now_ts < self._fast_radar_cooldowns.get(symbol, 0):
+                continue
+
+            try:
+                ohlcv = await self.services.fetcher.fetch_ohlcv(symbol)
+                candles = ohlcv.get("candles_20", []) if isinstance(ohlcv, dict) else []
+                if len(candles) < 5:
+                    continue
+
+                current_price = float(ohlcv.get("current_price", 0.0) or candles[-1].get("close", 0.0))
+                if current_price <= 0:
+                    continue
+
+                last_c = candles[-1]
+                o1 = float(last_c.get("open", current_price))
+                if o1 <= 0:
+                    continue
+
+                # 1. Price change in current candle (%)
+                delta_pct = ((current_price - o1) / o1) * 100.0
+
+                # 2. Volume Ratio vs recent average
+                cur_vol = float(last_c.get("volume", 0.0))
+                hist_vols = [float(c.get("volume", 0.0)) for c in candles[-11:-1]]
+                avg_vol = sum(hist_vols) / len(hist_vols) if hist_vols else 0.0
+                vol_ratio = (cur_vol / avg_vol) if avg_vol > 0 else 1.0
+
+                # 3. Donchian breakdown / breakout
+                lows = [float(c.get("low", 0.0)) for c in candles[-21:-1]]
+                highs = [float(c.get("high", 0.0)) for c in candles[-21:-1]]
+                donchian_low = min(lows) if lows else 0.0
+                donchian_high = max(highs) if highs else 0.0
+
+                is_breakdown = (donchian_low > 0 and current_price < donchian_low and delta_pct <= -0.5) or (delta_pct <= -1.2) or (delta_pct <= -0.8 and vol_ratio >= 1.8)
+                is_breakout = (donchian_high > 0 and current_price > donchian_high and delta_pct >= 0.5) or (delta_pct >= 1.2) or (delta_pct >= 0.8 and vol_ratio >= 1.8)
+
+                if is_breakdown:
+                    self._fast_radar_cooldowns[symbol] = now_ts + 600  # 10m cooldown
+                    return True, symbol, f"MOMENTUM_BREAKDOWN (Δ={delta_pct:.2f}%, Vol={vol_ratio:.1f}x)"
+                elif is_breakout:
+                    self._fast_radar_cooldowns[symbol] = now_ts + 600  # 10m cooldown
+                    return True, symbol, f"MOMENTUM_BREAKOUT (Δ={delta_pct:.2f}%, Vol={vol_ratio:.1f}x)"
+            except Exception as e:
+                self.services.logger.debug(f"[FastRadar] Error checking {symbol}: {e}")
+
+        return False, "", ""
+
+    def register_pullback_candidate(
+        self,
+        symbol: str,
+        decision: str,
+        current_price: float,
+        directional_conf: int,
+        conviction: int,
+        strategy_mode: str,
+        market_data: Dict[str, Any],
+        ceo_verdict: Dict[str, Any],
+        strategy_profile: Any,
+        ttl_seconds: int = 2700  # 45 minutes
+    ):
+        """
+        Registers a high-conviction setup where price is temporarily extended from base (WAIT_FOR_PULLBACK).
+        Monitors lightweight live price (0 LLM tokens) in background fast radar loop.
+        """
+        indicators = market_data.get("indicators", {}) if isinstance(market_data, dict) else {}
+        ema_20 = float(indicators.get("ema_20") or 0.0)
+
+        # Pullback target calculation
+        if decision == "LONG":
+            if ema_20 > 0 and ema_20 < current_price:
+                target_pullback_price = ema_20
+            else:
+                target_pullback_price = round(current_price * 0.992, 4)  # ~0.8% pullback
+            invalidation_price = round(target_pullback_price * 0.985, 4)  # 1.5% below target breaks setup
+        else:  # SHORT
+            if ema_20 > 0 and ema_20 > current_price:
+                target_pullback_price = ema_20
+            else:
+                target_pullback_price = round(current_price * 1.008, 4)  # ~0.8% bounce/pullback
+            invalidation_price = round(target_pullback_price * 1.015, 4)  # 1.5% above target breaks setup
+
+        now_ts = time.time()
+        self._pullback_watchlist[symbol] = {
+            "symbol": symbol,
+            "direction": decision,
+            "signal_price": current_price,
+            "target_pullback_price": target_pullback_price,
+            "invalidation_price": invalidation_price,
+            "directional_conf": directional_conf,
+            "conviction": conviction,
+            "strategy_mode": strategy_mode,
+            "created_at": now_ts,
+            "expires_at": now_ts + ttl_seconds,
+            "ttl_seconds": ttl_seconds,
+            "status": "WATCHING"
+        }
+
+        print(f"👁️ [Pullback Watchlist] {symbol} добавлен в мониторинг отката ({decision}): "
+              f"Сигнальная цена ${current_price:,.2f} -> Цель отката ~${target_pullback_price:,.2f} "
+              f"(Инвалидация: ${invalidation_price:,.2f}, TTL: {int(ttl_seconds/60)} мин)")
+        self.services.logger.info(
+            f"[PullbackWatchlist] Added {symbol} ({decision}). Signal: {current_price}, "
+            f"Target: {target_pullback_price}, Invalidation: {invalidation_price}, TTL: {ttl_seconds}s"
+        )
+
+    async def check_pullback_watchlist(self) -> Tuple[bool, str, str]:
+        """
+        Lightweight continuous pullback monitor (0 LLM tokens).
+        Executed every 45-60s in background fast radar loop.
+        
+        Checks watchlist symbols:
+        1. Cancels/expires stale signals (> 45 min).
+        2. Cancels signals if price invalidates thesis (breaks invalidation level).
+        3. If pullback occurred (price touched pullback target zone), triggers immediate re-test!
+        
+        Returns: (triggered: bool, symbol: str, reason: str)
+        """
+        if not self._pullback_watchlist:
+            return False, "", ""
+
+        if self._cycle_running:
+            return False, "", "Cycle currently running"
+
+        now_ts = time.time()
+        symbols_to_delete = []
+
+        for symbol, item in list(self._pullback_watchlist.items()):
+            # 1. Stale signal check (TTL Expiration)
+            if now_ts >= item["expires_at"]:
+                elapsed_min = int((now_ts - item["created_at"]) / 60)
+                print(f"🗑️ [Pullback Watchlist] Сигнал {symbol} ({item['direction']}) устарел ({elapsed_min} мин >= {int(item['ttl_seconds']/60)} мин). Удален.")
+                self.services.logger.info(f"[PullbackWatchlist] Stale signal expired for {symbol}. Removed.")
+                symbols_to_delete.append(symbol)
+                continue
+
+            # Fetch fresh current price (0 LLM tokens)
+            try:
+                ohlcv = await self.services.fetcher.fetch_ohlcv(symbol)
+                current_price = float(ohlcv.get("current_price", 0.0) or (ohlcv.get("candles_20", [{}])[-1].get("close", 0.0)))
+                if current_price <= 0:
+                    continue
+            except Exception as e:
+                self.services.logger.debug(f"[PullbackWatchlist] Error fetching price for {symbol}: {e}")
+                continue
+
+            direction = item["direction"]
+            target_price = item["target_pullback_price"]
+            inv_price = item["invalidation_price"]
+
+            # 2. Invalidation check
+            if direction == "LONG" and current_price < inv_price:
+                print(f"🛑 [Pullback Watchlist] Сетап {symbol} (LONG) инвалидирован: цена (${current_price:,.2f}) пробила уровень инвалидации (${inv_price:,.2f}). Удален.")
+                self.services.logger.info(f"[PullbackWatchlist] Setup invalidated for {symbol} LONG. Removed.")
+                symbols_to_delete.append(symbol)
+                continue
+            elif direction == "SHORT" and current_price > inv_price:
+                print(f"🛑 [Pullback Watchlist] Сетап {symbol} (SHORT) инвалидирован: цена (${current_price:,.2f}) пробила уровень инвалидации (${inv_price:,.2f}). Удален.")
+                self.services.logger.info(f"[PullbackWatchlist] Setup invalidated for {symbol} SHORT. Removed.")
+                symbols_to_delete.append(symbol)
+                continue
+
+            # 3. Pullback check
+            # For LONG: price pulled back to target (price <= target * 1.002)
+            # For SHORT: price bounced to target (price >= target * 0.998)
+            pullback_hit = False
+            if direction == "LONG" and current_price <= (target_price * 1.002):
+                pullback_hit = True
+            elif direction == "SHORT" and current_price >= (target_price * 0.998):
+                pullback_hit = True
+
+            if pullback_hit:
+                print(f"\n🎯 [Pullback Watchlist] ОТКАТ ПРОИЗОШЕЛ! {symbol} ({direction}): "
+                      f"Текущая цена ${current_price:,.2f} достигла зоны отката ~${target_price:,.2f}!")
+                self.services.logger.info(f"[PullbackWatchlist] Pullback confirmed for {symbol} ({direction}) at {current_price}. Triggering entry retest.")
+                symbols_to_delete.append(symbol)
+                self._priority_symbol = symbol
+                for s in symbols_to_delete:
+                    self._pullback_watchlist.pop(s, None)
+                return True, symbol, f"PULLBACK_RETEST ({direction} at ${current_price:,.2f}, target was ${target_price:,.2f})"
+
+        for s in symbols_to_delete:
+            self._pullback_watchlist.pop(s, None)
+
+        return False, "", ""

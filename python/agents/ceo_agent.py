@@ -1,5 +1,5 @@
 import json
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Optional
 import os
 import re
 
@@ -183,64 +183,101 @@ Provide a JSON strictly matching this schema:
 
 CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and end with '}}'. Do NOT output markdown bullet lists, internal reasoning, or conversational text outside the JSON.
 """
+            arbitration_failed = False
+            arbitration_error = ""
+            esc_response = None
+            esc_decision = "HOLD"
+            esc_conviction = 0
+            esc_dir_conf = 0
+            esc_entry_qual = 0
+            disputed_arbitration = False
+
             try:
                 original_llm = self.llm_client
                 self.llm_client = self.escalation_llm
                 try:
-                    k3_response = await self.generate_json(escalation_prompt, required_keys=["decision", "score_breakdown", "reasoning_en"])
+                    esc_response = await self.generate_json(escalation_prompt, required_keys=["decision", "score_breakdown", "reasoning_en"])
                 finally:
                     self.llm_client = original_llm
-                
-                esc_raw_decision = str(k3_response.get("decision", "ERROR")).upper()
-                if esc_raw_decision == "ERROR":
-                    raise ValueError(f"{self.escalation_llm.model_name} returned ERROR")
+            except Exception as e:
+                arbitration_failed = True
+                arbitration_error = str(e)
+
+            if not arbitration_failed and esc_response:
+                esc_raw_decision = str(esc_response.get("decision", "ERROR")).upper().strip()
+                if esc_raw_decision in ["LONG", "SHORT", "HOLD"]:
+                    k3_breakdown = esc_response.get("score_breakdown", {})
+                    esc_score_res = self._validate_and_compute_score(esc_raw_decision, k3_breakdown, market_context=data)
                     
-                k3_breakdown = k3_response.get("score_breakdown", {})
-                esc_score_res = self._validate_and_compute_score(esc_raw_decision, k3_breakdown, market_context=data)
-                
-                esc_decision = esc_score_res["decision"]
-                esc_conviction = esc_score_res["conviction"]
-                esc_dir_conf = esc_score_res["directional_confidence"]
-                esc_entry_qual = esc_score_res["entry_quality"]
-                
-                esc_decision_log = esc_decision
-                esc_conv_log = esc_conviction
-                k3_reasoning = k3_response.get("reasoning_en", "")
-                
-                reasoning = f"[Primary CEO: {reasoning}]\n\n[ESCALATION VERDICT ({self.escalation_llm.model_name}): {k3_reasoning}]"
-                self.logger.info(f"[{self.name}] Escalation ({self.escalation_llm.model_name}) Final Decision: {esc_decision} (DirConf: {esc_dir_conf}%, EntryQuality: {esc_entry_qual}%)")
-                print(f"🧠 [{self.escalation_llm.model_name}] Вердикт: {esc_decision} (DirConf: {esc_dir_conf}%, EntryQuality: {esc_entry_qual}%)")
-                
-                # Consensus Check logic
-                if esc_decision == primary_decision:
-                    decision = esc_decision
-                    conviction = int((primary_conviction * 0.6) + (esc_conviction * 0.4))
-                    directional_confidence = int((primary_dir_conf * 0.6) + (esc_dir_conf * 0.4))
-                    entry_quality = int((primary_entry_quality * 0.6) + (esc_entry_qual * 0.4))
-                    if conviction >= 75:
-                        trade_action = "ENTER"
-                    elif directional_confidence >= 75 and conviction < 70:
-                        trade_action = "WAIT_FOR_PULLBACK"
+                    if esc_score_res.get("math_conflict", False):
+                        # Format/arithmetic inconsistency by arbitrator
+                        # Rule: "Ошибка формата или арифметики у арбитра не должна считаться доказательством неправильности исходного сигнала."
+                        self.logger.warning(f"[{self.name}] Арбитр {self.escalation_llm.model_name} допустил математическую нестыковку. Не аннулируем сигнал Primary CEO.")
+                        arbitration_failed = True
+                        arbitration_error = "Arbitrator score breakdown math conflict"
                     else:
-                        trade_action = "REDUCE_SIZE"
-                    print(f"🤝 [Consensus] Модели пришли к согласию! Подтвержден {decision}. Conviction: {conviction}% (Primary: {primary_conviction}%, Esc: {esc_conviction}%) | Entry Quality: {entry_quality}%")
+                        esc_decision = esc_score_res["decision"]
+                        esc_conviction = esc_score_res["conviction"]
+                        esc_dir_conf = esc_score_res["directional_confidence"]
+                        esc_entry_qual = esc_score_res["entry_quality"]
+                        esc_decision_log = esc_decision
+                        esc_conv_log = esc_conviction
+                        k3_reasoning = esc_response.get("reasoning_en", "")
+                        reasoning = f"[Primary CEO: {reasoning}]\n\n[ESCALATION VERDICT ({self.escalation_llm.model_name}): {k3_reasoning}]"
+                        self.logger.info(f"[{self.name}] Escalation ({self.escalation_llm.model_name}) Final Decision: {esc_decision} (DirConf: {esc_dir_conf}%, EntryQuality: {esc_entry_qual}%)")
+                        print(f"🧠 [{self.escalation_llm.model_name}] Вердикт: {esc_decision} (DirConf: {esc_dir_conf}%, EntryQuality: {esc_entry_qual}%)")
                 else:
-                    print(f"⚔️ [Conflict] {self.llm_client.model_name} ({primary_decision}) и {self.escalation_llm.model_name} ({esc_decision}) разошлись во мнениях. Итог: HOLD.")
+                    arbitration_failed = True
+                    arbitration_error = f"Invalid decision value: {esc_raw_decision}"
+
+            # --- ARBITRATION RESOLUTION ENGINE ---
+            # Case 1: Full Consensus (both models agree)
+            if not arbitration_failed and esc_decision == primary_decision:
+                decision = esc_decision
+                conviction = int((primary_conviction * 0.6) + (esc_conviction * 0.4))
+                directional_confidence = int((primary_dir_conf * 0.6) + (esc_dir_conf * 0.4))
+                entry_quality = int((primary_entry_quality * 0.6) + (esc_entry_qual * 0.4))
+                if conviction >= 75:
+                    trade_action = "ENTER"
+                elif directional_confidence >= 75 and conviction < 70:
+                    trade_action = "WAIT_FOR_PULLBACK"
+                else:
+                    trade_action = "REDUCE_SIZE"
+                print(f"🤝 [Consensus] Модели пришли к согласию! Подтвержден {decision}. Conviction: {conviction}% (Primary: {primary_conviction}%, Esc: {esc_conviction}%) | Entry Quality: {entry_quality}%")
+
+            # Case 2: Model Conflict OR Arbitrator Format/Math Failure
+            else:
+                disputed_arbitration = True
+                dispute_reason = arbitration_error if arbitration_failed else f"Конфликт моделей ({primary_decision} vs {esc_decision})"
+                self.logger.warning(f"[{self.name}] {dispute_reason}. Передаем решение независимым правилам риска...")
+                print(f"⚖️ [Arbitration Gate] {dispute_reason}. Сигнал Primary CEO ({primary_decision}) проверяется независимыми правилами риска...")
+                
+                is_risk_approved, risk_rationale, risk_metrics = self._evaluate_independent_risk_rules(analyst_reports, data, primary_decision)
+                
+                if is_risk_approved:
+                    # Approved by independent risk rules:
+                    # "Не давать Llama-8B безусловное право отменять сильный сигнал Qwen-72B. Но и не разрешать Qwen автоматически открывать сделку при уверенности 70%."
+                    decision = primary_decision
+                    # Discount conviction to safe corridor [60..65]
+                    conviction = min(primary_conviction, 65)
+                    directional_confidence = primary_dir_conf
+                    entry_quality = conviction
+                    # Force REDUCE_SIZE to prevent full-size exposure on disputed trade
+                    trade_action = "REDUCE_SIZE"
+                    reasoning += f"\n\n[INDEPENDENT RISK ARBITRATION APPROVED: {risk_rationale}. Sizing capped to REDUCE_SIZE (Conviction {conviction}%).]"
+                    self.logger.info(f"[{self.name}] Независимые правила риска ОДОБРИЛИ {decision}: {risk_rationale}. Action: REDUCE_SIZE.")
+                    print(f"✅ [Arbitration Gate] Независимые правила риска ПОДТВЕРДИЛИ {decision}: {risk_rationale}. Допуск с защитным объемом (REDUCE_SIZE, {conviction}%).")
+                else:
+                    # Independent risk rules rejected
                     decision = "HOLD"
                     conviction = 0
                     entry_quality = 0
                     directional_confidence = 0
                     trade_action = "HOLD"
-                    
-            except Exception as e:
-                self.logger.warning(f"[{self.name}] Escalation LLM failed ({e}). Falling back to Primary CEO verdict: {primary_decision} ({primary_conviction}%)")
-                print(f"⚠️ [Escalation Fallback] Модель эскалации недоступна ({e}). Сохраняем вердикт Primary CEO: {primary_decision} ({primary_conviction}%).")
-                decision = primary_decision
-                conviction = primary_conviction
-                entry_quality = primary_entry_quality
-                directional_confidence = primary_dir_conf
-                trade_action = "ENTER" if conviction >= 75 else ("WAIT_FOR_PULLBACK" if directional_confidence >= 75 and conviction < 70 else "REDUCE_SIZE")
-                reasoning += f"\n\n[ESCALATION WARNING: {e}. Fallback to Primary CEO {primary_decision} ({primary_conviction}%).]"
+                    final_hold_category = "INDEPENDENT_RISK_REJECTION"
+                    reasoning += f"\n\n[INDEPENDENT RISK ARBITRATION REJECTED: {risk_rationale}. Trade converted to HOLD.]"
+                    self.logger.info(f"[{self.name}] Независимые правила риска ОТКЛОНИЛИ {primary_decision}: {risk_rationale}. Итог: HOLD.")
+                    print(f"🛡️ [Arbitration Gate] Независимые правила риска ОТКЛОНИЛИ сделку: {risk_rationale}. Итог: HOLD.")
 
         # Deterministic Decision Engine for HOLD Category
         if decision == "HOLD":
@@ -272,7 +309,8 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
             "mtf_validation": llm_response.get("mtf_validation", ""),
             "hold_category": final_hold_category if decision == "HOLD" else "NONE",
             "primary_conviction": primary_conviction,
-            "escalated": escalated
+            "escalated": escalated,
+            "disputed_arbitration": disputed_arbitration
         }
 
     def _determine_hold_category(self, analyst_reports: list, conviction: int) -> str:
@@ -291,6 +329,86 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
             return "NEWS_RISK"
             
         return "LOW_EDGE"
+
+    def _evaluate_independent_risk_rules(
+        self,
+        analyst_reports: list,
+        market_context: Dict[str, Any],
+        candidate_decision: str
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Independent Risk Arbitrator:
+        Evaluates deterministic technical signals and risk thresholds without relying on LLM consensus.
+        Used when LLM models conflict or arbitrator experiences math/format failure.
+        
+        Returns:
+            (is_approved: bool, reason: str, metrics: Dict[str, Any])
+        """
+        candidate = candidate_decision.upper().strip()
+        if candidate not in ["LONG", "SHORT"]:
+            return False, f"Candidate decision is {candidate}, not actionable", {}
+
+        # 1. Independent Analyst Syndicate Count
+        signals = [r.get("signal", "NEUTRAL").upper() for r in (analyst_reports or []) if isinstance(r, dict)]
+        bullish_count = signals.count("BULLISH") + signals.count("LONG")
+        bearish_count = signals.count("BEARISH") + signals.count("SHORT")
+        
+        supporting_analysts = bearish_count if candidate == "SHORT" else bullish_count
+        opposing_analysts = bullish_count if candidate == "SHORT" else bearish_count
+
+        # Requirement: At least 2 analysts support and at most 1 analyst opposes
+        if supporting_analysts < 2:
+            return False, f"Недостаточно поддержки аналитиков (за: {supporting_analysts} < 2)", {
+                "supporting": supporting_analysts, "opposing": opposing_analysts
+            }
+        if opposing_analysts > 1:
+            return False, f"Слишком высокое сопротивление аналитиков (против: {opposing_analysts} > 1)", {
+                "supporting": supporting_analysts, "opposing": opposing_analysts
+            }
+
+        # 2. MTF Trend Alignment
+        mtf_ctx = market_context.get("multi_timeframe_context", {}) if isinstance(market_context, dict) else {}
+        tf_1h = mtf_ctx.get("tf_1h", {}) if isinstance(mtf_ctx, dict) and isinstance(mtf_ctx.get("tf_1h"), dict) else {}
+        tf_4h = mtf_ctx.get("tf_4h", {}) if isinstance(mtf_ctx, dict) and isinstance(mtf_ctx.get("tf_4h"), dict) else {}
+        
+        trend_1h = tf_1h.get("trend", "neutral").lower()
+        trend_4h = tf_4h.get("trend", "neutral").lower()
+
+        if candidate == "SHORT":
+            if trend_1h == "bullish" and trend_4h == "bullish":
+                return False, "Контртренд: 1h и 4h таймфреймы оба бычьи", {"trend_1h": trend_1h, "trend_4h": trend_4h}
+        elif candidate == "LONG":
+            if trend_1h == "bearish" and trend_4h == "bearish":
+                return False, "Контртренд: 1h и 4h таймфреймы оба медвежьи", {"trend_1h": trend_1h, "trend_4h": trend_4h}
+
+        # 3. RSI Extrema Check
+        rsi, fear_greed = self._extract_market_metrics(market_context or {})
+        if rsi is not None:
+            if candidate == "SHORT" and rsi < 25.0:
+                return False, f"Экстремальная перепроданность для шорта (RSI={rsi:.1f} < 25)", {"rsi": rsi}
+            elif candidate == "LONG" and rsi > 75.0:
+                return False, f"Экстремальная перекупленность для лонга (RSI={rsi:.1f} > 75)", {"rsi": rsi}
+
+        # 4. Derivatives Funding Check
+        derivatives = market_context.get("derivatives_data", {}) if isinstance(market_context, dict) else {}
+        funding = derivatives.get("funding_rate") or derivatives.get("funding_rate_decimal")
+        if funding is not None:
+            try:
+                funding_val = float(funding)
+                if candidate == "LONG" and funding_val > 0.0005:
+                    return False, f"Фандинг перегружен в лонг ({funding_val:.4f})", {"funding": funding_val}
+                elif candidate == "SHORT" and funding_val < -0.0005:
+                    return False, f"Фандинг перегружен в шорт ({funding_val:.4f})", {"funding": funding_val}
+            except (ValueError, TypeError):
+                pass
+
+        return True, f"Аналитики: {supporting_analysts} vs {opposing_analysts}, MTF тренд согласован", {
+            "supporting": supporting_analysts,
+            "opposing": opposing_analysts,
+            "rsi": rsi,
+            "trend_1h": trend_1h,
+            "trend_4h": trend_4h
+        }
 
     def _extract_market_metrics(self, data: Dict[str, Any]) -> Tuple[float | None, float | None]:
         """
@@ -367,11 +485,21 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                             
         return rsi, fear_greed
 
-    def _calculate_minimum_risk_penalty(self, decision: str, rsi: float | None, fear_greed: float | None) -> int:
+    def _calculate_minimum_risk_penalty(
+        self,
+        decision: str,
+        rsi: float | None,
+        fear_greed: float | None,
+        market_context: Optional[Dict[str, Any]] = None
+    ) -> int:
         """
         Deterministic minimum risk penalty floor.
-        Ensures that extreme technical or sentiment risks cannot be zeroed out by the LLM.
-        Returns a negative integer between -30 and 0.
+        Evaluates:
+        1. RSI extremes & counter-divergence
+        2. Sentiment euphoria/panic
+        3. Overextension from EMA-20 base (late entry detection)
+        4. Bollinger Band position exhaustion
+        Returns a negative integer between -40 and 0.
         """
         penalty = 0
         dec = str(decision).upper()
@@ -409,8 +537,38 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                     penalty -= 10
                 elif fear_greed <= 30:
                     penalty -= 5
+
+        # Quantitative Entry Quality: Overextension & Late Entry Penalty
+        if market_context and isinstance(market_context, dict) and dec in ["LONG", "SHORT"]:
+            indicators = market_context.get("indicators", {})
+            if isinstance(indicators, dict):
+                ema_20 = float(indicators.get("ema_20") or 0.0)
+                cur_price = float(market_context.get("price_data", {}).get("current_price") or indicators.get("current_price") or 0.0)
+                atr_pct = float(indicators.get("atr_pct") or 1.5)
+                bb_pos = float(indicators.get("bb_position_pct") or 50.0)
+
+                # Overextension from EMA-20 (Late entry penalty: price already ran without pausing)
+                if ema_20 > 0 and cur_price > 0:
+                    if dec == "LONG" and cur_price > ema_20:
+                        dist_pct = ((cur_price - ema_20) / cur_price) * 100.0
+                        if dist_pct > max(1.2, 1.5 * atr_pct):
+                            penalty -= 15  # Severe overextension (late entry)
+                        elif dist_pct > max(0.8, 1.0 * atr_pct):
+                            penalty -= 8   # Moderate overextension
+                    elif dec == "SHORT" and cur_price < ema_20:
+                        dist_pct = ((ema_20 - cur_price) / cur_price) * 100.0
+                        if dist_pct > max(1.2, 1.5 * atr_pct):
+                            penalty -= 15  # Severe overextension (late entry)
+                        elif dist_pct > max(0.8, 1.0 * atr_pct):
+                            penalty -= 8   # Moderate overextension
+
+                # Bollinger Band Exhaustion
+                if dec == "LONG" and bb_pos >= 92.0:
+                    penalty -= 8  # Buying at upper band extreme
+                elif dec == "SHORT" and bb_pos <= 8.0:
+                    penalty -= 8  # Shorting at lower band extreme
                     
-        return max(-30, penalty)
+        return max(-40, penalty)
 
     def _extract_llm_penalty(self, breakdown: dict) -> int:
         """
@@ -459,7 +617,8 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
         breakdown: dict,
         market_context: Dict[str, Any] = None
     ) -> ScoreResult:
-        if decision == "ERROR":
+        req_decision = str(decision).upper().strip()
+        if req_decision == "ERROR":
             return ScoreResult({
                 "decision": "ERROR",
                 "conviction": 0,
@@ -468,7 +627,8 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                 "risk_score": 0,
                 "risk_penalties": 0,
                 "trade_action": "HOLD",
-                "raw_net_score": 0.0
+                "raw_net_score": 0.0,
+                "math_conflict": False
             })
 
         max_weights = {
@@ -477,9 +637,9 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
             "mtf_trend": 50
         }
         
-        bull_score = 0.0
-        bear_score = 0.0
-        mtf_score = 0.0
+        raw_bull = 0.0
+        raw_bear = 0.0
+        raw_mtf = 0.0
         
         if isinstance(breakdown, dict):
             for k, v in breakdown.items():
@@ -490,95 +650,104 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                     key = k.lower().replace(" ", "").replace("_", "")
                     
                     if "bull" in key:
-                        limit = max_weights["bull_argument"]
-                        val = abs(val) # Positive for Bull
-                        bull_score += max(0, min(limit, val))
+                        raw_bull += min(max_weights["bull_argument"], abs(val))
                     elif "bear" in key:
-                        limit = max_weights["bear_argument"]
-                        val = -abs(val) # Negative for Bear
-                        bear_score += max(-limit, min(0, val))
+                        raw_bear += min(max_weights["bear_argument"], abs(val))
                     elif "mtf" in key or "trend" in key:
-                        limit = max_weights["mtf_trend"]
-                        mtf_score += max(-limit, min(limit, val))
+                        raw_mtf += min(max_weights["mtf_trend"], abs(val))
                 except (ValueError, TypeError):
                     continue
 
-        net_directional_score = bull_score + bear_score + mtf_score
+        # Deterministic Sign Assignment & Direction Separation:
+        # Check market context or direction bias for objective MTF trend alignment
+        mtf_bias = "NEUTRAL"
+        if market_context and isinstance(market_context, dict):
+            direction_bias = str(market_context.get("direction_bias", "NEUTRAL")).upper()
+            if direction_bias in ["SHORT", "BEARISH"]:
+                mtf_bias = "BEARISH"
+            elif direction_bias in ["LONG", "BULLISH"]:
+                mtf_bias = "BULLISH"
+            else:
+                mtf_ctx = market_context.get("multi_timeframe_context", {})
+                if isinstance(mtf_ctx, dict):
+                    tf_1h = mtf_ctx.get("tf_1h", {}) if isinstance(mtf_ctx.get("tf_1h"), dict) else {}
+                    tf_4h = mtf_ctx.get("tf_4h", {}) if isinstance(mtf_ctx.get("tf_4h"), dict) else {}
+                    if tf_1h.get("trend") == "bearish" or tf_4h.get("trend") == "bearish":
+                        mtf_bias = "BEARISH"
+                    elif tf_1h.get("trend") == "bullish" or tf_4h.get("trend") == "bullish":
+                        mtf_bias = "BULLISH"
 
-        # Rule 1: Direction is strictly determined by sign, never abs()
-        if net_directional_score > 0:
-            calculated_decision = "LONG"
-        elif net_directional_score < 0:
-            calculated_decision = "SHORT"
-        else:
+        # If mtf_bias is still neutral, align trend contribution with the model's explicit trade direction
+        if mtf_bias == "NEUTRAL":
+            if req_decision == "SHORT":
+                mtf_bias = "BEARISH"
+            elif req_decision == "LONG":
+                mtf_bias = "BULLISH"
+
+        bull_mtf_contrib = raw_mtf if mtf_bias == "BULLISH" else 0.0
+        bear_mtf_contrib = raw_mtf if mtf_bias == "BEARISH" else 0.0
+
+        total_bull = raw_bull + bull_mtf_contrib
+        total_bear = raw_bear + bear_mtf_contrib
+        net_directional_score = total_bull - total_bear
+
+        # Separate directional check from raw score numbers
+        math_conflict = False
+        if req_decision == "SHORT":
+            if total_bull > total_bear + 20.0:
+                math_conflict = True
+                self.logger.warning(f"[{self.name}] Math hallucination: LLM proposed SHORT but net score is Bullish ({total_bull} vs {total_bear}).")
+                calculated_decision = "HOLD"
+                directional_confidence = 0
+            else:
+                calculated_decision = "SHORT"
+                directional_confidence = min(100, max(0, int(total_bear if total_bear > 0 else abs(net_directional_score))))
+        elif req_decision == "LONG":
+            if total_bear > total_bull + 20.0:
+                math_conflict = True
+                self.logger.warning(f"[{self.name}] Math hallucination: LLM proposed LONG but net score is Bearish ({total_bear} vs {total_bull}).")
+                calculated_decision = "HOLD"
+                directional_confidence = 0
+            else:
+                calculated_decision = "LONG"
+                directional_confidence = min(100, max(0, int(total_bull if total_bull > 0 else abs(net_directional_score))))
+        else: # HOLD
             calculated_decision = "HOLD"
-
-        # abs() is strictly for magnitude (confidence)
-        directional_confidence = min(100, max(0, int(abs(net_directional_score))))
-
-        # Detect math hallucination / direction conflict
-        req_decision = str(decision).upper()
-        if req_decision == "LONG" and net_directional_score < 0:
-            self.logger.warning(f"[{self.name}] Math hallucination: LLM proposed LONG but net score is {net_directional_score:.1f} (Bearish). Overriding to HOLD.")
-            return ScoreResult({
-                "decision": "HOLD",
-                "conviction": 0,
-                "directional_confidence": 0,
-                "entry_quality": 0,
-                "risk_score": 50,
-                "risk_penalties": 0,
-                "trade_action": "HOLD",
-                "raw_net_score": net_directional_score
-            })
-        elif req_decision == "SHORT" and net_directional_score > 0:
-            self.logger.warning(f"[{self.name}] Math hallucination: LLM proposed SHORT but net score is {net_directional_score:.1f} (Bullish). Overriding to HOLD.")
-            return ScoreResult({
-                "decision": "HOLD",
-                "conviction": 0,
-                "directional_confidence": 0,
-                "entry_quality": 0,
-                "risk_score": 50,
-                "risk_penalties": 0,
-                "trade_action": "HOLD",
-                "raw_net_score": net_directional_score
-            })
-        elif req_decision == "HOLD" and calculated_decision == "HOLD":
-            return ScoreResult({
-                "decision": "HOLD",
-                "conviction": 0,
-                "directional_confidence": 0,
-                "entry_quality": 0,
-                "risk_score": 0,
-                "risk_penalties": 0,
-                "trade_action": "HOLD",
-                "raw_net_score": net_directional_score
-            })
+            directional_confidence = min(100, max(0, int(abs(net_directional_score))))
 
         # Calculate Risk Penalties
         rsi, fear_greed = self._extract_market_metrics(market_context or {})
         llm_penalty = self._extract_llm_penalty(breakdown)
-        deterministic_penalty = self._calculate_minimum_risk_penalty(calculated_decision, rsi, fear_greed)
+        deterministic_penalty = self._calculate_minimum_risk_penalty(calculated_decision, rsi, fear_greed, market_context=market_context)
 
         # Strictest penalty wins (both are negative/zero, min(-10, -15) selects -15)
         total_penalty = min(llm_penalty, deterministic_penalty)
-        # Cap cumulative penalties at MAX_TOTAL_RISK_PENALTY = -30
-        total_penalty = max(-30, total_penalty)
+        # Cap cumulative penalties at MAX_TOTAL_RISK_PENALTY = -40
+        total_penalty = max(-40, total_penalty)
 
-        # Rule 3: Entry Quality formula
+        # Rule 3: Entry Quality formula (Risk-Adjusted execution quality)
         entry_quality = max(0, directional_confidence + total_penalty)
         conviction = entry_quality
 
-        # Rule 2: Separate risk_score (0..100) vs risk_penalties (-30..0)
-        risk_score = min(100, int((abs(total_penalty) / 30.0) * 100)) if total_penalty < 0 else 0
+        # Rule 2: Separate risk_score (0..100) vs risk_penalties (-40..0)
+        risk_score = min(100, int((abs(total_penalty) / 40.0) * 100)) if total_penalty < 0 else 0
 
-        # Rule 4: Action derivation while preserving directional bias
+        # Rule 4: Action derivation separating Directional Confidence from Entry Quality:
+        # Rule: Do not lower threshold from 60% just to increase trade count.
+        # Rule: If an entry is late/overextended, wait for pullback or skip (HOLD), NEVER force an entry with reduced size.
         if calculated_decision == "HOLD" or directional_confidence < 60:
             trade_action = "HOLD"
+        elif entry_quality < 60:
+            # Late or poor entry point (overextended from EMA, extreme RSI/BB, poor R:R)
+            if directional_confidence >= 70:
+                trade_action = "WAIT_FOR_PULLBACK"
+            else:
+                trade_action = "HOLD"
         elif directional_confidence >= 75 and entry_quality < 70:
             trade_action = "WAIT_FOR_PULLBACK"
         elif entry_quality >= 75:
             trade_action = "ENTER"
-        else:
+        else: # 60 <= entry_quality < 75
             trade_action = "REDUCE_SIZE"
 
         return ScoreResult({
@@ -589,5 +758,6 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
             "risk_score": risk_score,
             "risk_penalties": total_penalty,
             "trade_action": trade_action,
-            "raw_net_score": net_directional_score
+            "raw_net_score": net_directional_score,
+            "math_conflict": math_conflict
         })
