@@ -1,5 +1,16 @@
+import os
+import sys
 import asyncio
 import time
+
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../python')))
+
 from core.models import FinalTradeDecision
 from core.strategy_router import StrategyProfile
 from core.deterministic_guard import DeterministicGuard
@@ -226,7 +237,7 @@ async def run_tests():
         }
     }
     breakdown_strong_bull = {
-        "bull_argument": 40.0,
+        "bull_argument": 45.0,
         "bear_argument": 5.0,
         "mtf_trend": 35.0
     }

@@ -641,6 +641,7 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
         raw_bull = 0.0
         raw_bear = 0.0
         raw_mtf = 0.0
+        raw_mtf_signed = 0.0
         
         if isinstance(breakdown, dict):
             for k, v in breakdown.items():
@@ -655,6 +656,7 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                     elif "bear" in key:
                         raw_bear += min(max_weights["bear_argument"], abs(val))
                     elif "mtf" in key or "trend" in key:
+                        raw_mtf_signed = val
                         raw_mtf += min(max_weights["mtf_trend"], abs(val))
                 except (ValueError, TypeError):
                     continue
@@ -678,12 +680,12 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                     elif tf_1h.get("trend") == "bullish" or tf_4h.get("trend") == "bullish":
                         mtf_bias = "BULLISH"
 
-        # If mtf_bias is still neutral, align trend contribution with the model's explicit trade direction
+        # If mtf_bias is still neutral, determine strictly by sign of mtf_trend
         if mtf_bias == "NEUTRAL":
-            if req_decision == "SHORT":
-                mtf_bias = "BEARISH"
-            elif req_decision == "LONG":
+            if raw_mtf_signed > 0:
                 mtf_bias = "BULLISH"
+            elif raw_mtf_signed < 0:
+                mtf_bias = "BEARISH"
 
         bull_mtf_contrib = raw_mtf if mtf_bias == "BULLISH" else 0.0
         bear_mtf_contrib = raw_mtf if mtf_bias == "BEARISH" else 0.0
@@ -695,23 +697,23 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
         # Separate directional check from raw score numbers
         math_conflict = False
         if req_decision == "SHORT":
-            if total_bull > total_bear + 20.0:
+            if total_bull >= total_bear:
                 math_conflict = True
-                self.logger.warning(f"[{self.name}] Math hallucination: LLM proposed SHORT but net score is Bullish ({total_bull} vs {total_bear}).")
+                self.logger.warning(f"[{self.name}] Math hallucination: LLM proposed SHORT but net score is Bullish/Neutral ({total_bull} vs {total_bear}).")
                 calculated_decision = "HOLD"
                 directional_confidence = 0
             else:
                 calculated_decision = "SHORT"
-                directional_confidence = min(100, max(0, int(total_bear if total_bear > 0 else abs(net_directional_score))))
+                directional_confidence = min(100, max(0, int(total_bear - total_bull)))
         elif req_decision == "LONG":
-            if total_bear > total_bull + 20.0:
+            if total_bear >= total_bull:
                 math_conflict = True
-                self.logger.warning(f"[{self.name}] Math hallucination: LLM proposed LONG but net score is Bearish ({total_bear} vs {total_bull}).")
+                self.logger.warning(f"[{self.name}] Math hallucination: LLM proposed LONG but net score is Bearish/Neutral ({total_bear} vs {total_bull}).")
                 calculated_decision = "HOLD"
                 directional_confidence = 0
             else:
                 calculated_decision = "LONG"
-                directional_confidence = min(100, max(0, int(total_bull if total_bull > 0 else abs(net_directional_score))))
+                directional_confidence = min(100, max(0, int(total_bull - total_bear)))
         else: # HOLD
             calculated_decision = "HOLD"
             directional_confidence = min(100, max(0, int(abs(net_directional_score))))

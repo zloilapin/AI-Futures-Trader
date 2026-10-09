@@ -17,7 +17,7 @@ class MarketDataService:
         self._oi_history = self._load_oi_history()
 
         from core.config import config
-        self.is_nado = config.NADO_LIVE_TRADING_ENABLED or config.TRADING_ENGINE == "NADO"
+        self.is_nado = bool(config.NADO_LIVE_TRADING_ENABLED or getattr(config, "TRADING_ENGINE", "NADO") == "NADO")
         self.nado_client = nado_client
         self.product_map = {}
         if self.is_nado:

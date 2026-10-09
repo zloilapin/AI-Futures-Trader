@@ -418,3 +418,65 @@ def test_atr_reconciliation_and_recovery_safety():
     # Must suspend dynamic SL movement to protect native exchange order
     assert res["new_sl"] is None
     assert "требует сверки ATR" in res["reasoning"]
+
+def test_trading_engine_config_fallback():
+    """Verifies that TRADING_ENGINE defaults to NADO and MarketDataService is_nado flag adheres to it."""
+    from core.config import config
+    from services.market_data_service import MarketDataService
+
+    assert hasattr(config, "TRADING_ENGINE")
+    assert config.TRADING_ENGINE == "NADO"
+
+    mock_logger = MagicMock()
+    with patch("core.config.config.NADO_LIVE_TRADING_ENABLED", False):
+        with patch.object(config, "TRADING_ENGINE", "NADO"):
+            service = MarketDataService(logger=mock_logger, nado_client=MagicMock())
+            assert service.is_nado is True
+
+        with patch.object(config, "TRADING_ENGINE", "KRAKEN"):
+            service_kraken = MarketDataService(logger=mock_logger, nado_client=MagicMock())
+            assert service_kraken.is_nado is False
+
+def test_ceo_score_net_conviction_and_hallucination_override():
+    """Verifies that CEO score calculates pure net conviction and overrides math hallucinations to HOLD."""
+    from agents.ceo_agent import CEOAgent
+
+    logger = MagicMock()
+    ceo = CEOAgent(logger, MagicMock(), MagicMock())
+
+    # Case 1: Pure net conviction Long (Bull 50, Bear 10, MTF 20 -> total bull = 70, bear = 10 -> net = 60)
+    res = ceo._validate_and_compute_score("LONG", {
+        "bull_argument": 50,
+        "bear_argument": -10,
+        "mtf_trend": 20
+    })
+    decision, conviction = res
+    assert decision == "LONG"
+    assert conviction == 60
+    assert res["directional_confidence"] == 60
+    assert res["raw_net_score"] == 60.0
+
+    # Case 2: Pure net conviction Short (Bear 40, Bull 10, MTF -15 -> total bear = 55, bull = 10 -> net = 45)
+    res = ceo._validate_and_compute_score("SHORT", {
+        "bull_argument": 10,
+        "bear_argument": -40,
+        "mtf_trend": -15
+    })
+    decision, conviction = res
+    assert decision == "SHORT"
+    assert conviction == 45
+    assert res["directional_confidence"] == 45
+    assert res["raw_net_score"] == -45.0
+
+    # Case 3: Math hallucination override
+    # LLM proposed LONG, but bear score (40) > bull score (20) -> must override to HOLD with conviction 0
+    res = ceo._validate_and_compute_score("LONG", {
+        "bull_argument": 20,
+        "bear_argument": -40,
+        "mtf_trend": 10
+    })
+    decision, conviction = res
+    assert decision == "HOLD"
+    assert conviction == 0
+    assert res["directional_confidence"] == 0
+

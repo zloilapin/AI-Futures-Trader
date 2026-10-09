@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     
     LIVE_TRADING_ENABLED: bool = Field(default=False)
     NADO_LIVE_TRADING_ENABLED: bool = Field(default=False)
+    TRADING_ENGINE: str = Field(default="NADO")
     
     # Телеграм
     TELEGRAM_BOT_TOKEN: str = Field(default="")
