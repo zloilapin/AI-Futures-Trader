@@ -52,7 +52,7 @@ class StateStore:
         with cls._get_lock(filepath):
             try:
                 with open(temp_filepath, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=4, ensure_ascii=False)
+                    json.dump(data, f, indent=4, ensure_ascii=False, default=str)
                 
                 # Atomic replace
                 os.replace(temp_filepath, filepath)

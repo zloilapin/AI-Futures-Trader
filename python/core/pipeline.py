@@ -484,7 +484,8 @@ class TradingPipeline:
                 print(f"🐻 Bear Thesis: {bear_summary}")
                 
                 self.services.logger.info(f"[Stage 4] CEO Agent (Judge) evaluates the debate and MTF trend for {symbol}...")
-                historical_context = self.agents.memory.get_recent_context(limit=3)
+                historical_context = self.agents.memory.get_recent_context(limit=3, symbol=symbol)
+                symbol_lessons = self.agents.reflector.get_lessons(limit=5, symbol=symbol)
                 
                 ceo_payload = {
                     "symbol": symbol,
@@ -498,7 +499,7 @@ class TradingPipeline:
                     "bear_thesis": bear_verdict,
                     "subordinate_analyst_reports": valid_reports,
                     "historical_context": historical_context,
-                    "past_lessons_learned": recent_lessons,
+                    "past_lessons_learned": symbol_lessons,
                     "indicators": market_data.get("indicators", {}),
                     "news_data": market_data.get("news_data", {}),
                     "price_data": market_data.get("price_data", {}),
@@ -871,6 +872,9 @@ class TradingPipeline:
                     print("--------------------------------------------")
                     await self.services.tg_sender.send_message(closed_msg)
                     await self.services.tg_sender.broadcast_to_channel(closed_msg)
+                    pnl_val = float(closed.get("pnl_usd", 0.0) or 0.0)
+                    out_tag = "WIN" if pnl_val > 0.001 else ("LOSS" if pnl_val < -0.001 else "BREAK_EVEN")
+                    tracker.record_closed_trade(out_tag, pnl_val)
                     asyncio.create_task(safe_reflect(self.agents.reflector, closed, market_data))
                 
                 # СТАДИЯ 1.6: SENTINEL AGENT (PHASE 2) - DETERMINISTIC RISK CONTROL

@@ -29,15 +29,20 @@ class MemoryManager:
         """
         Сохраняет результаты полного торгового цикла (отчеты аналитиков, решение CEO, риск-менеджмент) в JSON.
         """
+        if not isinstance(cycle_data, dict):
+            return
+
         try:
             from core.state_store import StateStore
-            sym = str(cycle_data.get("symbol", "")).replace('/', '-').replace(':', '_')
+            sym = str(cycle_data.get("symbol", "")).replace('/', '-').split('-')[0].upper()
             suffix = f"_{sym}" if sym else ""
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:19]
             filename = os.path.join(self.storage_path, f"cycle_{timestamp}{suffix}.json")
             
+            if "timestamp" not in cycle_data:
+                cycle_data["timestamp"] = datetime.now().isoformat()
+
             StateStore.save(filename, cycle_data)
-                
             self.logger.info(f"[{self.name}] Данные цикла успешно сохранены в {filename}")
             
             # File Rotation: keep only the latest 100 cycle logs
@@ -52,24 +57,65 @@ class MemoryManager:
         except Exception as e:
             self.logger.error(f"[{self.name}] Ошибка при сохранении данных цикла: {e}")
 
-    def get_recent_context(self, limit: int = 5) -> List[Dict[str, Any]]:
+    def get_recent_context(self, limit: int = 5, symbol: str = None, compact: bool = True) -> List[Dict[str, Any]]:
         """
-        Извлекает данные последних N циклов. Эту функцию будет вызывать main.py, 
+        Извлекает данные последних N циклов. Эту функцию вызывает pipeline, 
         чтобы передать историю сделок в CEO_Agent перед принятием нового решения.
+        Поддерживает приоритизацию по конкретному символу и компактную форму для экономии токенов.
         """
         context = []
         try:
-            # Ищем только json файлы циклов в папке
+            if not os.path.exists(self.storage_path):
+                return []
+
             files = [f for f in os.listdir(self.storage_path) if f.startswith('cycle_') and f.endswith('.json')]
-            # Сортируем от самых новых к старым (т.к. в имени дата и время)
-            files.sort(reverse=True)
+            files.sort(reverse=True) # Newest first
             
-            # Читаем только последние `limit` файлов
             from core.state_store import StateStore
-            for file in files[:limit]:
+            candidate_files = []
+
+            if symbol:
+                base_sym = str(symbol).replace('/', '-').split('-')[0].upper()
+                matching_files = [f for f in files if f"_{base_sym}." in f or f"_{base_sym}_" in f]
+                other_files = [f for f in files if f not in matching_files]
+                candidate_files = matching_files[:limit]
+                if len(candidate_files) < limit:
+                    candidate_files.extend(other_files[:limit - len(candidate_files)])
+            else:
+                candidate_files = files[:limit]
+
+            for file in candidate_files:
                 filepath = os.path.join(self.storage_path, file)
                 data = StateStore.load(filepath)
-                if data:
+                if not data or not isinstance(data, dict):
+                    continue
+
+                if compact:
+                    ceo_dec = data.get("ceo_decision")
+                    compact_dec = {
+                        "decision": ceo_dec.get("decision"),
+                        "conviction": ceo_dec.get("conviction"),
+                        "trade_action": ceo_dec.get("trade_action"),
+                        "reasoning": str(ceo_dec.get("reasoning", ""))[:200]
+                    } if isinstance(ceo_dec, dict) else ceo_dec
+
+                    risk_dec = data.get("risk_assessment")
+                    compact_risk = {
+                        "approved": risk_dec.get("approved"),
+                        "trade_action": risk_dec.get("trade_action"),
+                        "rejection_reason": risk_dec.get("rejection_reason")
+                    } if isinstance(risk_dec, dict) else risk_dec
+
+                    compact_cycle = {
+                        "symbol": data.get("symbol"),
+                        "status": data.get("status"),
+                        "timestamp": data.get("timestamp", file.replace("cycle_", "").replace(".json", "")[:15]),
+                        "ceo_decision": compact_dec,
+                        "risk_assessment": compact_risk,
+                        "execution_result": data.get("execution_result")
+                    }
+                    context.append(compact_cycle)
+                else:
                     context.append(data)
                     
             return context
