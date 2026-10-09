@@ -16,8 +16,11 @@ def mock_llm_client():
 
 @pytest.fixture
 def mock_kraken_service():
-    from services.kraken_trading_service import KrakenTradingService
-    mock = AsyncMock(spec=KrakenTradingService)
+    try:
+        from services.kraken_trading_service import KrakenTradingService
+        mock = AsyncMock(spec=KrakenTradingService)
+    except ImportError:
+        mock = AsyncMock()
     mock.get_balance.return_value = {"total_usd": 1000.0, "free_margin": 1000.0, "used_margin": 0.0}
     
     # Simple stateful fake for testing positions

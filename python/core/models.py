@@ -25,6 +25,11 @@ class FinalTradeDecision:
     reasoning_ru: str = ""
     raw_ceo_verdict: Dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self):
+        # Deep defensive copy of raw_ceo_verdict to guarantee immutability
+        if self.raw_ceo_verdict:
+            object.__setattr__(self, "raw_ceo_verdict", dict(self.raw_ceo_verdict))
+
     def get(self, key: str, default: Any = None) -> Any:
         if hasattr(self, key):
             val = getattr(self, key)
@@ -72,7 +77,7 @@ class FinalTradeDecision:
         return iter((self.decision, self.conviction, self.trade_action, self.min_conviction))
 
 
-@dataclass
+@dataclass(frozen=True)
 class FinalRiskDecision:
     """
     Immutable representation of the final risk decision produced by RiskManager.

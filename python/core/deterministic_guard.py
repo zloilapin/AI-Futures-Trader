@@ -68,12 +68,11 @@ class DeterministicGuard:
                 reasoning_en = f"{reasoning_en}\n\n{guard_msg}".strip()
 
         # 2. Volatility Momentum & Breakout: Confirmed impulse breakdown/breakout enters immediately
+        # Only true if market indicators genuinely confirm a breakout with volume spike;
+        # strategy name alone NEVER justifies overriding WAIT_FOR_PULLBACK.
         is_confirmed_breakout = False
         breakout_reason = ""
-        if strategy_mode in ["BREAKOUT", "VOLATILITY_MOMENTUM"]:
-            is_confirmed_breakout = True
-            breakout_reason = f"стратегия {strategy_mode}"
-        elif market_data and decision in ["LONG", "SHORT"]:
+        if market_data and decision in ["LONG", "SHORT"]:
             indicators = market_data.get("indicators", {})
             donchian_high = float(indicators.get("donchian_high") or 0.0)
             donchian_low = float(indicators.get("donchian_low") or 0.0)
@@ -88,11 +87,14 @@ class DeterministicGuard:
 
         if is_confirmed_breakout and trade_action == "WAIT_FOR_PULLBACK" and conviction >= min_conv and decision in ["LONG", "SHORT"]:
             trade_action = "ENTER"
-            vm_msg = f"Подтвержденный импульс и пробой ({breakout_reason}). Вход по стратегии BREAKOUT без ожидания отката."
+            vm_msg = f"Подтвержденный импульс и пробой ({breakout_reason}). Вход по стратегии {strategy_mode} без ожидания отката."
             try:
                 print(f"⚡ [Breakout Override] {symbol}: {vm_msg}")
-            except UnicodeEncodeError:
-                print(f"[Breakout Override] {symbol}: {vm_msg}")
+            except (UnicodeEncodeError, Exception):
+                try:
+                    print(f"[Breakout Override] {symbol}: {vm_msg.encode('ascii', errors='replace').decode('ascii')}")
+                except Exception:
+                    pass
             if logger:
                 logger.info(f"[System_Core] {vm_msg}")
 
@@ -147,6 +149,38 @@ class DeterministicGuard:
                 print(f"⏸️ Пропуск {symbol}. {guard_reason}")
                 if logger:
                     logger.info(f"[System_Core] {guard_reason}")
+
+        # 5. Anti-Whipsaw & Extreme Extension Guard (Prevent 'Shorting the Bottom' / 'Longing the Top')
+        if is_actionable and market_data and strategy_mode == "TREND_FOLLOWING":
+            indicators = market_data.get("indicators", {})
+            rsi = float(indicators.get("rsi_14") or 50.0)
+            bb_pos = float(indicators.get("bb_pos") or 50.0)
+            
+            if decision == "SHORT":
+                if rsi < 35.0 or bb_pos < 10.0:
+                    is_actionable = False
+                    guard_status = "BLOCKED"
+                    rejection_tag = "EXTREME_EXTENSION_VETO"
+                    guard_reason = f"Анти-распил: Запрет SHORT в перепроданный рынок (RSI={rsi:.1f}, bb_pos={bb_pos:.1f}%). Риск отскока слишком высок."
+                    try:
+                        print(f"⏸️ Пропуск {symbol}. {guard_reason}")
+                    except UnicodeEncodeError:
+                        pass
+                    if logger:
+                        logger.info(f"[System_Core] {guard_reason}")
+                        
+            elif decision == "LONG":
+                if rsi > 65.0 or bb_pos > 90.0:
+                    is_actionable = False
+                    guard_status = "BLOCKED"
+                    rejection_tag = "EXTREME_EXTENSION_VETO"
+                    guard_reason = f"Анти-распил: Запрет LONG в перекупленный рынок (RSI={rsi:.1f}, bb_pos={bb_pos:.1f}%). Риск коррекции слишком высок."
+                    try:
+                        print(f"⏸️ Пропуск {symbol}. {guard_reason}")
+                    except UnicodeEncodeError:
+                        pass
+                    if logger:
+                        logger.info(f"[System_Core] {guard_reason}")
 
         # Synchronize back to ceo_proposal dict for backward compatibility
         if symbol:

@@ -146,10 +146,10 @@ def test_strategy_router_counter_trend_warning_allows_impulse_short():
     assert profile.direction_bias == "SHORT"
     assert "Импульс/откат по тренду" in profile.reasoning
 
-def test_deterministic_guard_breakout_pullback_override():
+def test_deterministic_guard_breakout_pullback_override_confirmed():
     """
     Verifies that for BREAKOUT setups, DeterministicGuard converts WAIT_FOR_PULLBACK
-    to ENTER so the trade catches early fast momentum.
+    to ENTER ONLY WHEN market indicators confirm the Donchian breakdown + volume surge.
     """
     strategy_profile = StrategyProfile(True, "BREAKOUT", "SHORT", "Donchian breakdown")
     ceo_proposal = {
@@ -160,6 +160,13 @@ def test_deterministic_guard_breakout_pullback_override():
         "entry_quality": 60,
         "reasoning": "Breakdown underway"
     }
+    market_data = {
+        "price_data": {"current_price": 2500.0},
+        "indicators": {
+            "donchian_low": 2550.0,
+            "volume_spike_pct": 130.0
+        }
+    }
     
     mock_risk = MagicMock(spec=RiskManager)
     mock_risk._get_profile_rules.return_value = {"min_conviction": 65}
@@ -168,9 +175,51 @@ def test_deterministic_guard_breakout_pullback_override():
         strategy_profile=strategy_profile,
         ceo_proposal=ceo_proposal,
         profile="BALANCED",
-        risk_manager=mock_risk
+        risk_manager=mock_risk,
+        market_data=market_data,
+        symbol="ETH-USD"
     )
     
     assert res.decision == "SHORT"
     assert res.trade_action == "ENTER"
     assert res.is_actionable is True
+
+def test_deterministic_guard_breakout_unconfirmed_preserves_pullback():
+    """
+    Verifies that for BREAKOUT setups WITHOUT confirmed Donchian break / volume surge,
+    DeterministicGuard PRESERVES WAIT_FOR_PULLBACK and does not force entry.
+    """
+    strategy_profile = StrategyProfile(True, "BREAKOUT", "SHORT", "Donchian setup")
+    ceo_proposal = {
+        "decision": "SHORT",
+        "conviction": 75,
+        "trade_action": "WAIT_FOR_PULLBACK",
+        "directional_confidence": 80,
+        "entry_quality": 60,
+        "reasoning": "Breakdown pending"
+    }
+    # Market data is inside the range (no breakdown)
+    market_data = {
+        "price_data": {"current_price": 2600.0},
+        "indicators": {
+            "donchian_low": 2550.0,  # Price (2600) is ABOVE donchian low (2550)
+            "volume_spike_pct": 30.0
+        }
+    }
+    
+    mock_risk = MagicMock(spec=RiskManager)
+    mock_risk._get_profile_rules.return_value = {"min_conviction": 65}
+    
+    res = DeterministicGuard.evaluate(
+        strategy_profile=strategy_profile,
+        ceo_proposal=ceo_proposal,
+        profile="BALANCED",
+        risk_manager=mock_risk,
+        market_data=market_data,
+        symbol="ETH-USD"
+    )
+    
+    assert res.decision == "SHORT"
+    assert res.trade_action == "WAIT_FOR_PULLBACK"
+    assert res.is_actionable is False
+    assert res.guard_status == "PULLBACK_WATCHLIST"

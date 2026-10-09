@@ -243,7 +243,13 @@ class NadoTradingService(BaseTradingService):
                         "pnl": net_pnl,
                         "amount": base_amount,
                         "_subaccount": sa.subaccount,
-                        "_product_id": product_id
+                        "_product_id": product_id,
+                        "highest_price": float(local_pos.get("highest_price", entry_price)),
+                        "lowest_price": float(local_pos.get("lowest_price", entry_price)),
+                        "protection_state": local_pos.get("protection_state", "PROTECTED"),
+                        "atr_reference": float(local_pos.get("atr_reference", 0.0)),
+                        "open_time": float(local_pos.get("open_time", 0.0)),
+                        "original_thesis": local_pos.get("original_thesis", "")
                     })
             
             self._pos_cache = active_list
@@ -1094,7 +1100,7 @@ class NadoTradingService(BaseTradingService):
                         prod_id = pos.get("_product_id") or self.product_map.get(base_symbol) or self.product_map.get(canonical_symbol)
                         if prod_id is not None:
                             tracked["product_id"] = prod_id
-                        if tracked.get("sl_price", 0.0) == 0.0 or tracked.get("tp_price", 0.0) == 0.0:
+                        if tracked.get("sl_price", 0.0) == 0.0 or tracked.get("tp_price", 0.0) == 0.0 or float(tracked.get("atr_reference", 0.0)) <= 0:
                             saved_positions = self._load_positions()
                             saved_p = saved_positions.get(canonical_symbol) or saved_positions.get(base_symbol) or {}
                             if tracked.get("sl_price", 0.0) == 0.0 and saved_p.get("sl_price", 0.0) > 0:
@@ -1103,6 +1109,15 @@ class NadoTradingService(BaseTradingService):
                             if tracked.get("tp_price", 0.0) == 0.0 and saved_p.get("tp_price", 0.0) > 0:
                                 tracked["tp_price"] = float(saved_p["tp_price"])
                                 logger.info(f"[NadoTradingService] 💾 Restored TP {tracked['tp_price']:.4f} from disk for tracked {canonical_symbol}.")
+                            if float(tracked.get("atr_reference", 0.0)) <= 0 and float(saved_p.get("atr_reference", 0.0)) > 0:
+                                tracked["atr_reference"] = float(saved_p["atr_reference"])
+                                logger.info(f"[NadoTradingService] 💾 Restored ATR {tracked['atr_reference']:.4f} from disk for tracked {canonical_symbol}.")
+                            if "highest_price" not in tracked or tracked.get("highest_price", 0.0) <= 0:
+                                tracked["highest_price"] = float(saved_p.get("highest_price", tracked.get("entry_price", 0.0)))
+                            if "lowest_price" not in tracked or tracked.get("lowest_price", 0.0) <= 0:
+                                tracked["lowest_price"] = float(saved_p.get("lowest_price", tracked.get("entry_price", 0.0)))
+                            if "protection_state" not in tracked:
+                                tracked["protection_state"] = saved_p.get("protection_state", "PROTECTED")
                     continue
 
                 logger.info(f"[NadoTradingService] ♻️ Restored active position on {canonical_symbol} after restart.")
@@ -1246,9 +1261,10 @@ class NadoTradingService(BaseTradingService):
 
                 saved_positions = self._load_positions()
                 saved_p = saved_positions.get(canonical_symbol) or saved_positions.get(base_symbol) or {}
-                highest_price = saved_p.get("highest_price", entry)
-                lowest_price = saved_p.get("lowest_price", entry)
+                highest_price = float(saved_p.get("highest_price", entry))
+                lowest_price = float(saved_p.get("lowest_price", entry))
                 protection_state = saved_p.get("protection_state", "PROTECTED")
+                atr_reference = float(saved_p.get("atr_reference", 0.0))
 
                 self.active_positions[canonical_symbol] = {
                     "direction": direction,
@@ -1261,7 +1277,7 @@ class NadoTradingService(BaseTradingService):
                     "highest_price": highest_price,
                     "lowest_price": lowest_price,
                     "protection_state": protection_state,
-                    "atr_reference": 0.0,
+                    "atr_reference": atr_reference,
                     "product_id": product_id,
                     "sender": self.default_subaccount_id,
                     "sl_digest": sl_digest,

@@ -20,18 +20,26 @@ async def run_tests():
     }
     risk_mgr = DummyRiskManager()
     
-    # 1.1 Strategy mode is BREAKOUT -> should override to ENTER
+    # 1.1 Strategy mode is BREAKOUT with confirmed Donchian break & volume -> should override to ENTER
+    market_data_breakout_long = {
+        "price_data": {"current_price": 2720.0},
+        "indicators": {
+            "donchian_high": 2700.0,
+            "volume_spike_pct": 140.0
+        }
+    }
     res = DeterministicGuard.evaluate(
         strategy_profile=profile,
         ceo_proposal=dict(ceo_proposal),
         profile="BALANCED",
         risk_manager=risk_mgr,
+        market_data=market_data_breakout_long,
         symbol="ETH-USD"
     )
     assert res.decision == "LONG"
     assert res.trade_action == "ENTER", f"Expected ENTER, got {res.trade_action}"
     assert res.is_actionable is True, f"Expected actionable True, got {res.is_actionable}"
-    print("✅ Strategy BREAKOUT overrides WAIT_FOR_PULLBACK to ENTER successfully.")
+    print("✅ Confirmed BREAKOUT overrides WAIT_FOR_PULLBACK to ENTER successfully.")
 
     # 1.2 Strategy mode is TREND_FOLLOWING but indicators have confirmed Donchian breakout + volume surge
     tf_profile = StrategyProfile(True, "TREND_FOLLOWING", "SHORT", "Trend following test")

@@ -574,13 +574,16 @@ class TradingPipeline:
                     atr_value=atr_14_val
                 )
 
+                execution_status = "SUCCESS" if trade_success else "REJECTED_BY_EXCHANGE"
                 if not trade_success:
                     print(f"❌ Ошибка открытия позиции на бирже для {symbol}.")
                     self.services.logger.error(f"❌ Status: REJECTED BY EXCHANGE ({symbol})")
-                    risk_verdict["execution_status"] = "REJECTED_BY_EXCHANGE"
+                    if isinstance(risk_verdict, dict):
+                        risk_verdict["execution_status"] = execution_status
                     tracker.record_execution_failed()
                 else:
-                    risk_verdict["execution_status"] = "SUCCESS"
+                    if isinstance(risk_verdict, dict):
+                        risk_verdict["execution_status"] = execution_status
                     tracker.record_trade()
             else:
                 self.services.logger.error(f"❌ Status: VETOED BY RISK MANAGER ({risk_verdict.get('reasoning')})")

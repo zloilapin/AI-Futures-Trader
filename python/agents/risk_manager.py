@@ -349,6 +349,17 @@ class RiskManager(BaseAgent):
             unit_net_loss = distance_to_sl + unit_entry_fee + unit_sl_exit_fee + unit_funding_cost
             realized_rr = unit_net_profit / unit_net_loss if unit_net_loss > 0 else 0
             
+            # Strict Risk/Reward Floor for Mean Reversion:
+            # If capping TP to the mean resulted in net RR < 1.0, reject the trade to preserve positive expectation.
+            if strategy_mode == "MEAN_REVERSION" and realized_rr < 1.0:
+                msg = f"Mean Reversion net RR ({realized_rr:.2f}) is below minimum acceptable 1.00:1 ratio after TP mean cap and fees."
+                self.logger.warning(f"[{self.name}] ❌ POOR_RISK_REWARD VETO: {msg}")
+                return {
+                    "approved": False,
+                    "veto_category": "POOR_RISK_REWARD",
+                    "reasoning": msg
+                }
+            
             # --- Expectancy Gate with Hysteresis (N >= 30 trades) ---
             win_count = portfolio_data.get("win_count", 0)
             loss_count = portfolio_data.get("loss_count", 0)
