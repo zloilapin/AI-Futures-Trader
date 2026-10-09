@@ -25,11 +25,13 @@ class NadoTradingService(BaseTradingService):
         self.product_map: Dict[str, int] = {}
         self.default_subaccount_id = None
         
-        # Stats tracking
+        # Stats & Cooldown tracking
         self.win_count = 0
         self.loss_count = 0
         self.recent_streak = []
         self._initial_balance = None
+        self.cooldown_until = 0.0
+        self._last_cooldown_processed_len = 0
         self._load_state()
         
         # NOTE: self.initialize(nado_client) MUST be awaited explicitly after instantiation.
@@ -642,6 +644,10 @@ class NadoTradingService(BaseTradingService):
             self.loss_count = int(state["loss_count"])
         if "recent_streak" in state:
             self.recent_streak = state["recent_streak"]
+        if "cooldown_until" in state:
+            self.cooldown_until = float(state["cooldown_until"])
+        if "_last_cooldown_processed_len" in state:
+            self._last_cooldown_processed_len = int(state["_last_cooldown_processed_len"])
 
     def _save_state(self):
         from core.state_store import StateStore
@@ -650,8 +656,31 @@ class NadoTradingService(BaseTradingService):
             "initial_balance": self._initial_balance,
             "win_count": self.win_count,
             "loss_count": self.loss_count,
-            "recent_streak": self.recent_streak
+            "recent_streak": self.recent_streak,
+            "cooldown_until": getattr(self, "cooldown_until", 0.0),
+            "_last_cooldown_processed_len": getattr(self, "_last_cooldown_processed_len", 0)
         })
+
+    def _update_streak_and_cooldown(self, outcome: str):
+        import time
+        if outcome == "WIN":
+            self.win_count += 1
+            self.recent_streak.append("WIN")
+        elif outcome == "LOSS":
+            self.loss_count += 1
+            self.recent_streak.append("LOSS")
+        self.recent_streak = self.recent_streak[-10:]
+
+        # Immediate cooldown activation upon 3 consecutive losses
+        if len(self.recent_streak) >= 3 and self.recent_streak[-3:] == ["LOSS", "LOSS", "LOSS"]:
+            if getattr(self, "_last_cooldown_processed_len", 0) != len(self.recent_streak):
+                self.cooldown_until = time.time() + 3600
+                self._last_cooldown_processed_len = len(self.recent_streak)
+                logger.warning(
+                    f"[NadoTradingService] 🛑 Зафиксировано 3 убытка подряд! "
+                    f"Автоматический перерыв на 1 час (до {time.strftime('%H:%M:%S', time.localtime(self.cooldown_until))})."
+                )
+        self._save_state()
 
     def _save_positions(self):
         """Persists active positions and their SL/TP targets to disk."""
@@ -819,15 +848,12 @@ class NadoTradingService(BaseTradingService):
                 self._save_positions()
                 
                 if target_pnl > 0.001:
-                    self.win_count += 1
-                    self.recent_streak.append("WIN")
+                    self._update_streak_and_cooldown("WIN")
                 elif target_pnl < -0.001:
-                    self.loss_count += 1
-                    self.recent_streak.append("LOSS")
+                    self._update_streak_and_cooldown("LOSS")
                 else:
                     logger.info(f"[NadoTradingService] ℹ️ Position closed at Breakeven (PnL: ${target_pnl:.2f}). Streak not modified.")
-                self.recent_streak = self.recent_streak[-10:]
-                self._save_state()
+                    self._save_state()
                     
                 closed_reports.append({
                     "symbol": symbol,
@@ -927,15 +953,12 @@ class NadoTradingService(BaseTradingService):
                         
                     pnl = target_pos["pnl"] if target_pos else 0.0
                     if pnl > 0.001:
-                        self.win_count += 1
-                        self.recent_streak.append("WIN")
+                        self._update_streak_and_cooldown("WIN")
                     elif pnl < -0.001:
-                        self.loss_count += 1
-                        self.recent_streak.append("LOSS")
+                        self._update_streak_and_cooldown("LOSS")
                     else:
                         logger.info(f"[NadoTradingService] ℹ️ Force close at breakeven/near-zero PnL (${pnl:.4f}). Streak unchanged.")
-                    self.recent_streak = self.recent_streak[-10:]
-                    self._save_state()
+                        self._save_state()
                         
                     return True, pnl
                 except Exception as close_e:

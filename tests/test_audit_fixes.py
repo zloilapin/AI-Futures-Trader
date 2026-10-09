@@ -243,3 +243,60 @@ def test_nado_active_positions_preserves_atr_and_extremes():
     assert pos["lowest_price"] == 59900.0
     assert pos["protection_state"] == "BREAK_EVEN"
     assert pos["original_thesis"] == "Test Thesis"
+
+def test_cooldown_activation_and_persistence(tmp_path):
+    """Verifies that 3 consecutive losses activate cooldown immediately and persist across restarts."""
+    from services.nado_trading_service import NadoTradingService
+    import time
+    
+    # Use temporary file for isolated state testing
+    state_file = str(tmp_path / "nado_state.json")
+    with patch("core.state_store.StateStore.load", return_value={}):
+        with patch("core.state_store.StateStore.save") as mock_save:
+            service = NadoTradingService()
+            service.recent_streak = ["WIN", "LOSS", "LOSS"]
+            service._last_cooldown_processed_len = 0
+            
+            # 3rd loss occurs
+            service._update_streak_and_cooldown("LOSS")
+            
+            assert len(service.recent_streak) == 4
+            assert service.recent_streak[-3:] == ["LOSS", "LOSS", "LOSS"]
+            # Cooldown must be activated for ~1 hour
+            assert service.cooldown_until > time.time() + 3500
+            assert service._last_cooldown_processed_len == 4
+            
+            # Verify persistence call
+            mock_save.assert_called()
+            saved_dict = mock_save.call_args[0][1]
+            assert "cooldown_until" in saved_dict
+            assert saved_dict["_last_cooldown_processed_len"] == 4
+
+    # Test restart scenario: when cooldown expired, restart does NOT re-trigger
+    past_cooldown_state = {
+        "recent_streak": ["LOSS", "LOSS", "LOSS", "LOSS", "LOSS"],
+        "cooldown_until": time.time() - 100,  # Expired in past
+        "_last_cooldown_processed_len": 5
+    }
+    with patch("core.state_store.StateStore.load", return_value=past_cooldown_state):
+        restarted_service = NadoTradingService()
+        assert restarted_service._last_cooldown_processed_len == 5
+        assert restarted_service.cooldown_until < time.time()
+        
+        # Verify pipeline does not re-trigger cooldown for past streak
+        from core.pipeline import TradingPipeline
+        pipeline = TradingPipeline(MagicMock(), MagicMock(), "test")
+        pipeline.services.trading_service = restarted_service
+        
+        # Pipeline check
+        now_ts = time.time()
+        cooldown_active = now_ts < restarted_service.cooldown_until
+        assert cooldown_active is False
+        
+        # Streak length equals _last_cooldown_processed_len -> no re-trigger
+        should_retrigger = (
+            len(restarted_service.recent_streak) >= 3 and 
+            restarted_service.recent_streak[-3:] == ["LOSS", "LOSS", "LOSS"] and
+            getattr(restarted_service, "_last_cooldown_processed_len", 0) != len(restarted_service.recent_streak)
+        )
+        assert should_retrigger is False

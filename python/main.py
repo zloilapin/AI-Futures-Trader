@@ -195,6 +195,9 @@ async def main():
                 while True:
                     try:
                         await asyncio.sleep(radar_interval)
+                        # Do not wake pipeline if trading cooldown is active
+                        if time.time() < getattr(trading_service, "cooldown_until", 0.0):
+                            continue
                         if not getattr(pipeline, "_cycle_running", False):
                             # 1. Pullback Watchlist check (highest priority: entry point ready)
                             pb_triggered, pb_sym, pb_reason = await pipeline.check_pullback_watchlist()

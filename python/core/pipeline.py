@@ -144,11 +144,14 @@ class TradingPipeline:
         if force_scan:
             print(f"⚡ [ForceScan] Ручной запуск /scan ({time_str}).")
 
-        # Проверка Cooldown после серии убытков
-        cooldown_until = getattr(self.services.trading_service, "cooldown_until", 0)
+        # 1. Синхронизация и проверка TP/SL открытых позиций ПЕРЕД проверкой кулдауна
+        await self.run_sentinel_checks()
+
+        # 2. Проверка Cooldown после серии убытков
+        cooldown_until = getattr(self.services.trading_service, "cooldown_until", 0.0)
         now_ts = time.time()
         if now_ts < cooldown_until:
-            remain_min = int((cooldown_until - now_ts) / 60)
+            remain_min = max(1, int((cooldown_until - now_ts) / 60))
             print(f"🛑 [Cooldown] Бот на паузе после 3 убытков подряд. Осталось {remain_min} мин.")
             self.services.logger.info(f"[System_Core] Cooldown active. {remain_min} min remaining.")
             if not force_scan:
@@ -159,13 +162,12 @@ class TradingPipeline:
             if getattr(self.services.trading_service, "_last_cooldown_processed_len", 0) != len(self.services.trading_service.recent_streak):
                 self.services.trading_service.cooldown_until = time.time() + 3600
                 self.services.trading_service._last_cooldown_processed_len = len(self.services.trading_service.recent_streak)
+                if hasattr(self.services.trading_service, "_save_state"):
+                    self.services.trading_service._save_state()
                 print(f"🛑 [Cooldown Activated] Зафиксировано 3 убытка подряд! Торговля приостановлена на 1 час.")
                 self.services.logger.info("[System_Core] 3 consecutive losses detected. 1 hour cooldown activated.")
                 if not force_scan:
                     return
-
-        # Синхронизация и проверка лимита открытых позиций ПЕРЕД анализом рынка
-        await self.run_sentinel_checks()
 
         max_positions = getattr(config, "MAX_CONCURRENT_POSITIONS", 2)
         active_pos_count = len(self.services.trading_service.active_positions)
