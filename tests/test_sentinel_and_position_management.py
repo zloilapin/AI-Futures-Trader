@@ -272,3 +272,36 @@ def test_nado_sync_with_exchange_extremes_initialization():
                     # For SHORT SOL: lowest_price must be at most entry (150)
                     sol_tracked = service.active_positions["SOL-USD"]
                     assert sol_tracked["lowest_price"] <= 150.0
+
+
+def test_nado_sync_with_exchange_unprotected_sl_alert():
+    """Verifies that an emergency Telegram alert is dispatched when a restored position lacks SL protection."""
+    with patch("core.state_store.StateStore.load", return_value={}):
+        service = NadoTradingService()
+        service.is_connected = True
+        service.default_subaccount_id = "0x1234"
+        service.product_map = {"BTC": 1, "BTC-USD": 1}
+        service.client = MagicMock()
+        service.wallet = MagicMock()
+        service.wallet.get_address.return_value = "0xOwner"
+
+        mock_positions = [
+            {"symbol": "BTC-USD", "direction": "LONG", "entry_price": 60000.0, "size_usd": 100.0, "_product_id": 1}
+        ]
+
+        # No SL saved on disk and no trigger orders on-chain
+        with patch.object(service, "get_active_positions", new_callable=AsyncMock, return_value=mock_positions), \
+             patch.object(service, "_load_positions", return_value={}), \
+             patch.object(service, "_fetch_trigger_orders", new_callable=AsyncMock, return_value=[]), \
+             patch("services.telegram_service.TelegramService.send_message", new_callable=AsyncMock) as mock_send_tg:
+            asyncio.run(service.sync_with_exchange())
+
+            assert "BTC-USD" in service.active_positions
+            assert service.active_positions["BTC-USD"]["sl_price"] == 0.0
+            # Must trigger critical alert to Telegram
+            assert mock_send_tg.called is True
+            alert_msg = mock_send_tg.call_args[0][0]
+            assert "CRITICAL ALERT" in alert_msg
+            assert "BTC-USD" in alert_msg
+            assert "НЕ ИМЕЕТ подтвержденного Stop-Loss" in alert_msg
+

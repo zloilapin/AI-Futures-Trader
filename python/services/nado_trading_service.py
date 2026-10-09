@@ -1368,6 +1368,19 @@ class NadoTradingService(BaseTradingService):
                                 f"could not be found or restored after restart! Position may be unprotected "
                                 f"from software side. Manual intervention or risk reconciliation required."
                             )
+                            try:
+                                from services.telegram_service import TelegramService
+                                asyncio.create_task(
+                                    TelegramService().send_message(
+                                        f"🚨 *CRITICAL ALERT | NADO DEX*\n\n"
+                                        f"⚠️ Позиция по *{canonical_symbol}* обнаружена на бирже после перезапуска, "
+                                        f"но *НЕ ИМЕЕТ подтвержденного Stop-Loss*!\n"
+                                        f"💵 Вход: `${entry:,.4f}`\n\n"
+                                        f"Используйте `/positions` для проверки или ручного закрытия."
+                                    )
+                                )
+                            except Exception:
+                                pass
                             
                         if tp_price == 0.0 or sl_price == 0.0:
                             logger.warning(f"[NadoTradingService] ⚠️ Triggers for {canonical_symbol} (TP: {tp_price}, SL: {sl_price}).")
@@ -1648,6 +1661,23 @@ class NadoTradingService(BaseTradingService):
                                      (direction == "SHORT" and sl_price > 0 and current_price >= sl_price)
                             hit_tp = (direction == "LONG" and tp_price > 0 and current_price >= tp_price) or \
                                      (direction == "SHORT" and tp_price > 0 and current_price <= tp_price)
+
+                            # Safety check: detect if position has neither software SL nor native SL digest
+                            if sl_price <= 0 and not pos.get("sl_digest") and not pos.get("_unprotected_alert_sent"):
+                                pos["_unprotected_alert_sent"] = True
+                                logger.error(f"[NadoTradingService] 🚨 CRITICAL: Position {symbol} has NO confirmed SL protection!")
+                                try:
+                                    from services.telegram_service import TelegramService
+                                    tg = TelegramService()
+                                    asyncio.create_task(tg.send_message(
+                                        f"🚨 *CRITICAL RISK ALERT | NADO DEX*\n\n"
+                                        f"⚠️ Позиция по *{symbol}* активна, но *НЕ ИМЕЕТ STOP-LOSS*!\n"
+                                        f"Ни на бирже, ни в Fast Monitor стоп-лосс не задан.\n"
+                                        f"💵 Текущая цена: `${current_price:,.4f}`\n\n"
+                                        f"Используйте `/positions` для проверки или ручного закрытия."
+                                    ))
+                                except Exception:
+                                    pass
                                      
                             if (hit_sl or hit_tp) and not pos.get("is_closing"):
                                 pos["is_closing"] = True
