@@ -11,12 +11,20 @@ from core.config import config
 
 @pytest.fixture
 def mock_session_ctx():
-    def _create_mock_session(status_codes=[200]):
+    def _create_mock_session(status_codes=[200], custom_texts=None):
         responses = []
-        for code in status_codes:
+        for idx, code in enumerate(status_codes):
             resp = MagicMock()
             resp.status = code
-            resp.text = AsyncMock(return_value="error text" if code != 200 else "ok")
+            if custom_texts and idx < len(custom_texts):
+                err_text = custom_texts[idx]
+            elif code == 400:
+                err_text = "Bad Request: can't parse entities in message"
+            elif code != 200:
+                err_text = "error text"
+            else:
+                err_text = "ok"
+            resp.text = AsyncMock(return_value=err_text)
             resp.json = AsyncMock(return_value={"parameters": {"retry_after": 0.01}} if code == 429 else {"ok": True})
             ctx = AsyncMock()
             ctx.__aenter__.return_value = resp
@@ -224,7 +232,7 @@ async def test_telegram_bot_listener_deposit_withdraw_ledger():
 
         # Negative /deposit argument
         await listener.handle_command("/deposit -50")
-        assert "больше 0" in mock_reply.call_args[0][0]
+        assert "> 0" in mock_reply.call_args[0][0]
 
         # Valid /deposit
         await listener.handle_command("/deposit 150.50")
@@ -302,9 +310,104 @@ async def test_telegram_bot_listener_expired_trade_callback():
         }
     }
     listener = TelegramBotListener(trading_service=trading_mock)
+    listener.chat_id = "12345"
 
     with patch("services.telegram_service.TelegramService.answer_callback_query", AsyncMock()) as mock_ans, \
          patch("services.telegram_service.TelegramService.send_message", AsyncMock()) as mock_send:
         await listener.handle_callback("cb_trade", "approve_trade_1", "12345")
         mock_ans.assert_called_with("cb_trade", "Сделка просрочена (>5 мин) ⏳")
         assert "trade_1" not in trading_mock.pending_trades
+
+
+# -------------------------------------------------------------
+# 6. Release Gate Extra Tests: NaN/Inf, Auth, Non-Parse 400, Memory Uniqueness
+# -------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_telegram_send_message_400_non_markdown_no_fallback(mock_session_ctx):
+    tg = TelegramService()
+    tg.bot_token = "valid_token_123"
+    tg.chat_id = "valid_chat_456"
+    tg.api_url = f"https://api.telegram.org/bot{tg.bot_token}/sendMessage"
+
+    # 400 error because chat was deleted, NOT a markdown parse error
+    mock_session = mock_session_ctx([400], custom_texts=["Bad Request: chat not found"])
+    with patch("core.session.SessionManager.get", AsyncMock(return_value=mock_session)):
+        res = await tg.send_message("Normal text")
+        assert res is False
+        # Should NOT blindly retry without markdown, exactly 1 call
+        assert mock_session.post.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_telegram_bot_listener_deposit_withdraw_nan_inf_overflow():
+    trading_mock = MagicMock()
+    trading_mock.adjust_ledger = MagicMock()
+    listener = TelegramBotListener(trading_service=trading_mock)
+    listener.send_url = "http://fake.api"
+    listener.chat_id = "12345"
+
+    with patch.object(listener, "_send_reply", AsyncMock()) as mock_reply:
+        # Test NaN
+        await listener.handle_command("/deposit nan")
+        assert "конечным положительным числом" in mock_reply.call_args[0][0]
+        trading_mock.adjust_ledger.assert_not_called()
+
+        # Test Inf
+        await listener.handle_command("/deposit inf")
+        assert "конечным положительным числом" in mock_reply.call_args[0][0]
+        trading_mock.adjust_ledger.assert_not_called()
+
+        # Test -Inf
+        await listener.handle_command("/withdraw -inf")
+        assert "конечным положительным числом" in mock_reply.call_args[0][0]
+        trading_mock.adjust_ledger.assert_not_called()
+
+        # Test Overflow (> 1B)
+        await listener.handle_command("/deposit 2000000000")
+        assert "конечным положительным числом" in mock_reply.call_args[0][0]
+        trading_mock.adjust_ledger.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_telegram_bot_listener_authorization_guard():
+    trading_mock = MagicMock()
+    trading_mock.adjust_ledger = MagicMock()
+    listener = TelegramBotListener(trading_service=trading_mock)
+    listener.send_url = "http://fake.api"
+    listener.chat_id = "12345"
+
+    with patch.object(listener, "_send_reply", AsyncMock()) as mock_reply:
+        # Command from unauthorized chat
+        await listener.handle_command("/deposit 500", sender_chat_id="99999")
+        trading_mock.adjust_ledger.assert_not_called()
+        assert mock_reply.call_count == 0
+
+    with patch("services.telegram_service.TelegramService.answer_callback_query", AsyncMock()) as mock_ans:
+        # Callback from unauthorized chat
+        await listener.handle_callback("cb_hack", "setrisk_AGGRESSIVE", "99999")
+        mock_ans.assert_called_with("cb_hack", "⛔ Доступ запрещен")
+
+
+def test_memory_manager_cross_process_and_restart_uniqueness(tmp_path):
+    from agents.memory_manager import MemoryManager
+    mock_logger = MagicMock()
+    storage_dir = str(tmp_path / "memory_unique")
+
+    manager1 = MemoryManager(mock_logger, storage_path=storage_dir)
+    # Simulate first process
+    with patch("os.getpid", return_value=1001):
+        for i in range(10):
+            manager1.save_cycle({"symbol": "BTC-USD", "iteration": i})
+
+    # Simulate restart with new instance and different PID (simulating process restart)
+    MemoryManager._seq = 0  # reset in-memory counter
+    manager2 = MemoryManager(mock_logger, storage_path=storage_dir)
+    with patch("os.getpid", return_value=1002):
+        for i in range(10):
+            manager2.save_cycle({"symbol": "BTC-USD", "iteration": i + 10})
+
+    files = [f for f in os.listdir(manager2.storage_path) if f.startswith('cycle_') and f.endswith('.json')]
+    # All 20 cycles must be strictly preserved without collisions
+    assert len(files) == 20
+

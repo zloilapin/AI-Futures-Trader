@@ -53,7 +53,10 @@ class TelegramBotListener:
         except Exception as e:
             print(f"❌ [TelegramListener] Ошибка отправки ответа: {e}")
 
-    async def handle_command(self, text: str):
+    async def handle_command(self, text: str, sender_chat_id: str = None):
+        if sender_chat_id and str(sender_chat_id) != str(self.chat_id):
+            print(f"⛔ [TelegramListener] Доступ запрещен для chat_id={sender_chat_id}")
+            return
         if not text or not str(text).strip():
             return
         parts = text.strip().split()
@@ -94,8 +97,9 @@ class TelegramBotListener:
                 if len(parts) > 1:
                     try:
                         amount = float(parts[1])
-                        if amount <= 0:
-                            await self._send_reply("⚠️ Сумма депозита должна быть больше 0.")
+                        import math
+                        if not math.isfinite(amount) or amount <= 0 or amount > 1_000_000_000:
+                            await self._send_reply("⚠️ Сумма депозита должна быть конечным положительным числом (> 0 и <= $1,000,000,000).")
                         elif hasattr(self.trading_service, "adjust_ledger"):
                             self.trading_service.adjust_ledger(amount)
                             await self._send_reply(f"✅ Внесено (Deposit): `${amount:,.2f}`.\nКапитал для расчета ROI обновлен.")
@@ -110,8 +114,9 @@ class TelegramBotListener:
                 if len(parts) > 1:
                     try:
                         amount = float(parts[1])
-                        if amount <= 0:
-                            await self._send_reply("⚠️ Сумма вывода должна быть больше 0.")
+                        import math
+                        if not math.isfinite(amount) or amount <= 0 or amount > 1_000_000_000:
+                            await self._send_reply("⚠️ Сумма вывода должна быть конечным положительным числом (> 0 и <= $1,000,000,000).")
                         elif hasattr(self.trading_service, "adjust_ledger"):
                             self.trading_service.adjust_ledger(-amount)
                             await self._send_reply(f"✅ Выведено (Withdraw): `${amount:,.2f}`.\nКапитал для расчета ROI обновлен.")
@@ -238,6 +243,10 @@ class TelegramBotListener:
         print(f"🔘 [TelegramListener] Нажата кнопка: {callback_data}")
         from services.telegram_service import TelegramService
         tg = TelegramService()
+        if str(chat_id) != str(self.chat_id):
+            print(f"⛔ [TelegramListener] Неавторизованный callback от chat_id={chat_id}")
+            await tg.answer_callback_query(callback_id, "⛔ Доступ запрещен")
+            return
         
         if callback_data.startswith("approve_") or callback_data.startswith("reject_"):
             parts = callback_data.split("_", 1)

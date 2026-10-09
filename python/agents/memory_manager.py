@@ -35,12 +35,18 @@ class MemoryManager:
             return
 
         try:
+            import uuid
             from core.state_store import StateStore
             sym = str(cycle_data.get("symbol", "")).replace('/', '-').split('-')[0].upper()
             suffix = f"_{sym}" if sym else ""
             MemoryManager._seq += 1
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            filename = os.path.join(self.storage_path, f"cycle_{timestamp}_{MemoryManager._seq:06d}{suffix}.json")
+            pid = os.getpid()
+            token = uuid.uuid4().hex[:6]
+            filename = os.path.join(self.storage_path, f"cycle_{timestamp}_{MemoryManager._seq:06d}_{pid}_{token}{suffix}.json")
+            while os.path.exists(filename):
+                token = uuid.uuid4().hex[:6]
+                filename = os.path.join(self.storage_path, f"cycle_{timestamp}_{MemoryManager._seq:06d}_{pid}_{token}{suffix}.json")
             
             if "timestamp" not in cycle_data:
                 cycle_data["timestamp"] = datetime.now().isoformat()

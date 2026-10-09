@@ -73,17 +73,23 @@ class TelegramService:
                     async with session.post(self.api_url, json=payload) as retry_res:
                         return retry_res.status == 200
                 elif response.status == 400:
-                    print("⚠️ [TelegramService] Ошибка форматирования Markdown, повторная отправка без форматирования...")
-                    fallback_payload = dict(payload)
-                    fallback_payload.pop("parse_mode", None)
-                    async with session.post(self.api_url, json=fallback_payload) as fallback_res:
-                        if fallback_res.status == 200:
-                            print("✅ [TelegramService] Уведомление доставлено без форматирования.")
-                            return True
-                        else:
-                            err = await fallback_res.text()
-                            print(f"❌ [TelegramService] Ошибка отправки: HTTP {fallback_res.status} - {err}")
-                            return False
+                    err = await response.text()
+                    is_parse_err = any(kw in err.lower() for kw in ["parse", "entity", "markdown", "can't parse"])
+                    if is_parse_err and payload.get("parse_mode"):
+                        print("⚠️ [TelegramService] Ошибка парсинга Markdown entities, повторная отправка без форматирования...")
+                        fallback_payload = dict(payload)
+                        fallback_payload.pop("parse_mode", None)
+                        async with session.post(self.api_url, json=fallback_payload) as fallback_res:
+                            if fallback_res.status == 200:
+                                print("✅ [TelegramService] Уведомление доставлено без форматирования.")
+                                return True
+                            else:
+                                err2 = await fallback_res.text()
+                                print(f"❌ [TelegramService] Ошибка отправки (fallback): HTTP {fallback_res.status} - {err2}")
+                                return False
+                    else:
+                        print(f"❌ [TelegramService] Ошибка запроса HTTP 400 (не связанная с Markdown): {err}")
+                        return False
                 else:
                     error_data = await response.text()
                     print(f"❌ [TelegramService] Ошибка отправки: HTTP {response.status} - {error_data}")
@@ -146,15 +152,22 @@ class TelegramService:
                     async with session.post(self.api_url, json=payload) as retry_res:
                         return retry_res.status == 200
                 elif response.status == 400:
-                    fallback_payload = dict(payload)
-                    fallback_payload.pop("parse_mode", None)
-                    async with session.post(self.api_url, json=fallback_payload) as fallback_res:
-                        if fallback_res.status == 200:
-                            return True
-                        else:
-                            err = await fallback_res.text()
-                            print(f"❌ [TelegramService] Ошибка отправки в канал (fallback): HTTP {fallback_res.status} - {err}")
-                            return False
+                    err = await response.text()
+                    is_parse_err = any(kw in err.lower() for kw in ["parse", "entity", "markdown", "can't parse"])
+                    if is_parse_err and payload.get("parse_mode"):
+                        print("⚠️ [TelegramService] Ошибка парсинга Markdown entities в канале, повторная отправка без форматирования...")
+                        fallback_payload = dict(payload)
+                        fallback_payload.pop("parse_mode", None)
+                        async with session.post(self.api_url, json=fallback_payload) as fallback_res:
+                            if fallback_res.status == 200:
+                                return True
+                            else:
+                                err2 = await fallback_res.text()
+                                print(f"❌ [TelegramService] Ошибка отправки в канал (fallback): HTTP {fallback_res.status} - {err2}")
+                                return False
+                    else:
+                        print(f"❌ [TelegramService] Ошибка запроса в канал HTTP 400 (не Markdown): {err}")
+                        return False
                 else:
                     err = await response.text()
                     print(f"❌ [TelegramService] Ошибка отправки в канал: HTTP {response.status} - {err}")
