@@ -17,18 +17,37 @@ class TelegramService:
         
         self.api_url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage" if self.bot_token else None
 
+    MAX_MSG_LEN = 4000
+
+    @staticmethod
+    def _is_valid_credential(val: Optional[str]) -> bool:
+        if not val or not isinstance(val, str):
+            return False
+        clean = val.strip().lower()
+        return bool(clean and "your_" not in clean and "placeholder" not in clean)
+
+    @classmethod
+    def _safe_truncate(cls, text: str) -> str:
+        if not text:
+            return ""
+        if len(text) > cls.MAX_MSG_LEN:
+            return text[:cls.MAX_MSG_LEN - 20] + "\n...[TRUNCATED]"
+        return text
+
     async def send_message(self, text: str, parse_mode: str = "Markdown", reply_markup: dict = None) -> bool:
         """
         Sends a text message to the configured Telegram chat.
         Includes automatic fallback to plain text if Markdown parsing fails.
+        Safely enforces Telegram's 4096 character limit.
         """
-        if not self.bot_token or not self.chat_id or "your_telegram" in self.bot_token or "your_telegram" in self.chat_id:
+        if not self._is_valid_credential(self.bot_token) or not self._is_valid_credential(self.chat_id):
             print("⚠️ [TelegramService] Токен или ID чата не настроены в .env! Сообщение выведено только в консоль.")
             return False
 
+        safe_text = self._safe_truncate(text)
         payload = {
             "chat_id": self.chat_id,
-            "text": text,
+            "text": safe_text,
             "disable_web_page_preview": True
         }
         if parse_mode:
@@ -42,10 +61,22 @@ class TelegramService:
                 if response.status == 200:
                     print("✅ [TelegramService] Уведомление успешно доставлено в Telegram!")
                     return True
+                elif response.status == 429:
+                    # Rate limited: wait and retry once
+                    retry_after = 1.0
+                    try:
+                        resp_data = await response.json()
+                        retry_after = float(resp_data.get("parameters", {}).get("retry_after", 1.0))
+                    except Exception:
+                        pass
+                    await asyncio.sleep(retry_after)
+                    async with session.post(self.api_url, json=payload) as retry_res:
+                        return retry_res.status == 200
                 elif response.status == 400:
                     print("⚠️ [TelegramService] Ошибка форматирования Markdown, повторная отправка без форматирования...")
-                    payload.pop("parse_mode", None)
-                    async with session.post(self.api_url, json=payload) as fallback_res:
+                    fallback_payload = dict(payload)
+                    fallback_payload.pop("parse_mode", None)
+                    async with session.post(self.api_url, json=fallback_payload) as fallback_res:
                         if fallback_res.status == 200:
                             print("✅ [TelegramService] Уведомление доставлено без форматирования.")
                             return True
@@ -65,12 +96,12 @@ class TelegramService:
         """
         Answers a callback query to stop the loading spinner on Telegram buttons.
         """
-        if not self.bot_token:
+        if not self._is_valid_credential(self.bot_token) or not callback_query_id:
             return False
             
         url = f"https://api.telegram.org/bot{self.bot_token}/answerCallbackQuery"
         payload = {
-            "callback_query_id": callback_query_id,
+            "callback_query_id": str(callback_query_id),
             "text": text
         }
         try:
@@ -85,13 +116,14 @@ class TelegramService:
         """
         Отправляет сообщение в публичный канал, если он настроен.
         """
-        if not self.bot_token or not self.public_channel_id:
+        if not self._is_valid_credential(self.bot_token) or not self._is_valid_credential(self.public_channel_id):
             print("ℹ️ [TelegramService] PUBLIC_CHANNEL_ID не настроен. Пропуск трансляции.")
             return False
 
+        safe_text = self._safe_truncate(text)
         payload = {
             "chat_id": self.public_channel_id,
-            "text": text,
+            "text": safe_text,
             "disable_web_page_preview": True
         }
         if parse_mode:
@@ -103,9 +135,20 @@ class TelegramService:
                 if response.status == 200:
                     print("📢 [TelegramService] Сообщение успешно отправлено в публичный канал!")
                     return True
+                elif response.status == 429:
+                    retry_after = 1.0
+                    try:
+                        resp_data = await response.json()
+                        retry_after = float(resp_data.get("parameters", {}).get("retry_after", 1.0))
+                    except Exception:
+                        pass
+                    await asyncio.sleep(retry_after)
+                    async with session.post(self.api_url, json=payload) as retry_res:
+                        return retry_res.status == 200
                 elif response.status == 400:
-                    payload.pop("parse_mode", None)
-                    async with session.post(self.api_url, json=payload) as fallback_res:
+                    fallback_payload = dict(payload)
+                    fallback_payload.pop("parse_mode", None)
+                    async with session.post(self.api_url, json=fallback_payload) as fallback_res:
                         if fallback_res.status == 200:
                             return True
                         else:

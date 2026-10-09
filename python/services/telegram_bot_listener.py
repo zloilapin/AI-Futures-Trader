@@ -24,9 +24,10 @@ class TelegramBotListener:
         if not self.send_url or not self.chat_id:
             print(f"⚠️ [TelegramListener] _send_reply: send_url или chat_id не задан! send_url={bool(self.send_url)}, chat_id={bool(self.chat_id)}")
             return
+        safe_text = text[:3980] + "\n...[TRUNCATED]" if text and len(text) > 4000 else (text or "")
         payload = {
             "chat_id": self.chat_id,
-            "text": text,
+            "text": safe_text,
             "parse_mode": "Markdown",
             "disable_web_page_preview": True
         }
@@ -50,49 +51,74 @@ class TelegramBotListener:
                             error_text2 = await resp2.text()
                             print(f"❌ [TelegramListener] Не удалось отправить ответ (HTTP {resp2.status}): {error_text2[:200]}")
         except Exception as e:
-            print(f"❌ [TelegramListener] Ошибка отправки ответа: {type(e).__name__}: {e}")
+            print(f"❌ [TelegramListener] Ошибка отправки ответа: {e}")
 
     async def handle_command(self, text: str):
-        cmd = text.strip().split()[0].lower()
+        if not text or not str(text).strip():
+            return
+        parts = text.strip().split()
+        if not parts:
+            return
+        cmd = parts[0].lower()
         print(f"📩 [TelegramListener] Получена команда: {cmd}")
 
         try:
             if cmd in ["/status", "/info"]:
                 from core.config import config
-                profile = config.TRADING_PROFILE
+                profile = getattr(config, "TRADING_PROFILE", "BALANCED")
                 interval = os.getenv("SCAN_INTERVAL_MINUTES", "15")
                 rest_start = os.getenv("REST_START_TIME", "19:00")
                 rest_end = os.getenv("REST_END_TIME", "07:00")
                 
-                summary = await self.trading_service.get_portfolio_summary()
+                try:
+                    summary = await self.trading_service.get_portfolio_summary()
+                    balance = summary.get('current_balance', 0.0)
+                    active_count = summary.get('active_positions_count', 0)
+                except Exception as e:
+                    summary = {}
+                    balance = 0.0
+                    active_count = len(getattr(self.trading_service, "active_positions", {}))
+
                 reply = (
                     f"🤖 *AI TRADER STATUS | NADO DEX*\n\n"
                     f"🟢 *Статус системы:* Активна 24/7\n"
                     f"⏱️ *Интервал сканирования:* каждые {interval} мин\n"
                     f"⚙️ *Профиль риска:* `{profile}`\n"
                     f"🌙 *График отдыха:* с {rest_start} до {rest_end} МСК\n\n"
-                    f"💰 *Текущий баланс:* `${summary['current_balance']:,.2f}`\n"
-                    f"💼 *Активных позиций:* `{summary['active_positions_count']}`"
+                    f"💰 *Текущий баланс:* `${balance:,.2f}`\n"
+                    f"💼 *Активных позиций:* `{active_count}`"
                 )
                 await self._send_reply(reply)
                 
             elif cmd == "/deposit":
-                parts = text.strip().split()
                 if len(parts) > 1:
-                    amount = float(parts[1])
-                    if hasattr(self.trading_service, "adjust_ledger"):
-                        self.trading_service.adjust_ledger(amount)
-                        await self._send_reply(f"✅ Внесено (Deposit): `${amount:,.2f}`.\nКапитал для расчета ROI обновлен.")
+                    try:
+                        amount = float(parts[1])
+                        if amount <= 0:
+                            await self._send_reply("⚠️ Сумма депозита должна быть больше 0.")
+                        elif hasattr(self.trading_service, "adjust_ledger"):
+                            self.trading_service.adjust_ledger(amount)
+                            await self._send_reply(f"✅ Внесено (Deposit): `${amount:,.2f}`.\nКапитал для расчета ROI обновлен.")
+                        else:
+                            await self._send_reply("Управление ledger не поддерживается данным сервисом.")
+                    except ValueError:
+                        await self._send_reply("⚠️ Некорректный формат суммы. Пример: `/deposit 100.50`")
                 else:
                     await self._send_reply("Использование: `/deposit <сумма>`")
                     
             elif cmd == "/withdraw":
-                parts = text.strip().split()
                 if len(parts) > 1:
-                    amount = float(parts[1])
-                    if hasattr(self.trading_service, "adjust_ledger"):
-                        self.trading_service.adjust_ledger(-amount)
-                        await self._send_reply(f"✅ Выведено (Withdraw): `${amount:,.2f}`.\nКапитал для расчета ROI обновлен.")
+                    try:
+                        amount = float(parts[1])
+                        if amount <= 0:
+                            await self._send_reply("⚠️ Сумма вывода должна быть больше 0.")
+                        elif hasattr(self.trading_service, "adjust_ledger"):
+                            self.trading_service.adjust_ledger(-amount)
+                            await self._send_reply(f"✅ Выведено (Withdraw): `${amount:,.2f}`.\nКапитал для расчета ROI обновлен.")
+                        else:
+                            await self._send_reply("Управление ledger не поддерживается данным сервисом.")
+                    except ValueError:
+                        await self._send_reply("⚠️ Некорректный формат суммы. Пример: `/withdraw 50.00`")
                 else:
                     await self._send_reply("Использование: `/withdraw <сумма>`")
                     
@@ -107,13 +133,13 @@ class TelegramBotListener:
                 s = await self.trading_service.get_portfolio_summary()
                 reply = (
                     f"📊 *PORTFOLIO & PnL SUMMARY*\n\n"
-                    f"💵 *Эквити (С учетом PnL):* `${s['current_balance']:,.2f}`\n"
-                    f"🛡️ *Свободная маржа:* `${s['available_margin']:,.2f}`\n"
-                    f"💰 *Нереализованный PnL:* `${s['unrealized_pnl']:+.2f}` (ROI: {s.get('roi_pct', 0):+.2f}%)\n"
-                    f"📈 *Общий PnL (закрытые):* `${s['total_pnl_usd']:+.2f}` ({s['total_pnl_pct']:+.2f}%)\n"
-                    f"💼 *Открытых позиций:* `{s['active_positions_count']}`\n"
-                    f"🏆 *Винрейт:* `{s['win_rate_pct']}%` (Побед: {s['win_count']} / Потерь: {s['loss_count']})\n"
-                    f"🏦 *Начальный депозит:* `${s['initial_balance']:,.2f}`"
+                    f"💵 *Эквити (С учетом PnL):* `${s.get('current_balance', 0.0):,.2f}`\n"
+                    f"🛡️ *Свободная маржа:* `${s.get('available_margin', 0.0):,.2f}`\n"
+                    f"💰 *Нереализованный PnL:* `${s.get('unrealized_pnl', 0.0):+.2f}` (ROI: {s.get('roi_pct', 0.0):+.2f}%)\n"
+                    f"📈 *Общий PnL (закрытые):* `${s.get('total_pnl_usd', 0.0):+.2f}` ({s.get('total_pnl_pct', 0.0):+.2f}%)\n"
+                    f"💼 *Открытых позиций:* `{s.get('active_positions_count', 0)}`\n"
+                    f"🏆 *Винрейт:* `{s.get('win_rate_pct', 0)}%` (Побед: {s.get('win_count', 0)} / Потерь: {s.get('loss_count', 0)})\n"
+                    f"🏦 *Начальный депозит:* `${s.get('initial_balance', 0.0):,.2f}`"
                 )
                 await self._send_reply(reply)
 
@@ -131,20 +157,22 @@ class TelegramBotListener:
                     inline_keyboard = []
                     
                     for sym, pos in positions.items():
+                        if not isinstance(pos, dict):
+                            continue
                         mode = "👻 Вирт" if pos.get("is_virtual") else "⚡ Боевая"
-                        direction = pos.get("direction", "UNKNOWN")
-                        icon = "🟢" if direction == "LONG" else "🔴"
-                        entry = pos.get("entry_price", 0)
-                        notional = pos.get("notional_usd", 0)
-                        leverage = pos.get("leverage", 1)
-                        margin = pos.get("margin_usd", notional / leverage if leverage > 0 else notional)
+                        direction = str(pos.get("direction", "UNKNOWN")).upper()
+                        icon = "🟢" if direction == "LONG" else ("🔴" if direction == "SHORT" else "⚪")
+                        entry = float(pos.get("entry_price", 0.0) or 0.0)
+                        notional = float(pos.get("notional_usd", 0.0) or 0.0)
+                        leverage = float(pos.get("leverage", 1.0) or 1.0)
+                        margin = float(pos.get("margin_usd", notional / leverage if leverage > 0 else notional) or 0.0)
                         
                         reply_lines.append(f"{icon} *{sym}* | {direction} | {mode}")
-                        reply_lines.append(f"💵 Вход: `${entry:,.2f}` | Объем: `${notional:,.0f}` (Маржа: ${margin:,.0f}, {leverage}x)\n")
+                        reply_lines.append(f"💵 Вход: `${entry:,.2f}` | Объем: `${notional:,.0f}` (Маржа: `${margin:,.0f}`, {leverage:.0f}x)\n")
                         
                         inline_keyboard.append([{"text": f"❌ Закрыть {sym}", "callback_data": f"forceclose_{sym}"}])
                     
-                    reply_markup = {"inline_keyboard": inline_keyboard}
+                    reply_markup = {"inline_keyboard": inline_keyboard} if inline_keyboard else None
                     await self._send_reply("\n".join(reply_lines), reply_markup=reply_markup)
 
             elif cmd in ["/risk", "/profile"]:
@@ -158,7 +186,7 @@ class TelegramBotListener:
                 await self._send_reply("⚙️ *Выберите профиль риска:*\n(Применится ко всем новым сделкам)", reply_markup=reply_markup)
 
             elif cmd in ["/scan", "/run"]:
-                print(f"🔔 [TelegramListener] Обработка команды /scan...")
+                print("🔔 [TelegramListener] Обработка команды /scan...")
                 if self.is_scanning:
                     await self._send_reply("⏳ Сканирование уже выполняется. Пожалуйста, дождитесь окончания текущего цикла.")
                 elif self.trigger_scan_callback:
@@ -176,7 +204,7 @@ class TelegramBotListener:
                     task.add_done_callback(self._background_tasks.discard)
                     print(f"🔔 [TelegramListener] Задача сканирования создана: {task.get_name()}")
                 else:
-                    print(f"❌ [TelegramListener] trigger_scan_callback НЕ задан!")
+                    print("❌ [TelegramListener] trigger_scan_callback НЕ задан!")
                     await self._send_reply("❌ Ошибка: callback сканирования не настроен.")
 
             elif cmd in ["/help", "/start", "/menu"]:
@@ -188,18 +216,18 @@ class TelegramBotListener:
                     ]
                 }
                 reply = (
-                    f"🤖 *ГЛАВНОЕ МЕНЮ БОТА NADO DEX*\n\n"
-                    f"Выберите действие с помощью кнопок ниже или используйте текстовые команды:\n\n"
-                    f"🔹 `/status` — Узнать текущий режим и статус\n"
-                    f"🔹 `/balance` (или `/pnl`) — Статистика побед и текущий баланс\n"
-                    f"🔹 `/positions` — Список активных сделок и управление ими\n"
-                    f"🔹 `/risk` — Переключение профиля риска\n"
-                    f"🔹 `/scan` — Принудительно начать цикл сканирования\n"
-                    f"🔹 `/stats` — Воронка отклоненных сигналов (Diagnostics)\n"
-                    f"🔹 `/deposit <сумма>` — Учесть ручное пополнение для точного ROI\n"
-                    f"🔹 `/withdraw <сумма>` — Учесть ручной вывод для точного ROI\n"
-                    f"🔹 `/reset_ledger` — Сбросить статистику PnL и начальный капитал\n"
-                    f"🔹 `/help` — Это меню"
+                    "🤖 *ГЛАВНОЕ МЕНЮ БОТА NADO DEX*\n\n"
+                    "Выберите действие с помощью кнопок ниже или используйте текстовые команды:\n\n"
+                    "🔹 `/status` — Узнать текущий режим и статус\n"
+                    "🔹 `/balance` (или `/pnl`) — Статистика побед и текущий баланс\n"
+                    "🔹 `/positions` — Список активных сделок и управление ими\n"
+                    "🔹 `/risk` — Переключение профиля риска\n"
+                    "🔹 `/scan` — Принудительно начать цикл сканирования\n"
+                    "🔹 `/stats` — Воронка отклоненных сигналов (Diagnostics)\n"
+                    "🔹 `/deposit <сумма>` — Учесть ручное пополнение для точного ROI\n"
+                    "🔹 `/withdraw <сумма>` — Учесть ручной вывод для точного ROI\n"
+                    "🔹 `/reset_ledger` — Сбросить статистику PnL и начальный капитал\n"
+                    "🔹 `/help` — Это меню"
                 )
                 await self._send_reply(reply, reply_markup=reply_markup)
         except Exception as e:
@@ -212,7 +240,9 @@ class TelegramBotListener:
         tg = TelegramService()
         
         if callback_data.startswith("approve_") or callback_data.startswith("reject_"):
-            action, trade_id = callback_data.split("_")
+            parts = callback_data.split("_", 1)
+            action = parts[0]
+            trade_id = parts[1] if len(parts) > 1 else ""
             if hasattr(self.trading_service, "pending_trades") and trade_id in self.trading_service.pending_trades:
                 trade = self.trading_service.pending_trades.pop(trade_id)
                 
@@ -244,7 +274,11 @@ class TelegramBotListener:
                 await tg.answer_callback_query(callback_id, "Ошибка: Сделка не найдена или устарела.")
                 
         elif callback_data.startswith("forceclose_"):
-            symbol = callback_data.split("_")[1]
+            parts = callback_data.split("_", 1)
+            symbol = parts[1] if len(parts) > 1 else ""
+            if not symbol:
+                await tg.answer_callback_query(callback_id, "Ошибка: Не указан символ.")
+                return
             await tg.answer_callback_query(callback_id, f"Закрываю {symbol}... ⏳")
             
             success, pnl = await self.trading_service.force_close_position(symbol)
@@ -258,12 +292,17 @@ class TelegramBotListener:
                 await tg.send_message(f"❌ Ошибка закрытия {symbol}.")
                 
         elif callback_data.startswith("setrisk_"):
-            new_profile = callback_data.split("_")[1]
-            from core.config import config
-            config.TRADING_PROFILE = new_profile
-            os.environ["TRADING_PROFILE"] = new_profile
-            await tg.answer_callback_query(callback_id, f"Профиль {new_profile} установлен ✅")
-            await tg.send_message(f"✅ Профиль риска успешно изменен на `{new_profile}`.")
+            parts = callback_data.split("_", 1)
+            new_profile = parts[1] if len(parts) > 1 else ""
+            valid_profiles = ["low", "conservative", "medium", "moderate", "high", "aggressive"]
+            if new_profile.lower() in valid_profiles:
+                from core.config import config
+                config.TRADING_PROFILE = new_profile
+                os.environ["TRADING_PROFILE"] = new_profile
+                await tg.answer_callback_query(callback_id, f"Профиль {new_profile} установлен ✅")
+                await tg.send_message(f"✅ Профиль риска успешно изменен на `{new_profile}`.")
+            else:
+                await tg.answer_callback_query(callback_id, f"Неизвестный профиль: {new_profile}")
             
         elif callback_data.startswith("cmd_"):
             await tg.answer_callback_query(callback_id, "Загрузка... ⏳")
@@ -274,12 +313,9 @@ class TelegramBotListener:
             elif callback_data == "cmd_scan": await self.handle_command("/scan")
 
     async def start_listening(self):
-        if not self.api_url or not self.chat_id:
-            print("❌ [TelegramListener] НЕ ЗАПУЩЕН: TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID не заданы в .env!")
-            return
-        
-        if self.bot_token and "your_telegram" in self.bot_token:
-            print("❌ [TelegramListener] НЕ ЗАПУЩЕН: TELEGRAM_BOT_TOKEN содержит placeholder 'your_telegram'!")
+        from services.telegram_service import TelegramService
+        if not TelegramService._is_valid_credential(self.bot_token) or not TelegramService._is_valid_credential(self.chat_id):
+            print("❌ [TelegramListener] НЕ ЗАПУЩЕН: TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID не настроены в .env!")
             return
 
         self.running = True

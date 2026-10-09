@@ -11,6 +11,8 @@ class MemoryManager:
     Persists cycle data (verdicts, market state, risk decisions) and retrieves 
     historical context to help the CEO Agent adapt to changing market regimes.
     """
+    _seq = 0
+
     def __init__(self, logger: TradeLogger, storage_path: str = "data/memory/"):
         self.logger = logger
         # Normalize to always be relative to python/ directory
@@ -36,8 +38,9 @@ class MemoryManager:
             from core.state_store import StateStore
             sym = str(cycle_data.get("symbol", "")).replace('/', '-').split('-')[0].upper()
             suffix = f"_{sym}" if sym else ""
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:19]
-            filename = os.path.join(self.storage_path, f"cycle_{timestamp}{suffix}.json")
+            MemoryManager._seq += 1
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            filename = os.path.join(self.storage_path, f"cycle_{timestamp}_{MemoryManager._seq:06d}{suffix}.json")
             
             if "timestamp" not in cycle_data:
                 cycle_data["timestamp"] = datetime.now().isoformat()

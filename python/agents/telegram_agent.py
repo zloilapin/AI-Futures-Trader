@@ -30,18 +30,29 @@ class TelegramAgent(BaseAgent):
             return f"{price:,.2f}"
 
     def format_signal(self, final_trade_data: Dict[str, Any]) -> str:
-        symbol = final_trade_data.get("symbol", "UNKNOWN")
-        ceo = final_trade_data.get("ceo_verdict", {})
-        risk = final_trade_data.get("risk_verdict", {})
+        if not isinstance(final_trade_data, dict):
+            return "⚠️ Некорректные данные сигнала."
+
+        symbol = str(final_trade_data.get("symbol", "UNKNOWN"))
+        ceo = final_trade_data.get("ceo_verdict", {}) if isinstance(final_trade_data.get("ceo_verdict"), dict) else {}
+        risk = final_trade_data.get("risk_verdict", {}) if isinstance(final_trade_data.get("risk_verdict"), dict) else {}
 
         decision = str(ceo.get("decision", "HOLD")).upper()
-        conviction = ceo.get("conviction", 0)
+        try:
+            conviction = int(ceo.get("conviction", 0) or 0)
+        except (TypeError, ValueError):
+            conviction = 0
+
         dir_emoji = "🟢 LONG" if decision == "LONG" else ("🔴 SHORT" if decision == "SHORT" else "⚪ HOLD")
-        reasoning_en = ceo.get("reasoning_en", "")
-        reasoning = self._escape_md(f"{reasoning_en}".strip())
+        
+        # Fall back from reasoning_en to general reasoning
+        raw_reasoning = str(ceo.get("reasoning_en") or ceo.get("reasoning") or "").strip()
+        if len(raw_reasoning) > 500:
+            raw_reasoning = raw_reasoning[:497] + "..."
+        reasoning = self._escape_md(raw_reasoning)
 
         from core.config import config
-        net_badge = f" [{config.NADO_NETWORK}]" if config.NADO_NETWORK else ""
+        net_badge = f" [{config.NADO_NETWORK}]" if getattr(config, "NADO_NETWORK", None) else ""
         
         if decision == "HOLD":
             return (
@@ -52,14 +63,21 @@ class TelegramAgent(BaseAgent):
                 f"📝 *Analysis / Аналитика:*\n{reasoning}"
             )
 
-        entry_price = risk.get("entry_price", 0)
-        tp_price = risk.get("take_profit_price", 0)
-        tp_pct = risk.get("take_profit_pct", 0)
-        sl_price = risk.get("stop_loss_price", 0)
-        sl_pct = risk.get("stop_loss_pct", 0)
-        notional_usd = risk.get("notional_size_usd", 0)
-        pos_pct = risk.get("position_size_pct", 0)
-        rr_ratio = risk.get("risk_reward_ratio", 0)
+        def _safe_float(d: dict, k: str, default: float = 0.0) -> float:
+            try:
+                v = d.get(k, default)
+                return float(v) if v is not None else default
+            except (TypeError, ValueError):
+                return default
+
+        entry_price = _safe_float(risk, "entry_price")
+        tp_price = _safe_float(risk, "take_profit_price")
+        tp_pct = _safe_float(risk, "take_profit_pct")
+        sl_price = _safe_float(risk, "stop_loss_price")
+        sl_pct = _safe_float(risk, "stop_loss_pct")
+        notional_usd = _safe_float(risk, "notional_size_usd")
+        pos_pct = _safe_float(risk, "position_size_pct")
+        rr_ratio = _safe_float(risk, "risk_reward_ratio")
         
         primary_conviction = ceo.get("primary_conviction", conviction)
         escalated = ceo.get("escalated", False)
@@ -82,7 +100,7 @@ class TelegramAgent(BaseAgent):
             f"🎯 *Entry / Цена входа:* `${self._format_price(entry_price)}`\n\n"
             f"🟢 *Take Profit (TP):* `${self._format_price(tp_price)}` (+{tp_pct}%)\n"
             f"🔴 *Stop Loss (SL):* `${self._format_price(sl_price)}` (-{sl_pct}%)\n"
-            f"⚖️ *Risk/Reward:* `{rr_ratio}`\n"
+            f"⚖️ *Risk/Reward:* `{rr_ratio:.2f}`\n"
             f"{small_size_warning}\n"
             f"📝 *Analysis / Аналитика:*\n{reasoning}"
         )
