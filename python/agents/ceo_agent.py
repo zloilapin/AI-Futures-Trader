@@ -131,13 +131,16 @@ class CEOAgent(BaseAgent):
         
         if decision == "HOLD":
             self.logger.info(f"[{self.name}] Primary CEO decided HOLD. Bypassing escalation to save API costs.")
-            print(f"⏩ [Escalation Bypassed] Рынок не имеет явного тренда (HOLD). Вторая модель ({self.escalation_llm.model_name}) не вызывается для экономии API.")
-        elif self.llm_client.model_name == self.escalation_llm.model_name:
-            self.logger.info(f"[{self.name}] Primary and Escalation models are identical ({self.llm_client.model_name}). Bypassing escalation to prevent echo chamber.")
-            print(f"⏩ [Escalation Bypassed] Основная и эскалационная модели совпали ({self.llm_client.model_name}). Эскалация отменена (предотвращение эхо-камеры).")
+            print(f"⏩ [Escalation Bypassed] Рынок не имеет явного тренда (HOLD). Вторая модель ({getattr(self.escalation_llm, 'model_name', 'Escalation')}) не вызывается для экономии API.")
+        elif not self.escalation_llm:
+            self.logger.info(f"[{self.name}] Escalation LLM is not configured. Bypassing escalation.")
+            print("⏩ [Escalation Bypassed] Эскалационная модель не настроена. Эскалация отменена.")
+        elif getattr(self.llm_client, "model_name", "Primary") == getattr(self.escalation_llm, "model_name", "Escalation"):
+            self.logger.info(f"[{self.name}] Primary and Escalation models are identical ({getattr(self.llm_client, 'model_name', 'Primary')}). Bypassing escalation to prevent echo chamber.")
+            print(f"⏩ [Escalation Bypassed] Основная и эскалационная модели совпали ({getattr(self.llm_client, 'model_name', 'Primary')}). Эскалация отменена (предотвращение эхо-камеры).")
         elif conviction >= 80:
             self.logger.info(f"[{self.name}] High conviction {decision} (EntryQuality {conviction}% >= 80%). Bypassing escalation.")
-            print(f"⏩ [Escalation Bypassed] Качество входа Primary CEO достаточно высоко ({conviction}%). Вторая модель ({self.escalation_llm.model_name}) не вызывается.")
+            print(f"⏩ [Escalation Bypassed] Качество входа Primary CEO достаточно высоко ({conviction}%). Вторая модель ({getattr(self.escalation_llm, 'model_name', 'Escalation')}) не вызывается.")
         elif conviction < 60:
             self.logger.info(f"[{self.name}] Entry Quality low ({decision} {conviction}% < 60%). Bypassing escalation.")
             print(f"⏩ [Escalation Bypassed] Слишком низкое качество входа Primary CEO ({conviction}% < 60%). Пропуск сделки (HOLD/WAIT).")
@@ -238,13 +241,18 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                 conviction = int((primary_conviction * 0.6) + (esc_conviction * 0.4))
                 directional_confidence = int((primary_dir_conf * 0.6) + (esc_dir_conf * 0.4))
                 entry_quality = int((primary_entry_quality * 0.6) + (esc_entry_qual * 0.4))
-                if conviction >= 75:
+                if conviction < 60:
+                    if directional_confidence >= 70:
+                        trade_action = "WAIT_FOR_PULLBACK"
+                    else:
+                        trade_action = "HOLD"
+                elif conviction >= 75:
                     trade_action = "ENTER"
                 elif directional_confidence >= 75 and conviction < 70:
                     trade_action = "WAIT_FOR_PULLBACK"
                 else:
                     trade_action = "REDUCE_SIZE"
-                print(f"🤝 [Consensus] Модели пришли к согласию! Подтвержден {decision}. Conviction: {conviction}% (Primary: {primary_conviction}%, Esc: {esc_conviction}%) | Entry Quality: {entry_quality}%")
+                print(f"🤝 [Consensus] Модели пришли к согласию! Подтвержден {decision}. Conviction: {conviction}% (Primary: {primary_conviction}%, Esc: {esc_conviction}%) | Entry Quality: {entry_quality}% | Action: {trade_action}")
 
             # Case 2: Model Conflict OR Arbitrator Format/Math Failure
             else:
@@ -372,8 +380,16 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
         tf_1h = mtf_ctx.get("tf_1h", {}) if isinstance(mtf_ctx, dict) and isinstance(mtf_ctx.get("tf_1h"), dict) else {}
         tf_4h = mtf_ctx.get("tf_4h", {}) if isinstance(mtf_ctx, dict) and isinstance(mtf_ctx.get("tf_4h"), dict) else {}
         
-        trend_1h = tf_1h.get("trend", "neutral").lower()
-        trend_4h = tf_4h.get("trend", "neutral").lower()
+        trend_1h = str(
+            (tf_1h.get("trend") if isinstance(tf_1h, dict) else None)
+            or mtf_ctx.get("trend_1h")
+            or "neutral"
+        ).lower()
+        trend_4h = str(
+            (tf_4h.get("trend") if isinstance(tf_4h, dict) else None)
+            or mtf_ctx.get("trend_4h")
+            or "neutral"
+        ).lower()
 
         if candidate == "SHORT":
             if trend_1h == "bullish" and trend_4h == "bullish":
@@ -423,7 +439,8 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
             return rsi, fear_greed
 
         # 1. Direct indicators / news_data
-        indicators = data.get("indicators") or data.get("market_data", {}).get("indicators", {})
+        m_data = data.get("market_data") if isinstance(data.get("market_data"), dict) else {}
+        indicators = data.get("indicators") if isinstance(data.get("indicators"), dict) else (m_data.get("indicators") if isinstance(m_data.get("indicators"), dict) else {})
         if isinstance(indicators, dict):
             for k in ["rsi_14", "rsi", "RSI", "RSI_14"]:
                 if k in indicators and indicators[k] is not None:
@@ -433,7 +450,7 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                     except (ValueError, TypeError):
                         pass
                 
-        news_data = data.get("news_data") or data.get("market_data", {}).get("news_data", {})
+        news_data = data.get("news_data") if isinstance(data.get("news_data"), dict) else (m_data.get("news_data") if isinstance(m_data.get("news_data"), dict) else {})
         if isinstance(news_data, dict):
             for k in ["fear_and_greed_index", "sentiment_score", "fear_greed", "fng_index", "fng"]:
                 if k in news_data and news_data[k] is not None:
@@ -541,12 +558,18 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
 
         # Quantitative Entry Quality: Overextension & Late Entry Penalty
         if market_context and isinstance(market_context, dict) and dec in ["LONG", "SHORT"]:
-            indicators = market_context.get("indicators", {})
+            indicators = market_context.get("indicators") if isinstance(market_context.get("indicators"), dict) else {}
             if isinstance(indicators, dict):
                 ema_20 = float(indicators.get("ema_20") or 0.0)
-                cur_price = float(market_context.get("price_data", {}).get("current_price") or market_context.get("current_price") or indicators.get("current_price") or 0.0)
+                cur_price = float(
+                    (market_context.get("price_data") or {}).get("current_price")
+                    or market_context.get("current_price")
+                    or indicators.get("current_price")
+                    or 0.0
+                )
                 atr_pct = float(indicators.get("atr_pct") or 1.5)
-                bb_pos = float(indicators.get("bb_position_pct") or 50.0)
+                raw_bb_pos = indicators.get("bb_position_pct") if "bb_position_pct" in indicators else indicators.get("bb_pos")
+                bb_pos = float(raw_bb_pos if raw_bb_pos is not None else 50.0)
 
                 # Overextension from EMA-20 (Late entry penalty: price already ran without pausing)
                 if ema_20 > 0 and cur_price > 0:
@@ -675,9 +698,11 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                 if isinstance(mtf_ctx, dict):
                     tf_1h = mtf_ctx.get("tf_1h", {}) if isinstance(mtf_ctx.get("tf_1h"), dict) else {}
                     tf_4h = mtf_ctx.get("tf_4h", {}) if isinstance(mtf_ctx.get("tf_4h"), dict) else {}
-                    if tf_1h.get("trend") == "bearish" or tf_4h.get("trend") == "bearish":
+                    t1 = str((tf_1h.get("trend") if isinstance(tf_1h, dict) else None) or mtf_ctx.get("trend_1h") or "").lower()
+                    t4 = str((tf_4h.get("trend") if isinstance(tf_4h, dict) else None) or mtf_ctx.get("trend_4h") or "").lower()
+                    if t1 == "bearish" or t4 == "bearish":
                         mtf_bias = "BEARISH"
-                    elif tf_1h.get("trend") == "bullish" or tf_4h.get("trend") == "bullish":
+                    elif t1 == "bullish" or t4 == "bullish":
                         mtf_bias = "BULLISH"
 
         # If mtf_bias is still neutral, determine strictly by sign of mtf_trend
