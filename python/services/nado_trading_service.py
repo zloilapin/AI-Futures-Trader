@@ -30,6 +30,8 @@ class NadoTradingService(BaseTradingService):
         self.loss_count = 0
         self.recent_streak = []
         self._initial_balance = None
+        self._daily_start_balance = None
+        self._daily_start_date = None
         self.cooldown_until = 0.0
         self._last_cooldown_processed_len = 0
         self._load_state()
@@ -122,6 +124,19 @@ class NadoTradingService(BaseTradingService):
                 
             initial = self._initial_balance or equity
             
+            # Daily Drawdown and Intraday PnL Tracking
+            import time
+            today_str = time.strftime("%Y-%m-%d", time.gmtime())
+            if getattr(self, "_daily_start_date", None) != today_str or getattr(self, "_daily_start_balance", None) is None:
+                self._daily_start_date = today_str
+                self._daily_start_balance = equity
+                self._save_state()
+
+            daily_start = self._daily_start_balance or equity
+            daily_pnl_usd = round(equity - daily_start, 2)
+            daily_pnl_pct = round(((equity - daily_start) / daily_start) * 100, 2) if daily_start > 0 else 0.0
+            daily_drawdown_pct = round(max(0.0, -daily_pnl_pct / 100.0), 4)
+
             total_trades = self.win_count + self.loss_count
             win_rate = round((self.win_count / total_trades) * 100, 1) if total_trades > 0 else 0.0
             
@@ -131,6 +146,9 @@ class NadoTradingService(BaseTradingService):
                 "total_usd": round(equity, 2),
                 "total_pnl_usd": round(equity - initial, 2),
                 "total_pnl_pct": round(((equity - initial) / initial) * 100, 2) if initial > 0 else 0.0,
+                "daily_pnl_usd": daily_pnl_usd,
+                "daily_pnl_pct": daily_pnl_pct,
+                "daily_drawdown_pct": daily_drawdown_pct,
                 "unrealized_pnl_usd": pnl,
                 "unrealized_pnl": pnl,
                 "roi_pct": round(((equity - initial) / initial) * 100, 2) if initial > 0 else 0.0,
@@ -651,6 +669,10 @@ class NadoTradingService(BaseTradingService):
         if "initial_balance" in state:
             self._initial_balance = float(state["initial_balance"])
             logger.info(f"[NadoTradingService] 💾 Loaded initial balance: {self._initial_balance}")
+        if "daily_start_balance" in state and state["daily_start_balance"] is not None:
+            self._daily_start_balance = float(state["daily_start_balance"])
+        if "daily_start_date" in state and state["daily_start_date"] is not None:
+            self._daily_start_date = str(state["daily_start_date"])
         if "win_count" in state:
             self.win_count = int(state["win_count"])
         if "loss_count" in state:
@@ -667,6 +689,8 @@ class NadoTradingService(BaseTradingService):
         state_file = "data/memory/nado_state.json"
         StateStore.save(state_file, {
             "initial_balance": self._initial_balance,
+            "daily_start_balance": getattr(self, "_daily_start_balance", None),
+            "daily_start_date": getattr(self, "_daily_start_date", None),
             "win_count": self.win_count,
             "loss_count": self.loss_count,
             "recent_streak": self.recent_streak,
