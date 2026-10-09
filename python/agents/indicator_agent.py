@@ -94,16 +94,26 @@ class IndicatorAgent(BaseAgent):
                 reason_parts.append("Обнаружена медвежья дивергенция RSI (разворотный сигнал)")
                 
             macd_cross = str(algo_signals.get("macd_crossover", "")).upper()
-            if macd_cross == "BULLISH":
+            if macd_cross in ["BULLISH", "BULLISH_CROSS"]:
                 bull_score += 2
                 reason_parts.append("Недавний бычий MACD кроссовер")
-            elif macd_cross == "BEARISH":
+            elif macd_cross in ["BEARISH", "BEARISH_CROSS"]:
                 bear_score += 2
                 reason_parts.append("Недавний медвежий MACD кроссовер")
                 
             sweeps = algo_signals.get("liquidity_sweeps", [])
-            bull_sweeps = [s for s in sweeps if s.get("type") == "bullish_sweep"]
-            bear_sweeps = [s for s in sweeps if s.get("type") == "bearish_sweep"]
+            bull_sweeps = [
+                s for s in sweeps 
+                if s.get("type") in ["bullish_sweep", "lower_sweep"] 
+                or s.get("sweep_type") == "bullish_sweep" 
+                or s.get("direction") == "bullish"
+            ]
+            bear_sweeps = [
+                s for s in sweeps 
+                if s.get("type") in ["bearish_sweep", "upper_sweep"] 
+                or s.get("sweep_type") == "bearish_sweep" 
+                or s.get("direction") == "bearish"
+            ]
             
             if bull_sweeps:
                 bull_score += min(2, len(bull_sweeps))
@@ -111,6 +121,29 @@ class IndicatorAgent(BaseAgent):
             if bear_sweeps:
                 bear_score += min(2, len(bear_sweeps))
                 reason_parts.append(f"Обнаружен сбор ликвидности сверху ({len(bear_sweeps)}x)")
+
+        # Interpret VWAP (intraday benchmark)
+        vwap = indicators.get("vwap")
+        if vwap and current_price:
+            vwap_val = float(vwap)
+            if current_price > vwap_val:
+                bull_score += 1
+                reason_parts.append(f"Цена выше VWAP ({vwap_val:.2f})")
+            elif current_price < vwap_val:
+                bear_score += 1
+                reason_parts.append(f"Цена ниже VWAP ({vwap_val:.2f})")
+
+        # Interpret ADX (trend strength confirmation)
+        adx = indicators.get("adx_14")
+        if adx is not None and float(adx) >= 25.0:
+            plus_di = float(indicators.get("plus_di_14", 0.0) or 0.0)
+            minus_di = float(indicators.get("minus_di_14", 0.0) or 0.0)
+            if plus_di > minus_di:
+                bull_score += 1
+                reason_parts.append(f"Сильный бычий тренд по ADX ({float(adx):.1f})")
+            elif minus_di > plus_di:
+                bear_score += 1
+                reason_parts.append(f"Сильный медвежий тренд по ADX ({float(adx):.1f})")
 
         net_score = bull_score - bear_score
         

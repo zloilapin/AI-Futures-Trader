@@ -15,6 +15,8 @@ class MarketDataService:
         import os
         self._oi_file = "data/memory/oi_history.json"
         self._oi_history = self._load_oi_history()
+        self._candle_cache: Dict[tuple, tuple] = {}
+        self.CANDLE_CACHE_TTL: float = 15.0
 
         from core.config import config
         self.is_nado = bool(config.NADO_LIVE_TRADING_ENABLED or getattr(config, "TRADING_ENGINE", "NADO") == "NADO")
@@ -157,6 +159,15 @@ class MarketDataService:
         base_symbol = symbol.split('-')[0].upper()
         if not self.nado_client or base_symbol not in self.product_map:
             return []
+
+        import time
+        now = time.time()
+        cache_key = (base_symbol, interval_min)
+        if cache_key in self._candle_cache:
+            cached_time, cached_candles = self._candle_cache[cache_key]
+            if (now - cached_time < self.CANDLE_CACHE_TTL) and len(cached_candles) >= limit:
+                return cached_candles[-limit:]
+
         from nado_protocol.indexer_client.types.query import IndexerCandlesticksParams, IndexerCandlesticksGranularity
         import asyncio
         tf_map = {
@@ -168,19 +179,24 @@ class MarketDataService:
         params = IndexerCandlesticksParams(
             product_id=self.product_map[base_symbol],
             granularity=tf_map.get(interval_min, IndexerCandlesticksGranularity.FIFTEEN_MINUTES),
-            limit=limit
+            limit=max(limit, 50)
         )
         try:
             candles = await asyncio.to_thread(self.nado_client.market.get_candlesticks, params)
-            return [{
+            parsed = [{
                 "open": float(c.open_x18) / 1e18,
                 "high": float(c.high_x18) / 1e18,
                 "low": float(c.low_x18) / 1e18,
                 "close": float(c.close_x18) / 1e18,
                 "volume": float(c.volume) / 1e18
             } for c in reversed(candles.candlesticks)]
+            if parsed:
+                self._candle_cache[cache_key] = (now, parsed)
+            return parsed[-limit:] if parsed else []
         except Exception as e:
             self._log(f"⚠️ [MarketDataService] Failed to fetch Nado candles for {symbol}: {e}")
+            if cache_key in self._candle_cache:
+                return self._candle_cache[cache_key][1][-limit:]
             return []
 
     async def _fetch_ohlc_interval(self, symbol: str, interval_min: int) -> dict:
@@ -201,22 +217,22 @@ class MarketDataService:
                 else:
                     atr = 0
                     
-                # 2. Calculate EMA-9 and EMA-21
-                ema_9 = closes[0]
-                ema_21 = closes[0]
-                if len(closes) > 1:
-                    mult_9 = 2 / (9 + 1)
-                    mult_21 = 2 / (21 + 1)
+                # 2. Calculate EMA-9 and EMA-21 (require at least 21 candles for trend determination)
+                trend = "NEUTRAL"
+                if len(closes) >= 21:
+                    mult_9 = 2.0 / (9.0 + 1.0)
+                    mult_21 = 2.0 / (21.0 + 1.0)
+                    ema_9 = closes[0]
+                    ema_21 = closes[0]
                     for c in closes[1:]:
                         ema_9 = (c - ema_9) * mult_9 + ema_9
                         ema_21 = (c - ema_21) * mult_21 + ema_21
                         
-                # 3. Determine Trend using EMA Crossover + ATR Separation
-                trend = "NEUTRAL"
-                if current_price > ema_9 and ema_9 > ema_21 and (current_price - ema_21) > (atr * 0.2):
-                    trend = "BULLISH"
-                elif current_price < ema_9 and ema_9 < ema_21 and (ema_21 - current_price) > (atr * 0.2):
-                    trend = "BEARISH"
+                    # 3. Determine Trend using EMA Crossover + ATR Separation
+                    if current_price > ema_9 and ema_9 > ema_21 and (current_price - ema_21) > (atr * 0.2):
+                        trend = "BULLISH"
+                    elif current_price < ema_9 and ema_9 < ema_21 and (ema_21 - current_price) > (atr * 0.2):
+                        trend = "BEARISH"
                 
                 # For compatibility with legacy logic, keep pct_diff calculation
                 pct_diff = ((current_price - closes[0]) / (closes[0] + 1e-9)) * 100
@@ -238,12 +254,30 @@ class MarketDataService:
     async def fetch_multi_timeframe(self, symbol: str) -> Dict[str, Any]:
         """
         Fetches 15m, 1H (60m), and 4H (240m) trends for Multi-Timeframe Alignment check.
+        Uses return_exceptions=True so that higher timeframe glitches (e.g. 4H) do not abort the cycle.
         """
-        tf_15m, tf_1h, tf_4h = await asyncio.gather(
+        results = await asyncio.gather(
             self._fetch_ohlc_interval(symbol, 15),
             self._fetch_ohlc_interval(symbol, 60),
-            self._fetch_ohlc_interval(symbol, 240)
+            self._fetch_ohlc_interval(symbol, 240),
+            return_exceptions=True
         )
+
+        res_15m, res_1h, res_4h = results[0], results[1], results[2]
+        
+        # 15m is the primary trading timeframe - if it fails, re-raise
+        if isinstance(res_15m, Exception):
+            self._log(f"⚠️ [MarketDataService] Critical failure fetching 15m OHLCV for {symbol}: {res_15m}")
+            raise res_15m
+            
+        tf_15m = res_15m if isinstance(res_15m, dict) else {}
+        tf_1h = res_1h if isinstance(res_1h, dict) else {}
+        tf_4h = res_4h if isinstance(res_4h, dict) else {}
+
+        if isinstance(res_1h, Exception):
+            self._log(f"⚠️ [MarketDataService] 1H timeframe unavailable for {symbol}: {res_1h}. Defaulting to NEUTRAL.", level="warning")
+        if isinstance(res_4h, Exception):
+            self._log(f"⚠️ [MarketDataService] 4H timeframe unavailable for {symbol}: {res_4h}. Defaulting to NEUTRAL.", level="warning")
 
         t15 = tf_15m.get("trend", "NEUTRAL") if tf_15m else "NEUTRAL"
         t1h = tf_1h.get("trend", "NEUTRAL") if tf_1h else "NEUTRAL"
@@ -334,290 +368,356 @@ class MarketDataService:
         raise ValueError(f"Nado OrderBook client not initialized for {symbol}")
 
     async def fetch_indicators(self, symbol: str) -> Dict[str, Any]:
-        """Fetches candle data and computes RSI-14, EMA-20, and MACD."""
+        """Fetches candle data and computes RSI-14, EMA-20/50/200, MACD, ATR-14, ADX-14, VWAP, and Bollinger Bands."""
         try:
-            # We can use the existing _fetch_ohlc_interval to get 15m futures candles
-            res = await self._fetch_ohlc_interval(symbol, 15)
-            candles = res.get("candles_20", [])
-            # We need a longer history to warm up EMA and MACD properly.
-            # 200 candles is a good industry standard for stable EMA/MACD values.
+            # 200 candles is industry standard for stable EMA, MACD, ADX and VWAP warm-up.
+            # Reuses cached 15m candles from _fetch_ohlc_interval/fetch_multi_timeframe if already fetched.
             candles = await self._fetch_nado_candles(symbol, 15, 200)
             
-            if True: # Kept to maintain indentation level
-                        if candles:
-                            closes = [float(c["close"]) for c in candles[-200:]]
-                            highs = [float(c["high"]) for c in candles[-200:]]
-                            lows = [float(c["low"]) for c in candles[-200:]]
-                            if len(closes) >= 35:
-                                gains = [max(0, closes[i] - closes[i-1]) for i in range(1, len(closes))]
-                                losses = [max(0, closes[i-1] - closes[i]) for i in range(1, len(closes))]
-                                
-                                # RSI Wilder's Smoothing (RMA)
-                                avg_gain = sum(gains[:14]) / 14
-                                avg_loss = sum(losses[:14]) / 14
-                                for i in range(14, len(gains)):
-                                    avg_gain = (avg_gain * 13 + gains[i]) / 14
-                                    avg_loss = (avg_loss * 13 + losses[i]) / 14
-                                rs = avg_gain / (avg_loss + 1e-6)
-                                rsi = round(100 - (100 / (1 + rs)), 2)
+            if candles:
+                closes = [float(c["close"]) for c in candles[-200:]]
+                highs = [float(c["high"]) for c in candles[-200:]]
+                lows = [float(c["low"]) for c in candles[-200:]]
+                current_price = closes[-1]
 
-                                def calc_ema_series(data, period):
-                                    if not data or len(data) < period: return [0] * len(data)
-                                    emas = [0] * (period - 1)
-                                    ema = sum(data[:period]) / period
-                                    emas.append(ema)
-                                    k = 2 / (period + 1)
-                                    for price in data[period:]:
-                                        ema = (price - ema) * k + ema
-                                        emas.append(ema)
-                                    return emas
+                if len(closes) >= 35:
+                    gains = [max(0.0, closes[i] - closes[i-1]) for i in range(1, len(closes))]
+                    losses = [max(0.0, closes[i-1] - closes[i]) for i in range(1, len(closes))]
+                    
+                    # 1. RSI Wilder's Smoothing (RMA)
+                    avg_gain = sum(gains[:14]) / 14.0
+                    avg_loss = sum(losses[:14]) / 14.0
+                    for i in range(14, len(gains)):
+                        avg_gain = (avg_gain * 13.0 + gains[i]) / 14.0
+                        avg_loss = (avg_loss * 13.0 + losses[i]) / 14.0
+                    if avg_gain == 0.0 and avg_loss == 0.0:
+                        rsi = 50.0
+                    else:
+                        rs = avg_gain / (avg_loss + 1e-6)
+                        rsi = round(100.0 - (100.0 / (1.0 + rs)), 2)
 
-                                ema_20_series = calc_ema_series(closes, 20)
-                                ema_20 = round(ema_20_series[-1], 6)
-                                current_price = closes[-1]
-                                ema_trend = "up" if current_price > ema_20 else "down"
+                    def calc_ema_series(data, period):
+                        if not data or len(data) < period: return [0.0] * len(data)
+                        emas = [0.0] * (period - 1)
+                        ema = sum(data[:period]) / period
+                        emas.append(ema)
+                        k = 2.0 / (period + 1.0)
+                        for price in data[period:]:
+                            ema = (price - ema) * k + ema
+                            emas.append(ema)
+                        return emas
 
-                                # MACD (12, 26, 9)
-                                ema_12_series = calc_ema_series(closes, 12)
-                                ema_26_series = calc_ema_series(closes, 26)
-                                macd_line = [ema_12_series[i] - ema_26_series[i] for i in range(len(closes))]
-                                
-                                # Signal line is EMA(9) of the valid MACD portion
-                                macd_valid = macd_line[25:]
-                                signal_line_series = calc_ema_series(macd_valid, 9)
-                                signal_val = signal_line_series[-1] if signal_line_series else 0
-                                
-                                macd_val = macd_line[-1]
-                                macd_signal_label = "bullish" if macd_val > signal_val else "bearish"
+                    # 2. EMAs (20, 50, 200)
+                    ema_20_series = calc_ema_series(closes, 20)
+                    ema_20 = round(ema_20_series[-1], 6)
+                    ema_50_series = calc_ema_series(closes, 50)
+                    ema_50 = round(ema_50_series[-1], 6) if len(closes) >= 50 else ema_20
+                    ema_200_series = calc_ema_series(closes, 200)
+                    ema_200 = round(ema_200_series[-1], 6) if len(closes) >= 200 else ema_50
+                    ema_trend = "up" if current_price > ema_20 else "down"
 
-                                # ATR-14 (Wilder's Smoothing)
-                                tr_list = [max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1])) for i in range(1, len(closes))]
-                                atr_14 = sum(tr_list[:14]) / 14
-                                for i in range(14, len(tr_list)):
-                                    atr_14 = (atr_14 * 13 + tr_list[i]) / 14
-                                atr_pct = round((atr_14 / current_price) * 100, 2)
+                    # 3. MACD (12, 26, 9)
+                    ema_12_series = calc_ema_series(closes, 12)
+                    ema_26_series = calc_ema_series(closes, 26)
+                    macd_line = [ema_12_series[i] - ema_26_series[i] for i in range(len(closes))]
+                    
+                    # Signal line is EMA(9) of the valid MACD portion
+                    macd_valid = macd_line[25:]
+                    signal_line_series = calc_ema_series(macd_valid, 9)
+                    signal_val = signal_line_series[-1] if signal_line_series else 0.0
+                    
+                    macd_val = macd_line[-1]
+                    macd_signal_label = "bullish" if macd_val > signal_val else "bearish"
+                    macd_histogram = round(macd_val - signal_val, 6)
+                    prev_histogram = round(macd_valid[-2] - signal_line_series[-2], 6) if len(macd_valid) >= 2 and len(signal_line_series) >= 2 else 0.0
+                    histogram_momentum = "accelerating" if abs(macd_histogram) > abs(prev_histogram) else "decelerating"
 
-                                # Efficiency Ratio (ER-14) - Trend Strength Measurement based on past CLOSED candles
-                                if len(closes) >= 16:
-                                    direction = abs(closes[-2] - closes[-16])
-                                    volatility = sum(abs(closes[i] - closes[i-1]) for i in range(len(closes)-15, len(closes)-1))
-                                    er_14 = round(direction / volatility, 3) if volatility > 0 else 0.0
-                                else:
-                                    er_14 = 0.0
-                                    
-                                # Bollinger Bands (20, 2) based on past CLOSED candles to prevent repainting
-                                if len(closes) >= 21:
-                                    sma_20 = sum(closes[-21:-1]) / 20
-                                    variance = sum((x - sma_20) ** 2 for x in closes[-21:-1]) / 20
-                                    std_dev = variance ** 0.5
-                                    bb_upper = round(sma_20 + (2 * std_dev), 6)
-                                    bb_lower = round(sma_20 - (2 * std_dev), 6)
-                                    bb_width_pct = round(((bb_upper - bb_lower) / sma_20) * 100, 2) if sma_20 > 0 else 0.0
-                                    bb_position_pct = round(((current_price - bb_lower) / (bb_upper - bb_lower)) * 100, 2) if bb_upper > bb_lower else 50.0
-                                else:
-                                    sma_20 = 0.0
-                                    bb_upper = 0.0
-                                    bb_lower = 0.0
-                                    bb_width_pct = 0.0
-                                    bb_position_pct = 50.0
+                    # 4. ATR-14 (Wilder's Smoothing)
+                    tr_list = [max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1])) for i in range(1, len(closes))]
+                    atr_14 = sum(tr_list[:14]) / 14.0
+                    for i in range(14, len(tr_list)):
+                        atr_14 = (atr_14 * 13.0 + tr_list[i]) / 14.0
+                    atr_pct = round((atr_14 / current_price) * 100.0, 2) if current_price > 0 else 0.0
 
-                                # Breakout & Momentum (Volume Spike & Donchian 20)
-                                if len(candles) >= 21:
-                                    # Use past 20 completed candles for average and channel
-                                    past_20_vols = [float(c.get("volume", 0)) for c in candles[-21:-1]]
-                                    vol_sma_20 = sum(past_20_vols) / len(past_20_vols) if past_20_vols else 0
-                                    current_vol = float(candles[-1].get("volume", 0))
-                                    volume_spike_pct = round((current_vol / vol_sma_20) * 100, 2) if vol_sma_20 > 0 else 0.0
-                                    
-                                    past_20_highs = [float(c.get("high", 0)) for c in candles[-21:-1]]
-                                    past_20_lows = [float(c.get("low", 0)) for c in candles[-21:-1]]
-                                    donchian_high = max(past_20_highs) if past_20_highs else current_price
-                                    donchian_low = min(past_20_lows) if past_20_lows else current_price
-                                else:
-                                    volume_spike_pct = 0.0
-                                    donchian_high = current_price
-                                    donchian_low = current_price
+                    # 5. ADX-14 (Average Directional Index)
+                    adx_14 = 0.0
+                    plus_di_14 = 0.0
+                    minus_di_14 = 0.0
+                    if len(closes) >= 29:
+                        plus_dm = []
+                        minus_dm = []
+                        for i in range(1, len(closes)):
+                            up_m = highs[i] - highs[i-1]
+                            down_m = lows[i-1] - lows[i]
+                            plus_dm.append(up_m if up_m > down_m and up_m > 0 else 0.0)
+                            minus_dm.append(down_m if down_m > up_m and down_m > 0 else 0.0)
+                            
+                        tr_s = sum(tr_list[:14])
+                        pdm_s = sum(plus_dm[:14])
+                        mdm_s = sum(minus_dm[:14])
+                        dx_list = []
+                        for i in range(14, len(tr_list)):
+                            tr_s = tr_s - (tr_s / 14.0) + tr_list[i]
+                            pdm_s = pdm_s - (pdm_s / 14.0) + plus_dm[i]
+                            mdm_s = mdm_s - (mdm_s / 14.0) + minus_dm[i]
+                            p_di = 100.0 * (pdm_s / tr_s) if tr_s > 0 else 0.0
+                            m_di = 100.0 * (mdm_s / tr_s) if tr_s > 0 else 0.0
+                            di_sum = p_di + m_di
+                            dx = 100.0 * (abs(p_di - m_di) / di_sum) if di_sum > 0 else 0.0
+                            dx_list.append(dx)
+                            plus_di_14 = round(p_di, 2)
+                            minus_di_14 = round(m_di, 2)
+                        if len(dx_list) >= 14:
+                            adx_val = sum(dx_list[:14]) / 14.0
+                            for d in dx_list[14:]:
+                                adx_val = (adx_val * 13.0 + d) / 14.0
+                            adx_14 = round(adx_val, 2)
+                        elif dx_list:
+                            adx_14 = round(sum(dx_list) / len(dx_list), 2)
 
-                                # === ALGORITHMIC SIGNALS (QW #2) ===
-                                # These are deterministic, computed in Python — no LLM guessing.
+                    # 6. Intraday VWAP (up to 96 bars = 24h)
+                    vwap_bars = candles[-96:] if len(candles) >= 96 else candles
+                    v_sum = 0.0
+                    tp_v_sum = 0.0
+                    for c in vwap_bars:
+                        h_c, l_c, cl_c, v_c = float(c.get("high", 0)), float(c.get("low", 0)), float(c.get("close", 0)), float(c.get("volume", 0))
+                        tp = (h_c + l_c + cl_c) / 3.0
+                        v_sum += v_c
+                        tp_v_sum += tp * v_c
+                    vwap = round(tp_v_sum / v_sum, 6) if v_sum > 0 else current_price
 
-                                # 1. RSI Divergence Detection (last 20 bars)
-                                rsi_divergence = "none"
-                                # Compute RSI series for divergence check
-                                rsi_series = []
-                                _ag = sum(gains[:14]) / 14
-                                _al = sum(losses[:14]) / 14
-                                for i in range(14, len(gains)):
-                                    _ag = (_ag * 13 + gains[i]) / 14
-                                    _al = (_al * 13 + losses[i]) / 14
-                                    _rs = _ag / (_al + 1e-6)
-                                    rsi_series.append(round(100 - (100 / (1 + _rs)), 2))
-                                
-                                if len(rsi_series) >= 20 and len(closes) >= 20:
-                                    # Bullish divergence: price makes Lower Low, RSI makes Higher Low
-                                    price_tail = closes[-20:]
-                                    rsi_tail = rsi_series[-20:]
-                                    price_min1_idx = price_tail[:10].index(min(price_tail[:10]))
-                                    price_min2_idx = 10 + price_tail[10:].index(min(price_tail[10:]))
-                                    if price_tail[price_min2_idx] < price_tail[price_min1_idx] and rsi_tail[price_min2_idx] > rsi_tail[price_min1_idx]:
-                                        rsi_divergence = "bullish"
-                                    # Bearish divergence: price makes Higher High, RSI makes Lower High
-                                    price_max1_idx = price_tail[:10].index(max(price_tail[:10]))
-                                    price_max2_idx = 10 + price_tail[10:].index(max(price_tail[10:]))
-                                    if price_tail[price_max2_idx] > price_tail[price_max1_idx] and rsi_tail[price_max2_idx] < rsi_tail[price_max1_idx]:
-                                        rsi_divergence = "bearish"
+                    # 7. Efficiency Ratio (ER-14) - Trend Strength based on past CLOSED candles
+                    if len(closes) >= 16:
+                        direction = abs(closes[-2] - closes[-16])
+                        volatility = sum(abs(closes[i] - closes[i-1]) for i in range(len(closes)-15, len(closes)-1))
+                        er_14 = round(direction / volatility, 3) if volatility > 0 else 0.0
+                    else:
+                        er_14 = 0.0
+                        
+                    # 8. Bollinger Bands (20, 2) based on past CLOSED candles (prevent repainting)
+                    if len(closes) >= 21:
+                        sma_20 = sum(closes[-21:-1]) / 20.0
+                        variance = sum((x - sma_20) ** 2 for x in closes[-21:-1]) / 20.0
+                        std_dev = max(0.0, variance) ** 0.5
+                        bb_upper = round(sma_20 + (2.0 * std_dev), 6)
+                        bb_lower = round(sma_20 - (2.0 * std_dev), 6)
+                        bb_width_pct = round(((bb_upper - bb_lower) / sma_20) * 100.0, 2) if sma_20 > 0 else 0.0
+                        bb_position_pct = round(((current_price - bb_lower) / (bb_upper - bb_lower)) * 100.0, 2) if bb_upper > bb_lower else 50.0
+                    else:
+                        sma_20 = current_price
+                        bb_upper = current_price
+                        bb_lower = current_price
+                        bb_width_pct = 0.0
+                        bb_position_pct = 50.0
 
-                                # 2. MACD Crossover Detection
-                                macd_crossover = "none"
-                                if len(macd_valid) >= 2 and len(signal_line_series) >= 2:
-                                    prev_macd = macd_valid[-2]
-                                    prev_signal = signal_line_series[-2]
-                                    curr_macd = macd_valid[-1]
-                                    curr_signal = signal_line_series[-1]
-                                    if prev_macd <= prev_signal and curr_macd > curr_signal:
-                                        macd_crossover = "bullish_cross"
-                                    elif prev_macd >= prev_signal and curr_macd < curr_signal:
-                                        macd_crossover = "bearish_cross"
+                    # 9. Breakout & Momentum (Volume Spike & Donchian 20)
+                    if len(candles) >= 21:
+                        past_20_vols = [float(c.get("volume", 0)) for c in candles[-21:-1]]
+                        vol_sma_20 = sum(past_20_vols) / len(past_20_vols) if past_20_vols else 0.0
+                        current_vol = float(candles[-1].get("volume", 0))
+                        volume_spike_pct = round((current_vol / vol_sma_20) * 100.0, 2) if vol_sma_20 > 0 else 0.0
+                        
+                        past_20_highs = [float(c.get("high", 0)) for c in candles[-21:-1]]
+                        past_20_lows = [float(c.get("low", 0)) for c in candles[-21:-1]]
+                        donchian_high = max(past_20_highs) if past_20_highs else current_price
+                        donchian_low = min(past_20_lows) if past_20_lows else current_price
+                    else:
+                        volume_spike_pct = 0.0
+                        donchian_high = current_price
+                        donchian_low = current_price
 
-                                # 3. MACD Histogram momentum
-                                macd_histogram = round(macd_val - signal_val, 6)
-                                prev_histogram = round(macd_valid[-2] - signal_line_series[-2], 6) if len(macd_valid) >= 2 and len(signal_line_series) >= 2 else 0
-                                histogram_momentum = "accelerating" if abs(macd_histogram) > abs(prev_histogram) else "decelerating"
+                    # === ALGORITHMIC SIGNALS ===
+                    # 10. RSI Divergence Detection (last 20 bars)
+                    rsi_divergence = "none"
+                    rsi_series = []
+                    _ag = sum(gains[:14]) / 14.0
+                    _al = sum(losses[:14]) / 14.0
+                    for i in range(14, len(gains)):
+                        _ag = (_ag * 13.0 + gains[i]) / 14.0
+                        _al = (_al * 13.0 + losses[i]) / 14.0
+                        _rs = _ag / (_al + 1e-6)
+                        rsi_series.append(round(100.0 - (100.0 / (1.0 + _rs)), 2))
+                    
+                    if len(rsi_series) >= 20 and len(closes) >= 20:
+                        price_tail = closes[-20:]
+                        rsi_tail = rsi_series[-20:]
+                        price_min1_idx = price_tail[:10].index(min(price_tail[:10]))
+                        price_min2_idx = 10 + price_tail[10:].index(min(price_tail[10:]))
+                        if price_tail[price_min2_idx] < price_tail[price_min1_idx] and rsi_tail[price_min2_idx] > rsi_tail[price_min1_idx]:
+                            rsi_divergence = "bullish"
+                        price_max1_idx = price_tail[:10].index(max(price_tail[:10]))
+                        price_max2_idx = 10 + price_tail[10:].index(max(price_tail[10:]))
+                        if price_tail[price_max2_idx] > price_tail[price_max1_idx] and rsi_tail[price_max2_idx] < rsi_tail[price_max1_idx]:
+                            rsi_divergence = "bearish"
 
-                                # 4. Liquidity Sweep Detection (wick > 60% of candle range on last 5 candles)
-                                sweeps_detected = []
-                                for ci in range(-5, 0):
-                                    if abs(ci) <= len(candles):
-                                        c = candles[ci]
-                                        o, h, l, cl = float(c["open"]), float(c["high"]), float(c["low"]), float(c["close"])
-                                        rng = h - l
-                                        if rng > 0:
-                                            upper_wick = h - max(o, cl)
-                                            lower_wick = min(o, cl) - l
-                                            if upper_wick / rng > 0.6:
-                                                sweeps_detected.append({"type": "upper_sweep", "bar": ci, "rejection_from": round(h, 6)})
-                                            elif lower_wick / rng > 0.6:
-                                                sweeps_detected.append({"type": "lower_sweep", "bar": ci, "rejection_from": round(l, 6)})
+                    # 11. MACD Crossover Detection
+                    macd_crossover = "none"
+                    if len(macd_valid) >= 2 and len(signal_line_series) >= 2:
+                        prev_macd = macd_valid[-2]
+                        prev_signal = signal_line_series[-2]
+                        curr_macd = macd_valid[-1]
+                        curr_signal = signal_line_series[-1]
+                        if prev_macd <= prev_signal and curr_macd > curr_signal:
+                            macd_crossover = "bullish_cross"
+                        elif prev_macd >= prev_signal and curr_macd < curr_signal:
+                            macd_crossover = "bearish_cross"
 
-                                # 5. Candle Pattern Detection (last 3 candles)
-                                candle_patterns = []
-                                if len(candles) >= 3:
-                                    for ci in range(-3, 0):
-                                        c = candles[ci]
-                                        o, h, l, cl = float(c["open"]), float(c["high"]), float(c["low"]), float(c["close"])
-                                        body = abs(cl - o)
-                                        rng = h - l
-                                        if rng > 0:
-                                            body_ratio = body / rng
-                                            if body_ratio < 0.1:
-                                                candle_patterns.append({"bar": ci, "pattern": "doji"})
-                                            elif body_ratio > 0.7 and cl > o:
-                                                candle_patterns.append({"bar": ci, "pattern": "strong_bullish"})
-                                            elif body_ratio > 0.7 and cl < o:
-                                                candle_patterns.append({"bar": ci, "pattern": "strong_bearish"})
-                                    
-                                    # Engulfing
-                                    c_prev = candles[-2]
-                                    c_curr = candles[-1]
-                                    po, pc = float(c_prev["open"]), float(c_prev["close"])
-                                    co, cc = float(c_curr["open"]), float(c_curr["close"])
-                                    if pc < po and cc > co and cc > po and co < pc:
-                                        candle_patterns.append({"bar": -1, "pattern": "bullish_engulfing"})
-                                    elif pc > po and cc < co and cc < po and co > pc:
-                                        candle_patterns.append({"bar": -1, "pattern": "bearish_engulfing"})
+                    # 12. Liquidity Sweep Detection (wick > 60% of candle range on last 5 candles)
+                    sweeps_detected = []
+                    for ci in range(-5, 0):
+                        if abs(ci) <= len(candles):
+                            c = candles[ci]
+                            o, h, l, cl = float(c["open"]), float(c["high"]), float(c["low"]), float(c["close"])
+                            rng = h - l
+                            if rng > 0:
+                                upper_wick = h - max(o, cl)
+                                lower_wick = min(o, cl) - l
+                                if upper_wick / rng > 0.6:
+                                    sweeps_detected.append({
+                                        "type": "upper_sweep",
+                                        "sweep_type": "bearish_sweep",
+                                        "direction": "bearish",
+                                        "bar": ci,
+                                        "rejection_from": round(h, 6)
+                                    })
+                                elif lower_wick / rng > 0.6:
+                                    sweeps_detected.append({
+                                        "type": "lower_sweep",
+                                        "sweep_type": "bullish_sweep",
+                                        "direction": "bullish",
+                                        "bar": ci,
+                                        "rejection_from": round(l, 6)
+                                    })
 
-                                # 6. EMA-20 Distance (overextension check)
-                                ema_distance_pct = round(((current_price - ema_20) / ema_20) * 100, 2) if ema_20 > 0 else 0
+                    # 13. Candle Pattern Detection (evaluated on closed candles)
+                    candle_patterns = []
+                    if len(candles) >= 3:
+                        for ci in range(-3, -1):
+                            c = candles[ci]
+                            o, h, l, cl = float(c["open"]), float(c["high"]), float(c["low"]), float(c["close"])
+                            body = abs(cl - o)
+                            rng = h - l
+                            if rng > 0:
+                                body_ratio = body / rng
+                                if body_ratio < 0.1:
+                                    candle_patterns.append({"bar": ci, "pattern": "doji"})
+                                elif body_ratio > 0.7 and cl > o:
+                                    candle_patterns.append({"bar": ci, "pattern": "strong_bullish"})
+                                elif body_ratio > 0.7 and cl < o:
+                                    candle_patterns.append({"bar": ci, "pattern": "strong_bearish"})
+                        
+                        # Engulfing on completed candles
+                        c_prev = candles[-3]
+                        c_curr = candles[-2]
+                        po, pc = float(c_prev["open"]), float(c_prev["close"])
+                        co, cc = float(c_curr["open"]), float(c_curr["close"])
+                        if pc < po and cc > co and cc > po and co < pc:
+                            candle_patterns.append({"bar": -2, "pattern": "bullish_engulfing"})
+                        elif pc > po and cc < co and cc < po and co > pc:
+                            candle_patterns.append({"bar": -2, "pattern": "bearish_engulfing"})
 
-                                # 7. 24h Return (for Relative Momentum in Pipeline)
-                                asset_return_24h = 0.0
-                                if len(closes) >= 97: # 96 intervals of 15m = 24h
-                                    past_price = closes[-97]
-                                    asset_return_24h = ((current_price - past_price) / past_price) * 100 if past_price > 0 else 0.0
+                    # 14. EMA-20 Distance (overextension check)
+                    ema_distance_pct = round(((current_price - ema_20) / ema_20) * 100.0, 2) if ema_20 > 0 else 0.0
 
-                                return {
-                                    "symbol": symbol,
-                                    "rsi_14": rsi,
-                                    "ema_20": ema_20,
-                                    "ema_trend": ema_trend,
-                                    "ema_distance_pct": ema_distance_pct,
-                                    "macd": round(macd_val, 6),
-                                    "macd_val": round(macd_val, 6),
-                                    "macd_signal": round(signal_val, 6),
-                                    "macd_label": macd_signal_label,
-                                    "macd_histogram": macd_histogram,
-                                    "histogram_momentum": histogram_momentum,
-                                    "atr_14": round(atr_14, 6),
-                                    "atr_pct": atr_pct,
-                                    "er_14": er_14,
-                                    "bb_upper": bb_upper,
-                                    "bb_lower": bb_lower,
-                                    "bb_middle": sma_20,
-                                    "sma_20": sma_20,
-                                    "bb_width_pct": bb_width_pct,
-                                    "bb_position_pct": bb_position_pct,
-                                    "bb_pos": bb_position_pct,
-                                    "volume_spike_pct": volume_spike_pct,
-                                    "donchian_high": donchian_high,
-                                    "donchian_low": donchian_low,
-                                    "last_closed_candle_close": closes[-2] if len(closes) >= 2 else current_price,
-                                    # Algorithmic signals (deterministic, no LLM needed)
-                                    "algo_signals": {
-                                        "rsi_divergence": rsi_divergence,
-                                        "macd_crossover": macd_crossover,
-                                        "liquidity_sweeps": sweeps_detected,
-                                        "candle_patterns": candle_patterns
-                                    },
-                                    "asset_return_24h": round(asset_return_24h, 2)
-                                }
-                            else:
-                                self._log(f"⚠️ [MarketDataService] Недостаточно истории для индикаторов {symbol} (нужно >= 35, есть {len(closes)}).")
-                                return {
-                                    "symbol": symbol,
-                                    "rsi_14": 50.0,
-                                    "ema_20": 0.0,
-                                    "ema_trend": "flat",
-                                    "ema_distance_pct": 0.0,
-                                    "macd_val": 0.0,
-                                    "macd_signal": "neutral",
-                                    "macd_histogram": 0.0,
-                                    "histogram_momentum": "neutral",
-                                    "atr_14": 0.0,
-                                    "atr_pct": 0.0,
-                                    "algo_signals": {
-                                        "rsi_divergence": "none",
-                                        "macd_crossover": "none",
-                                        "liquidity_sweeps": [],
-                                        "candle_patterns": []
-                                    },
-                                    "asset_return_24h": 0.0
-                                }
-                        else:
-                            self._log(f"⚠️ [MarketDataService] Пустой массив свечей от Kraken для {symbol}.")
-                            return {
-                                "symbol": symbol,
-                                "rsi_14": 50.0,
-                                "ema_20": 0.0,
-                                "ema_trend": "flat",
-                                "ema_distance_pct": 0.0,
-                                "macd_val": 0.0,
-                                "macd_signal": "neutral",
-                                "macd_histogram": 0.0,
-                                "histogram_momentum": "neutral",
-                                "atr_14": 0.0,
-                                "atr_pct": 0.0,
-                                "algo_signals": {
-                                    "rsi_divergence": "none",
-                                    "macd_crossover": "none",
-                                    "liquidity_sweeps": [],
-                                    "candle_patterns": []
-                                },
-                                "asset_return_24h": 0.0
-                            }
+                    # 15. 24h Return
+                    asset_return_24h = 0.0
+                    if len(closes) >= 97:
+                        past_price = closes[-97]
+                        asset_return_24h = ((current_price - past_price) / past_price) * 100.0 if past_price > 0 else 0.0
+
+                    return {
+                        "symbol": symbol,
+                        "rsi_14": rsi,
+                        "ema_20": ema_20,
+                        "ema_50": ema_50,
+                        "ema_200": ema_200,
+                        "ema_trend": ema_trend,
+                        "ema_distance_pct": ema_distance_pct,
+                        "macd": round(macd_val, 6),
+                        "macd_val": round(macd_val, 6),
+                        "macd_signal": round(signal_val, 6),
+                        "macd_label": macd_signal_label,
+                        "macd_histogram": macd_histogram,
+                        "histogram_momentum": histogram_momentum,
+                        "atr_14": round(atr_14, 6),
+                        "atr_pct": atr_pct,
+                        "adx_14": adx_14,
+                        "plus_di_14": plus_di_14,
+                        "minus_di_14": minus_di_14,
+                        "vwap": vwap,
+                        "er_14": er_14,
+                        "bb_upper": bb_upper,
+                        "bb_lower": bb_lower,
+                        "bb_middle": sma_20,
+                        "sma_20": sma_20,
+                        "bb_width_pct": bb_width_pct,
+                        "bb_position_pct": bb_position_pct,
+                        "bb_pos": bb_position_pct,
+                        "volume_spike_pct": volume_spike_pct,
+                        "donchian_high": donchian_high,
+                        "donchian_low": donchian_low,
+                        "last_closed_candle_close": closes[-2] if len(closes) >= 2 else current_price,
+                        "algo_signals": {
+                            "rsi_divergence": rsi_divergence,
+                            "macd_crossover": macd_crossover,
+                            "liquidity_sweeps": sweeps_detected,
+                            "candle_patterns": candle_patterns
+                        },
+                        "asset_return_24h": round(asset_return_24h, 2)
+                    }
+                else:
+                    self._log(f"⚠️ [MarketDataService] Недостаточно истории для индикаторов {symbol} (нужно >= 35, есть {len(closes)}).")
+                    return self._create_fallback_indicators(symbol, current_price)
+            else:
+                self._log(f"⚠️ [MarketDataService] Пустой массив свечей от Nado для {symbol}.")
+                return self._create_fallback_indicators(symbol, 0.0)
 
         except Exception as e:
             self._log(f"⚠️ [MarketDataService] Ошибка расчёта индикаторов: {e}")
             raise Exception(f"Не удалось получить индикаторы для {symbol}") from e
+
+    def _create_fallback_indicators(self, symbol: str, price: float) -> Dict[str, Any]:
+        """Provides a complete, schema-compliant fallback dictionary for indicators."""
+        return {
+            "symbol": symbol,
+            "rsi_14": 50.0,
+            "ema_20": price,
+            "ema_50": price,
+            "ema_200": price,
+            "ema_trend": "flat",
+            "ema_distance_pct": 0.0,
+            "macd": 0.0,
+            "macd_val": 0.0,
+            "macd_signal": 0.0,
+            "macd_label": "neutral",
+            "macd_histogram": 0.0,
+            "histogram_momentum": "neutral",
+            "atr_14": 0.0,
+            "atr_pct": 0.0,
+            "adx_14": 0.0,
+            "plus_di_14": 0.0,
+            "minus_di_14": 0.0,
+            "vwap": price,
+            "er_14": 0.0,
+            "bb_upper": price,
+            "bb_lower": price,
+            "bb_middle": price,
+            "sma_20": price,
+            "bb_width_pct": 0.0,
+            "bb_position_pct": 50.0,
+            "bb_pos": 50.0,
+            "volume_spike_pct": 0.0,
+            "donchian_high": price,
+            "donchian_low": price,
+            "last_closed_candle_close": price,
+            "algo_signals": {
+                "rsi_divergence": "none",
+                "macd_crossover": "none",
+                "liquidity_sweeps": [],
+                "candle_patterns": []
+            },
+            "asset_return_24h": 0.0
+        }
 
     async def fetch_news_sentiment(self, symbol: str) -> Dict[str, Any]:
         """Fetches real Crypto Fear & Greed Index from Alternative.me."""

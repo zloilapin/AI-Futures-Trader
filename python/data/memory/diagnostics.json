@@ -1,23 +1,23 @@
 {
-    "total_scans": 1131,
-    "trades_executed": 18,
-    "execution_failed": 13,
+    "total_scans": 1139,
+    "trades_executed": 19,
+    "execution_failed": 15,
     "rejections": {
         "AGENT_ERROR": 9,
         "CEO_HOLD_ANALYST_DISAGREEMENT": 25,
         "MARKET_CHOPPY": 8,
         "CEO_HOLD_LOW_EDGE": 16,
         "CEO HOLD ANALYST DISAGREEMENT": 1,
-        "FETCH_ERROR": 38,
+        "FETCH_ERROR": 41,
         "NO_SIGNAL": 371,
         "LOW_CONFIDENCE": 190,
         "LOW_VOLATILITY": 146,
         "LOW_EDGE": 154,
         "ANALYST_DISAGREEMENT": 34,
         "MIN_SIZE": 27,
-        "DATA_INVALID": 45,
+        "DATA_INVALID": 46,
         "WAIT_FOR_PULLBACK": 10,
-        "STRATEGY_GUARD_VETO": 9,
+        "STRATEGY_GUARD_VETO": 10,
         "SYMBOL_PROCESSING_ERROR": 1
     }
 }
