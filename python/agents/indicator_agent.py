@@ -16,8 +16,8 @@ class IndicatorAgent(BaseAgent):
     async def analyze(self, market_data: Dict[str, Any]) -> Dict[str, Any]:
         self.logger.info(f"[{self.name}] Детерминированный анализ технических индикаторов...")
         
-        indicators = market_data.get("indicators", {})
-        price_data = market_data.get("price_data", {})
+        indicators = market_data.get("indicators") or {}
+        price_data = market_data.get("price_data") or {}
         
         rsi = indicators.get("rsi_14")
         macd = indicators.get("macd")
@@ -32,7 +32,7 @@ class IndicatorAgent(BaseAgent):
         bull_score = 0
         bear_score = 0
 
-        mtf = market_data.get("multi_timeframe", {})
+        mtf = market_data.get("multi_timeframe") or {}
         trend_1h = mtf.get("trend_1h", "NEUTRAL")
         trend_4h = mtf.get("trend_4h", "NEUTRAL")
         is_macro_bearish = (trend_1h == "BEARISH" or trend_4h == "BEARISH")
@@ -83,7 +83,7 @@ class IndicatorAgent(BaseAgent):
                 reason_parts.append("Цена ниже EMA-20")
 
         # Evaluate algorithmic signals
-        algo_signals = indicators.get("algo_signals", {})
+        algo_signals = indicators.get("algo_signals") or {}
         if algo_signals:
             rsi_div = str(algo_signals.get("rsi_divergence", "")).upper()
             if rsi_div == "BULLISH":
@@ -124,14 +124,17 @@ class IndicatorAgent(BaseAgent):
 
         # Interpret VWAP (intraday benchmark)
         vwap = indicators.get("vwap")
-        if vwap and current_price:
-            vwap_val = float(vwap)
-            if current_price > vwap_val:
-                bull_score += 1
-                reason_parts.append(f"Цена выше VWAP ({vwap_val:.2f})")
-            elif current_price < vwap_val:
-                bear_score += 1
-                reason_parts.append(f"Цена ниже VWAP ({vwap_val:.2f})")
+        if vwap is not None and current_price:
+            try:
+                vwap_val = float(vwap)
+                if current_price > vwap_val:
+                    bull_score += 1
+                    reason_parts.append(f"Цена выше VWAP ({vwap_val:.2f})")
+                elif current_price < vwap_val:
+                    bear_score += 1
+                    reason_parts.append(f"Цена ниже VWAP ({vwap_val:.2f})")
+            except (ValueError, TypeError):
+                pass
 
         # Interpret ADX (trend strength confirmation)
         adx = indicators.get("adx_14")

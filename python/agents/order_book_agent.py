@@ -15,10 +15,19 @@ class OrderBookAgent(BaseAgent):
     async def analyze(self, market_data: Dict[str, Any]) -> Dict[str, Any]:
         self.logger.info(f"[{self.name}] Детерминированный анализ микроструктуры стакана...")
         
-        ob_data = market_data.get("order_book_data", {})
+        ob_data = market_data.get("order_book_data") or {}
         
-        imbalance = ob_data.get("imbalance", 0.0)
-        spread = ob_data.get("spread", 0.0)
+        raw_imbalance = ob_data.get("imbalance")
+        try:
+            imbalance = float(raw_imbalance if raw_imbalance is not None else 0.0)
+        except (ValueError, TypeError):
+            imbalance = 0.0
+
+        raw_spread = ob_data.get("spread")
+        try:
+            spread = float(raw_spread if raw_spread is not None else 0.0)
+        except (ValueError, TypeError):
+            spread = 0.0
         
         signal = "NEUTRAL"
         confidence = 50

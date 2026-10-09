@@ -447,11 +447,36 @@ class TradingPipeline:
                     "analyst_reports": valid_reports
                 }
                 
-                # Запускаем Быка и Медведя параллельно
-                bull_verdict, bear_verdict = await asyncio.gather(
+                # Запускаем Быка и Медведя параллельно с изоляцией исключений
+                bull_res, bear_res = await asyncio.gather(
                     self.agents.bull.analyze(debate_payload),
-                    self.agents.bear.analyze(debate_payload)
+                    self.agents.bear.analyze(debate_payload),
+                    return_exceptions=True
                 )
+                
+                if isinstance(bull_res, Exception) or not isinstance(bull_res, dict) or bull_res.get("signal") == "ERROR":
+                    self.services.logger.error(f"[Stage 4] Ошибка Bull Agent: {bull_res}")
+                    bull_verdict = {
+                        "thesis_score": 0,
+                        "bullish_arguments": ["Бычий тезис недоступен (fallback)."],
+                        "potential_target": 0.0,
+                        "invalidation_level": 0.0,
+                        "summary": "Fallback bull thesis (error)"
+                    }
+                else:
+                    bull_verdict = bull_res
+
+                if isinstance(bear_res, Exception) or not isinstance(bear_res, dict) or bear_res.get("signal") == "ERROR":
+                    self.services.logger.error(f"[Stage 4] Ошибка Bear Agent: {bear_res}")
+                    bear_verdict = {
+                        "thesis_score": 0,
+                        "bearish_arguments": ["Медвежий тезис недоступен (fallback)."],
+                        "potential_target": 0.0,
+                        "invalidation_level": 0.0,
+                        "summary": "Fallback bear thesis (error)"
+                    }
+                else:
+                    bear_verdict = bear_res
                 
                 bull_summary = str(bull_verdict.get('summary', 'N/A')).strip()
                 bear_summary = str(bear_verdict.get('summary', 'N/A')).strip()

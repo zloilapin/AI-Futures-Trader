@@ -40,7 +40,17 @@ class BearAgent(BaseAgent):
         full_prompt = f"{self.system_instruction}\n\nMarket Data:\n{data_string}"
         
         try:
-            return await self.generate_json(full_prompt, required_keys=["thesis_score", "bearish_arguments", "summary"])
+            res = await self.generate_json(full_prompt, required_keys=["thesis_score", "bearish_arguments", "summary"])
+            if isinstance(res, dict) and res.get("signal") != "ERROR" and "thesis_score" in res:
+                return res
+            self.logger.warning(f"[{self.name}] LLM returned invalid thesis schema or ERROR: {res}")
         except Exception as e:
             self.logger.error(f"[{self.name}] Failed to build thesis: {e}")
-            return {"thesis_score": 0, "bearish_arguments": [], "summary": "Error generating bearish thesis"}
+
+        return {
+            "thesis_score": 0,
+            "bearish_arguments": ["Не удалось сформировать медвежий тезис из-за сбоя генерации."],
+            "potential_target": 0.0,
+            "invalidation_level": 0.0,
+            "summary": "Fallback thesis (Bear LLM error)"
+        }

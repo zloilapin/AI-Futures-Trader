@@ -15,11 +15,21 @@ class OIFundingAgent(BaseAgent):
     async def analyze(self, market_data: Dict[str, Any]) -> Dict[str, Any]:
         self.logger.info(f"[{self.name}] Детерминированный анализ открытого интереса (OI) и Funding...")
         
-        oi_data = market_data.get("derivatives_data", {})
+        oi_data = market_data.get("derivatives_data") or {}
         
-        funding_rate = float(oi_data.get("funding_rate", oi_data.get("funding_rate_decimal", 0.0)) or 0.0)
-        oi_usd = float(oi_data.get("open_interest_usd") or 0.0)
-        oi_trend = oi_data.get("open_interest_trend", "neutral")
+        raw_funding = oi_data.get("funding_rate", oi_data.get("funding_rate_decimal", 0.0))
+        try:
+            funding_rate = float(raw_funding if raw_funding is not None else 0.0)
+        except (ValueError, TypeError):
+            funding_rate = 0.0
+
+        raw_oi = oi_data.get("open_interest_usd")
+        try:
+            oi_usd = float(raw_oi if raw_oi is not None else 0.0)
+        except (ValueError, TypeError):
+            oi_usd = 0.0
+
+        oi_trend = str(oi_data.get("open_interest_trend") or "neutral").lower()
         
         signal = "NEUTRAL"
         confidence = 50

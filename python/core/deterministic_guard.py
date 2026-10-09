@@ -76,11 +76,11 @@ class DeterministicGuard:
         is_confirmed_breakout = False
         breakout_reason = ""
         if market_data and decision in ["LONG", "SHORT"]:
-            indicators = market_data.get("indicators", {})
+            indicators = market_data.get("indicators") or {}
             donchian_high = float(indicators.get("donchian_high") or 0.0)
             donchian_low = float(indicators.get("donchian_low") or 0.0)
             vol_spike = float(indicators.get("volume_spike_pct") or 0.0)
-            cur_price = float(market_data.get("price_data", {}).get("current_price") or 0.0)
+            cur_price = float((market_data.get("price_data") or {}).get("current_price") or 0.0)
             if decision == "LONG" and donchian_high > 0 and cur_price > donchian_high and vol_spike >= 120.0:
                 is_confirmed_breakout = True
                 breakout_reason = f"пробой Donchian High ({donchian_high}) с объемом {vol_spike:.1f}%"
@@ -147,7 +147,7 @@ class DeterministicGuard:
 
         # 4. Funding Rate Gate (Deterministic derivative protection)
         if is_actionable and market_data:
-            funding_rate = float(market_data.get("derivatives_data", {}).get("funding_rate") or 0.0)
+            funding_rate = float(((market_data.get("derivatives_data") or {}).get("funding_rate")) or 0.0)
             if decision == "LONG" and funding_rate > 0.0005: # > 0.05%
                 is_actionable = False
                 guard_status = "BLOCKED"
@@ -167,7 +167,7 @@ class DeterministicGuard:
 
         # 5. Anti-Whipsaw & Extreme Extension Guard (Prevent 'Shorting the Bottom' / 'Longing the Top')
         if is_actionable and market_data and strategy_mode == "TREND_FOLLOWING":
-            indicators = market_data.get("indicators", {})
+            indicators = market_data.get("indicators") or {}
             raw_rsi = indicators.get("rsi_14")
             rsi = float(raw_rsi) if raw_rsi is not None else None
             
@@ -175,11 +175,11 @@ class DeterministicGuard:
             bb_pos = float(raw_bb_pos) if raw_bb_pos is not None else None
 
             # Multi-timeframe and momentum context to avoid cutting off legitimate trend breakouts / dumps
-            mtf_data = market_data.get("multi_timeframe", {})
+            mtf_data = market_data.get("multi_timeframe") or {}
             mtf_alignment = mtf_data.get("mtf_alignment", "")
             trend_1h = mtf_data.get("trend_1h", "")
             vol_spike = float(indicators.get("volume_spike_pct") or 0.0)
-            algo_signals = indicators.get("algo_signals", {})
+            algo_signals = indicators.get("algo_signals") or {}
             rsi_div = algo_signals.get("rsi_divergence", "")
 
             # If MTF is aligned with volume momentum, or trending strongly without contrary divergence,

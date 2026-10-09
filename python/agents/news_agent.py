@@ -26,8 +26,13 @@ class NewsAgent(BaseAgent):
     async def analyze(self, market_data: Dict[str, Any]) -> Dict[str, Any]:
         self.logger.info(f"[{self.name}] Анализ сентимента рынка и индекса Fear & Greed...")
         
-        news_data = market_data.get("news_data", {})
-        score = float(news_data.get("sentiment_score", 50.0))
+        news_data = market_data.get("news_data") or {}
+        raw_score = news_data.get("sentiment_score")
+        try:
+            score = float(raw_score if raw_score is not None else 50.0)
+        except (ValueError, TypeError):
+            score = 50.0
+
         now = time.time()
 
         # Cache valid for 30 minutes if sentiment_score hasn't changed
@@ -44,9 +49,47 @@ class NewsAgent(BaseAgent):
         data_string = json.dumps(payload, indent=2)
         full_prompt = f"{self.system_instruction}\n\nMarket Sentiment Data:\n{data_string}"
         
-        result = await self.generate_json(full_prompt, required_keys=["signal", "confidence", "reasoning"])
-        if result and result.get("signal") != "ERROR":
+        result = None
+        if self.llm_client:
+            try:
+                result = await self.generate_json(full_prompt, required_keys=["signal", "confidence", "reasoning"])
+            except Exception as e:
+                self.logger.warning(f"[{self.name}] LLM generation failed: {e}")
+
+        if isinstance(result, dict) and result.get("signal") not in ("ERROR", None):
             self._cached_result = result
             self._cached_score = score
             self._cache_time = now
-        return result
+            return result
+
+        # Deterministic contrarian sentiment fallback (aligned with news_prompt.txt)
+        if score <= 25.0:
+            fallback_signal = "BULLISH"
+            fallback_conf = 75
+            fallback_reason = f"Extreme Fear ({score:.0f}/100): институциональная аккумуляция, асимметрия в лонг (фолбэк)."
+        elif score >= 75.0:
+            fallback_signal = "BEARISH"
+            fallback_conf = 75
+            fallback_reason = f"Extreme Greed ({score:.0f}/100): эйфория ритейла, риск истощения и коррекции (фолбэк)."
+        elif score < 40.0:
+            fallback_signal = "BULLISH"
+            fallback_conf = 60
+            fallback_reason = f"Умеренный страх на рынке ({score:.0f}/100): слабый уклон в лонг (фолбэк)."
+        elif score > 60.0:
+            fallback_signal = "BEARISH"
+            fallback_conf = 60
+            fallback_reason = f"Умеренная жадность ({score:.0f}/100): слабый уклон в шорт (фолбэк)."
+        else:
+            fallback_signal = "NEUTRAL"
+            fallback_conf = 50
+            fallback_reason = f"Нейтральный сентимент ({score:.0f}/100): отсутствие выраженного нарратива (фолбэк)."
+
+        fallback_result = {
+            "signal": fallback_signal,
+            "confidence": fallback_conf,
+            "reasoning": fallback_reason
+        }
+        self._cached_result = fallback_result
+        self._cached_score = score
+        self._cache_time = now
+        return fallback_result

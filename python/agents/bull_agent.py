@@ -40,7 +40,17 @@ class BullAgent(BaseAgent):
         full_prompt = f"{self.system_instruction}\n\nMarket Data:\n{data_string}"
         
         try:
-            return await self.generate_json(full_prompt, required_keys=["thesis_score", "bullish_arguments", "summary"])
+            res = await self.generate_json(full_prompt, required_keys=["thesis_score", "bullish_arguments", "summary"])
+            if isinstance(res, dict) and res.get("signal") != "ERROR" and "thesis_score" in res:
+                return res
+            self.logger.warning(f"[{self.name}] LLM returned invalid thesis schema or ERROR: {res}")
         except Exception as e:
             self.logger.error(f"[{self.name}] Failed to build thesis: {e}")
-            return {"thesis_score": 0, "bullish_arguments": [], "summary": "Error generating bullish thesis"}
+
+        return {
+            "thesis_score": 0,
+            "bullish_arguments": ["Не удалось сформировать бычий тезис из-за сбоя генерации."],
+            "potential_target": 0.0,
+            "invalidation_level": 0.0,
+            "summary": "Fallback thesis (Bull LLM error)"
+        }
