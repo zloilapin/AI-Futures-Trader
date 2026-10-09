@@ -30,6 +30,14 @@ class SentinelAgent:
         if current_price <= 0:
             return {"new_sl": None, "state": current_state, "reasoning": "Invalid price data."}
 
+        # If position is explicitly flagged as requiring ATR reconciliation, preserve native SL and suspend trailing
+        if pos.get("atr_reconciliation_required") and float(pos.get("atr_reference", 0)) <= 0:
+            return {
+                "new_sl": None,
+                "state": current_state,
+                "reasoning": "Позиция требует сверки ATR. Биржевые SL/TP активны, автоматическое подтягивание приостановлено."
+            }
+
         # Use the ATR at the time of entry to prevent shrinking thresholds when volatility drops
         ref_atr = float(pos.get("atr_reference", 0))
         eval_atr = ref_atr if ref_atr > 0 else atr_value

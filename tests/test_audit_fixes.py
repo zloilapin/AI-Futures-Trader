@@ -22,7 +22,11 @@ def test_immutable_contracts():
     with pytest.raises(Exception):
         risk.execution_status = "SUCCESS"  # Cannot mutate frozen dataclass
 
-    ceo_dict = {"decision": "LONG", "conviction": 80}
+    ceo_dict = {
+        "decision": "LONG",
+        "conviction": 80,
+        "indicators": {"rsi": 45.0, "nested_list": [1, 2, 3]}
+    }
     trade = FinalTradeDecision(
         symbol="BTC-USD",
         decision="LONG",
@@ -38,8 +42,16 @@ def test_immutable_contracts():
     )
     # Mutating external dictionary must NOT mutate internal contract
     ceo_dict["decision"] = "SHORT"
+    ceo_dict["indicators"]["rsi"] = 99.0
+    ceo_dict["indicators"]["nested_list"].append(4)
     assert trade.decision == "LONG"
     assert trade.raw_ceo_verdict["decision"] == "LONG"
+    assert trade.raw_ceo_verdict["indicators"]["rsi"] == 45.0
+    assert trade.raw_ceo_verdict["indicators"]["nested_list"] == (1, 2, 3)
+
+    # In-place internal mutations on nested collections must also be blocked
+    with pytest.raises(TypeError):
+        trade.raw_ceo_verdict["indicators"]["rsi"] = 99.0
 
 def test_sentinel_uses_entry_atr_reference():
     """Verifies that Sentinel uses atr_reference from entry instead of decaying current ATR."""
@@ -300,3 +312,109 @@ def test_cooldown_activation_and_persistence(tmp_path):
             getattr(restarted_service, "_last_cooldown_processed_len", 0) != len(restarted_service.recent_streak)
         )
         assert should_retrigger is False
+
+def test_execution_result_decoupling_and_dataclass_replace():
+    """Verifies ExecutionResult decoupling and immutable status updates."""
+    from core.models import ExecutionResult
+    import dataclasses
+    
+    exec_res = ExecutionResult(
+        symbol="ETH-USD",
+        status="SUCCESS",
+        order_id="0xabc123",
+        executed_at=1700000000.0,
+        notional_usd=150.0,
+        actual_fill_price=3000.0
+    )
+    res_dict = exec_res.to_dict()
+    assert res_dict["status"] == "SUCCESS"
+    assert res_dict["order_id"] == "0xabc123"
+
+    risk = FinalRiskDecision(
+        approved=True,
+        trade_action="ENTER",
+        risk_amount_usd=5.0,
+        notional_size_usd=100.0,
+        margin_usd=10.0,
+        leverage=10.0,
+        execution_status=None
+    )
+    # Immutably update execution status via dataclasses.replace
+    updated_risk = dataclasses.replace(risk, execution_status="SUCCESS")
+    assert risk.execution_status is None
+    assert updated_risk.execution_status == "SUCCESS"
+
+def test_bb_position_pct_and_pos_guard_compatibility():
+    """Verifies that bb_position_pct and bb_pos are handled equivalently by DeterministicGuard."""
+    risk_manager = MagicMock()
+    risk_manager._get_profile_rules.return_value = {"min_conviction": 70}
+    strategy_profile = StrategyProfile(True, "TREND_FOLLOWING", "SHORT", "Test")
+
+    # When market data has bb_position_pct < 10 in choppy market, anti-whipsaw must trigger
+    market_data = {
+        "indicators": {"rsi_14": 30.0, "bb_position_pct": 5.0, "volume_spike_pct": 20.0},
+        "multi_timeframe": {"mtf_alignment": "MIXED_CHOP", "trend_1h": "NEUTRAL"},
+        "derivatives_data": {"funding_rate": 0.0}
+    }
+    ceo_proposal = {
+        "decision": "SHORT",
+        "conviction": 85,
+        "trade_action": "ENTER",
+        "entry_quality": 80
+    }
+    decision = DeterministicGuard.evaluate(
+        strategy_profile, ceo_proposal, "BALANCED", risk_manager, market_data, symbol="SOL-USD"
+    )
+    assert decision.is_actionable is False
+    assert decision.rejection_tag == "EXTREME_EXTENSION_VETO"
+
+def test_trend_following_allows_confirmed_breakdown():
+    """Verifies that strong trend dump (FULL_ALIGNMENT or volume expansion) is NOT blocked by anti-whipsaw."""
+    risk_manager = MagicMock()
+    risk_manager._get_profile_rules.return_value = {"min_conviction": 70}
+    strategy_profile = StrategyProfile(True, "TREND_FOLLOWING", "SHORT", "Strong dump")
+
+    # Strong dump with FULL_ALIGNMENT, low RSI (28.0) and low BB (5.0)
+    market_data = {
+        "indicators": {
+            "rsi_14": 28.0, 
+            "bb_position_pct": 5.0, 
+            "volume_spike_pct": 150.0,
+            "algo_signals": {"rsi_divergence": "NONE"}
+        },
+        "multi_timeframe": {"mtf_alignment": "FULL_ALIGNMENT", "trend_1h": "BEARISH"},
+        "derivatives_data": {"funding_rate": -0.0001}
+    }
+    ceo_proposal = {
+        "decision": "SHORT",
+        "conviction": 85,
+        "trade_action": "ENTER",
+        "entry_quality": 80
+    }
+    decision = DeterministicGuard.evaluate(
+        strategy_profile, ceo_proposal, "BALANCED", risk_manager, market_data, symbol="ETH-USD"
+    )
+    # Must NOT be blocked by anti-whipsaw, because it is confirmed trend continuation!
+    assert decision.is_actionable is True
+    assert decision.guard_status == "PASSED"
+    assert decision.decision == "SHORT"
+
+def test_atr_reconciliation_and_recovery_safety():
+    """Verifies that a restored position without ATR reference reconstructs it from SL distance without moving SL."""
+    logger = MagicMock(spec=TradeLogger)
+    sentinel = SentinelAgent(logger)
+
+    # Position marked as requiring reconciliation with zero ATR reference
+    unreconciled_pos = {
+        "symbol": "BTC-USD",
+        "direction": "LONG",
+        "entry_price": 60000.0,
+        "sl_price": 59000.0,
+        "atr_reference": 0.0,
+        "atr_reconciliation_required": True,
+        "protection_state": "PROTECTED"
+    }
+    res = asyncio.run(sentinel.analyze(unreconciled_pos, {"price_data": {"current_price": 61500.0}}, {}, 200.0))
+    # Must suspend dynamic SL movement to protect native exchange order
+    assert res["new_sl"] is None
+    assert "требует сверки ATR" in res["reasoning"]

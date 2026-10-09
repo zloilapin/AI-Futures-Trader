@@ -7,7 +7,7 @@ from core.utils import get_msk_status, _escape_md
 from core.config import config
 from core.diagnostics import tracker
 from core.strategy_router import StrategyRouter, StrategyProfile
-from core.models import FinalTradeDecision, FinalRiskDecision
+from core.models import FinalTradeDecision, FinalRiskDecision, ExecutionResult
 from core.deterministic_guard import DeterministicGuard
 
 from agents.universe_agent import UniverseAgent
@@ -577,20 +577,35 @@ class TradingPipeline:
                 )
 
                 execution_status = "SUCCESS" if trade_success else "REJECTED_BY_EXCHANGE"
+                execution_result = ExecutionResult(
+                    symbol=symbol,
+                    status=execution_status,
+                    executed_at=time.time(),
+                    notional_usd=float(risk_verdict.get("notional_size_usd", 0) or 0),
+                    actual_fill_price=float(risk_verdict.get("entry_price", current_price) or current_price)
+                )
+                if isinstance(risk_verdict, dict):
+                    risk_verdict["execution_status"] = execution_status
+                elif hasattr(risk_verdict, "execution_status"):
+                    import dataclasses
+                    risk_verdict = dataclasses.replace(risk_verdict, execution_status=execution_status)
+
                 if not trade_success:
                     print(f"❌ Ошибка открытия позиции на бирже для {symbol}.")
                     self.services.logger.error(f"❌ Status: REJECTED BY EXCHANGE ({symbol})")
-                    if isinstance(risk_verdict, dict):
-                        risk_verdict["execution_status"] = execution_status
                     tracker.record_execution_failed()
                 else:
-                    if isinstance(risk_verdict, dict):
-                        risk_verdict["execution_status"] = execution_status
                     tracker.record_trade()
             else:
                 self.services.logger.error(f"❌ Status: VETOED BY RISK MANAGER ({risk_verdict.get('reasoning')})")
                 veto_cat = risk_verdict.get("veto_category") or "RISK_VETO"
                 tracker.record_rejection(veto_cat)
+                execution_result = ExecutionResult(
+                    symbol=symbol,
+                    status="SKIPPED",
+                    executed_at=time.time(),
+                    error=f"Vetoed by Risk Manager: {veto_cat}"
+                )
 
             # СТАДИЯ 6: ТЕЛЕГРАМ
             # Собираем сводку по активу для отчёта ручного /scan
@@ -649,7 +664,8 @@ class TradingPipeline:
                 "market_conditions": scan_result,
                 "analysts": valid_reports,
                 "ceo_decision": final_trade_decision.to_dict(),
-                "risk_assessment": risk_verdict,
+                "risk_assessment": risk_verdict.to_dict() if hasattr(risk_verdict, "to_dict") else risk_verdict,
+                "execution_result": execution_result.to_dict() if execution_result else None,
                 "status": "APPROVED" if risk_verdict.get("approved") else "VETOED"
             }
             self.agents.memory.save_cycle(cycle_record)

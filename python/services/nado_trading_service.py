@@ -1132,9 +1132,13 @@ class NadoTradingService(BaseTradingService):
                             if tracked.get("tp_price", 0.0) == 0.0 and saved_p.get("tp_price", 0.0) > 0:
                                 tracked["tp_price"] = float(saved_p["tp_price"])
                                 logger.info(f"[NadoTradingService] 💾 Restored TP {tracked['tp_price']:.4f} from disk for tracked {canonical_symbol}.")
-                            if float(tracked.get("atr_reference", 0.0)) <= 0 and float(saved_p.get("atr_reference", 0.0)) > 0:
-                                tracked["atr_reference"] = float(saved_p["atr_reference"])
-                                logger.info(f"[NadoTradingService] 💾 Restored ATR {tracked['atr_reference']:.4f} from disk for tracked {canonical_symbol}.")
+                            if float(tracked.get("atr_reference", 0.0)) <= 0:
+                                if float(saved_p.get("atr_reference", 0.0)) > 0:
+                                    tracked["atr_reference"] = float(saved_p["atr_reference"])
+                                    logger.info(f"[NadoTradingService] 💾 Restored ATR {tracked['atr_reference']:.4f} from disk for tracked {canonical_symbol}.")
+                                elif tracked.get("sl_price", 0.0) > 0 and tracked.get("entry_price", 0.0) > 0:
+                                    tracked["atr_reference"] = round(abs(float(tracked["entry_price"]) - float(tracked["sl_price"])) / 1.5, 6)
+                                    logger.info(f"[NadoTradingService] 📐 Reconstructed ATR {tracked['atr_reference']:.4f} from SL distance for tracked {canonical_symbol}.")
                             if "highest_price" not in tracked or tracked.get("highest_price", 0.0) <= 0:
                                 tracked["highest_price"] = float(saved_p.get("highest_price", tracked.get("entry_price", 0.0)))
                             if "lowest_price" not in tracked or tracked.get("lowest_price", 0.0) <= 0:
@@ -1289,6 +1293,22 @@ class NadoTradingService(BaseTradingService):
                 protection_state = saved_p.get("protection_state", "PROTECTED")
                 atr_reference = float(saved_p.get("atr_reference", 0.0))
 
+                atr_reconciliation_required = False
+                if atr_reference <= 0.0:
+                    if sl_price > 0 and entry > 0:
+                        atr_reference = round(abs(entry - sl_price) / 1.5, 6)
+                        logger.info(
+                            f"[NadoTradingService] 📐 Восстановлен эталон ATR ({atr_reference:.4f}) "
+                            f"из дистанции SL для {canonical_symbol}."
+                        )
+                    else:
+                        atr_reconciliation_required = True
+                        logger.warning(
+                            f"[NadoTradingService] ⚠️ Для {canonical_symbol} отсутствует эталон ATR. "
+                            f"Биржевой SL ({sl_price}) и TP ({tp_price}) остаются активными. "
+                            f"Динамическое подтягивание стопа приостановлено до сверки."
+                        )
+
                 self.active_positions[canonical_symbol] = {
                     "direction": direction,
                     "entry_price": entry,
@@ -1301,6 +1321,7 @@ class NadoTradingService(BaseTradingService):
                     "lowest_price": lowest_price,
                     "protection_state": protection_state,
                     "atr_reference": atr_reference,
+                    "atr_reconciliation_required": atr_reconciliation_required,
                     "product_id": product_id,
                     "sender": self.default_subaccount_id,
                     "sl_digest": sl_digest,

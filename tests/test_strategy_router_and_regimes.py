@@ -199,8 +199,8 @@ async def test_mean_reversion_sl_tp_targets_middle_band(mock_logger, mock_llm):
     """
     rm = RiskManager(mock_logger, mock_llm)
     current_price = 100.0
-    ema_20 = 101.5 # 1.5% bounce target to middle band
-    atr_14 = 1.0
+    ema_20 = 102.5 # 2.5% bounce target to middle band
+    atr_14 = 0.5   # tight ATR to ensure realized RR > 1.0
 
     portfolio_data = {"total_usd": 1000.0, "available_margin": 1000.0, "active_positions": {}}
     market_data = {
@@ -228,12 +228,12 @@ async def test_mean_reversion_sl_tp_targets_middle_band(mock_logger, mock_llm):
     )
 
     assert verdict["approved"] is True
-    # TP should be 90% of distance to EMA-20: 100 + (1.5 * 0.90) = 101.35
-    # Crucially, it must be strictly LESS than the mean target (101.5)
+    # TP should be 90% of distance to EMA-20: 100 + (2.5 * 0.90) = 102.25
+    # Crucially, it must be strictly LESS than the mean target (102.5)
     assert verdict["take_profit_price"] < ema_20
-    assert verdict["take_profit_price"] >= 101.0
-    # SL should be tight: ATR * 1.0 = 1.0 -> 99.0
-    assert abs(verdict["stop_loss_price"] - 99.0) < 0.1
+    assert verdict["take_profit_price"] >= 101.5
+    # SL should be tight: ATR * 1.5 = 0.75 -> 99.25
+    assert abs(verdict["stop_loss_price"] - 99.2) < 0.2
 
 @pytest.mark.asyncio
 async def test_mean_reversion_short_tp_strictly_before_mean(mock_logger, mock_llm):
@@ -244,8 +244,8 @@ async def test_mean_reversion_short_tp_strictly_before_mean(mock_logger, mock_ll
     """
     rm = RiskManager(mock_logger, mock_llm)
     current_price = 100.0
-    ema_20 = 98.0 # 2.0% distance down to mean
-    atr_14 = 1.0
+    ema_20 = 96.0 # 4.0% distance down to mean
+    atr_14 = 0.5
 
     portfolio_data = {"total_usd": 1000.0, "available_margin": 1000.0, "active_positions": {}}
     market_data = {
@@ -271,8 +271,8 @@ async def test_mean_reversion_short_tp_strictly_before_mean(mock_logger, mock_ll
     assert verdict["approved"] is True
     # TP must be strictly ABOVE the mean target for a SHORT
     assert verdict["take_profit_price"] > ema_20
-    # 100 - (2.0 * 0.90) = 98.20
-    assert abs(verdict["take_profit_price"] - 98.20) < 0.05
+    # 100 - (4.0 * 0.90) = 96.40
+    assert abs(verdict["take_profit_price"] - 96.40) < 0.05
 
 @pytest.mark.asyncio
 async def test_mean_reversion_narrow_edge_vetoed(mock_logger, mock_llm):
@@ -568,9 +568,16 @@ async def test_pipeline_syncs_ceo_verdict_for_volatility_momentum_pullback(mock_
         "symbol": "BTC-USD"
     }
 
-    # ACT: Run real production pipeline method
+    market_data = {
+        "price_data": {"current_price": 100.0, "ohlcv_1h": [{"volume": 100}] * 10},
+        "indicators": {"atr_14": 1.0, "donchian_high": 99.0, "volume_spike_pct": 150.0},
+        "multi_timeframe": {"mtf_alignment": "MIXED_CHOP"},
+        "derivatives_data": {"size_increment": 0.001, "min_notional": 10.0}
+    }
+
+    # ACT: Run real production pipeline method with confirmed breakout market data
     decision, conviction, trade_action, min_conv = pipeline.apply_pipeline_guards_and_sync(
-        strategy_profile, ceo_verdict, "BALANCED", symbol="BTC-USD"
+        strategy_profile, ceo_verdict, "BALANCED", symbol="BTC-USD", market_data=market_data
     )
 
     # ASSERT: Pipeline converted trade_action and synchronized ceo_verdict
@@ -580,12 +587,6 @@ async def test_pipeline_syncs_ceo_verdict_for_volatility_momentum_pullback(mock_
 
     # Pass directly into real RiskManager to verify approval
     portfolio_data = {"total_usd": 1000.0, "available_margin": 1000.0, "active_positions": {}}
-    market_data = {
-        "price_data": {"current_price": 100.0, "ohlcv_1h": [{"volume": 100}] * 10},
-        "indicators": {"atr_14": 1.0},
-        "multi_timeframe": {"mtf_alignment": "MIXED_CHOP"},
-        "derivatives_data": {"size_increment": 0.001, "min_notional": 10.0}
-    }
     risk_verdict = await agents.risk.analyze(
         ceo_verdict, portfolio_data, market_data,
         effective_profile="BALANCED", strategy_mode="VOLATILITY_MOMENTUM"
@@ -640,6 +641,7 @@ async def test_full_pipeline_cycle_volatility_momentum_pullback_to_risk_executio
             "bb_lower": 95.0,
             "bb_width_pct": 12.0,
             "volume_spike_pct": 120.0,
+            "donchian_high": 99.0,
             "vol_15m_ratio": 2.5
         },
         "multi_timeframe": {
@@ -822,11 +824,16 @@ def test_deterministic_guard_produces_canonical_final_trade_decision(mock_logger
         "entry_quality": 65,
         "directional_confidence": 75
     }
+    market_data_b = {
+        "price_data": {"current_price": 2000.0},
+        "indicators": {"donchian_high": 1990.0, "volume_spike_pct": 130.0}
+    }
     decision_b = DeterministicGuard.evaluate(
         strategy_profile=profile_vol,
         ceo_proposal=ceo_proposal_pb,
         profile="BALANCED",
         risk_manager=risk_manager,
+        market_data=market_data_b,
         symbol="ETH-USD"
     )
     assert decision_b.decision == "LONG"

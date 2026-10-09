@@ -153,15 +153,43 @@ class DeterministicGuard:
         # 5. Anti-Whipsaw & Extreme Extension Guard (Prevent 'Shorting the Bottom' / 'Longing the Top')
         if is_actionable and market_data and strategy_mode == "TREND_FOLLOWING":
             indicators = market_data.get("indicators", {})
-            rsi = float(indicators.get("rsi_14") or 50.0)
-            bb_pos = float(indicators.get("bb_pos") or 50.0)
+            raw_rsi = indicators.get("rsi_14")
+            rsi = float(raw_rsi) if raw_rsi is not None else None
+            
+            raw_bb_pos = indicators.get("bb_position_pct") if "bb_position_pct" in indicators else indicators.get("bb_pos")
+            bb_pos = float(raw_bb_pos) if raw_bb_pos is not None else None
+
+            # Multi-timeframe and momentum context to avoid cutting off legitimate trend breakouts / dumps
+            mtf_data = market_data.get("multi_timeframe", {})
+            mtf_alignment = mtf_data.get("mtf_alignment", "")
+            trend_1h = mtf_data.get("trend_1h", "")
+            vol_spike = float(indicators.get("volume_spike_pct") or 0.0)
+            algo_signals = indicators.get("algo_signals", {})
+            rsi_div = algo_signals.get("rsi_divergence", "")
+
+            # If MTF is aligned with volume momentum, or trending strongly without contrary divergence,
+            # it is legitimate trend continuation (NOT a chop whipsaw).
+            is_trend_continuation_short = (
+                (mtf_alignment == "FULL_ALIGNMENT" or (trend_1h == "BEARISH" and vol_spike >= 100.0))
+                and rsi_div != "BULLISH"
+                and (rsi is None or rsi >= 20.0)  # Allow trend short unless it is a catastrophic panic climax (RSI < 20)
+            )
+
+            is_trend_continuation_long = (
+                (mtf_alignment == "FULL_ALIGNMENT" or (trend_1h == "BULLISH" and vol_spike >= 100.0))
+                and rsi_div != "BEARISH"
+                and (rsi is None or rsi <= 80.0)  # Allow trend long unless it is a blow-off top climax (RSI > 80)
+            )
             
             if decision == "SHORT":
-                if rsi < 35.0 or bb_pos < 10.0:
+                is_extended = (rsi is not None and rsi < 35.0) or (bb_pos is not None and bb_pos < 10.0)
+                if is_extended and not is_trend_continuation_short:
                     is_actionable = False
                     guard_status = "BLOCKED"
                     rejection_tag = "EXTREME_EXTENSION_VETO"
-                    guard_reason = f"Анти-распил: Запрет SHORT в перепроданный рынок (RSI={rsi:.1f}, bb_pos={bb_pos:.1f}%). Риск отскока слишком высок."
+                    rsi_str = f"RSI={rsi:.1f}" if rsi is not None else "RSI=N/A"
+                    bb_str = f"bb_pos={bb_pos:.1f}%" if bb_pos is not None else "bb_pos=N/A"
+                    guard_reason = f"Анти-распил: Запрет SHORT в перепроданный рынок без подтверждения тренда ({rsi_str}, {bb_str}). Риск отскока слишком высок."
                     try:
                         print(f"⏸️ Пропуск {symbol}. {guard_reason}")
                     except UnicodeEncodeError:
@@ -170,11 +198,14 @@ class DeterministicGuard:
                         logger.info(f"[System_Core] {guard_reason}")
                         
             elif decision == "LONG":
-                if rsi > 65.0 or bb_pos > 90.0:
+                is_extended = (rsi is not None and rsi > 65.0) or (bb_pos is not None and bb_pos > 90.0)
+                if is_extended and not is_trend_continuation_long:
                     is_actionable = False
                     guard_status = "BLOCKED"
                     rejection_tag = "EXTREME_EXTENSION_VETO"
-                    guard_reason = f"Анти-распил: Запрет LONG в перекупленный рынок (RSI={rsi:.1f}, bb_pos={bb_pos:.1f}%). Риск коррекции слишком высок."
+                    rsi_str = f"RSI={rsi:.1f}" if rsi is not None else "RSI=N/A"
+                    bb_str = f"bb_pos={bb_pos:.1f}%" if bb_pos is not None else "bb_pos=N/A"
+                    guard_reason = f"Анти-распил: Запрет LONG в перекупленный рынок без подтверждения тренда ({rsi_str}, {bb_str}). Риск коррекции слишком высок."
                     try:
                         print(f"⏸️ Пропуск {symbol}. {guard_reason}")
                     except UnicodeEncodeError:

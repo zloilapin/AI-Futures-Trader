@@ -556,6 +556,7 @@ class MarketDataService:
                                     "sma_20": sma_20,
                                     "bb_width_pct": bb_width_pct,
                                     "bb_position_pct": bb_position_pct,
+                                    "bb_pos": bb_position_pct,
                                     "volume_spike_pct": volume_spike_pct,
                                     "donchian_high": donchian_high,
                                     "donchian_low": donchian_low,
