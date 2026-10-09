@@ -893,7 +893,7 @@ class TradingPipeline:
                     reasoning = sentinel_verdict.get("reasoning")
                     
                     if new_sl:
-                        success = await self.services.trading_service.update_stop_loss(symbol, new_sl)
+                        success = await self.services.trading_service.update_stop_loss(symbol, new_sl, new_protection_state=new_state)
                         if success:
                             pos["protection_state"] = new_state
                             msg = (

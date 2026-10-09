@@ -1,6 +1,6 @@
 import logging
 import asyncio
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Tuple
 from core.interfaces import BaseTradingService
 from core.web3_wallet import Web3Wallet
 
@@ -1223,10 +1223,17 @@ class NadoTradingService(BaseTradingService):
                                 elif tracked.get("sl_price", 0.0) > 0 and tracked.get("entry_price", 0.0) > 0:
                                     tracked["atr_reference"] = round(abs(float(tracked["entry_price"]) - float(tracked["sl_price"])) / 1.5, 6)
                                     logger.info(f"[NadoTradingService] 📐 Reconstructed ATR {tracked['atr_reference']:.4f} from SL distance for tracked {canonical_symbol}.")
+                            dir_str = str(tracked.get("direction", "LONG")).upper()
+                            entry_val = float(tracked.get("entry_price", 0.0) or 0.0)
                             if "highest_price" not in tracked or tracked.get("highest_price", 0.0) <= 0:
-                                tracked["highest_price"] = float(saved_p.get("highest_price", tracked.get("entry_price", 0.0)))
+                                tracked["highest_price"] = float(saved_p.get("highest_price", entry_val))
                             if "lowest_price" not in tracked or tracked.get("lowest_price", 0.0) <= 0:
-                                tracked["lowest_price"] = float(saved_p.get("lowest_price", tracked.get("entry_price", 0.0)))
+                                tracked["lowest_price"] = float(saved_p.get("lowest_price", entry_val))
+                            if dir_str == "LONG":
+                                tracked["highest_price"] = max(float(tracked["highest_price"]), entry_val)
+                            else:
+                                if float(tracked["lowest_price"]) > 0 and entry_val > 0:
+                                    tracked["lowest_price"] = min(float(tracked["lowest_price"]), entry_val)
                             if "protection_state" not in tracked:
                                 tracked["protection_state"] = saved_p.get("protection_state", "PROTECTED")
                     continue
@@ -1374,6 +1381,11 @@ class NadoTradingService(BaseTradingService):
                 saved_p = saved_positions.get(canonical_symbol) or saved_positions.get(base_symbol) or {}
                 highest_price = float(saved_p.get("highest_price", entry))
                 lowest_price = float(saved_p.get("lowest_price", entry))
+                if direction == "LONG":
+                    highest_price = max(highest_price, entry)
+                else:
+                    if lowest_price > 0 and entry > 0:
+                        lowest_price = min(lowest_price, entry)
                 protection_state = saved_p.get("protection_state", "PROTECTED")
                 atr_reference = float(saved_p.get("atr_reference", 0.0))
 
@@ -1422,10 +1434,13 @@ class NadoTradingService(BaseTradingService):
         except Exception as e:
             logger.error(f"[NadoTradingService] ❌ Failed to sync with Nado: {e}")
 
-    async def update_stop_loss(self, symbol: str, new_sl_price: float) -> bool:
+    async def update_stop_loss(self, symbol: str, new_sl_price: float, new_protection_state: Optional[str] = None) -> bool:
         """
         Atomically updates the stop loss for a position.
         Ensures thread-safety per symbol and verifies the trigger order exists.
+        Persists new_sl_price and optional new_protection_state atomically to disk.
+        Includes retry logic for on-chain trigger replacement and falls back to
+        active software stop loss if on-chain placement encounters transient errors.
         """
         if not self.is_connected or symbol not in self.active_positions:
             return False
@@ -1446,14 +1461,33 @@ class NadoTradingService(BaseTradingService):
                 logger.info(f"[NadoTradingService] 🛑 Aborting SL update for {symbol} - position is currently being closed by Fast Monitor!")
                 return False
                 
-            current_sl = pos.get("sl_price", 0)
+            current_sl = float(pos.get("sl_price", 0.0) or 0.0)
+            direction = str(pos.get("direction", "LONG")).upper()
+
+            # Monotonic invariant check: never allow adverse movement of SL
+            if current_sl > 0:
+                if direction == "LONG" and new_sl_price < current_sl:
+                    logger.warning(
+                        f"[NadoTradingService] ⚠️ Rejected SL update for LONG {symbol}: "
+                        f"new SL {new_sl_price:.4f} < current SL {current_sl:.4f} (monotonic violation)"
+                    )
+                    return False
+                elif direction == "SHORT" and new_sl_price > current_sl:
+                    logger.warning(
+                        f"[NadoTradingService] ⚠️ Rejected SL update for SHORT {symbol}: "
+                        f"new SL {new_sl_price:.4f} > current SL {current_sl:.4f} (monotonic violation)"
+                    )
+                    return False
+
             if current_sl == new_sl_price:
+                if new_protection_state and pos.get("protection_state") != new_protection_state:
+                    pos["protection_state"] = new_protection_state
+                    self._save_positions()
                 return True
                 
             product_id = pos.get("product_id")
             sl_digest = pos.get("sl_digest")
             sender = pos.get("sender")
-            direction = pos.get("direction")
             
             if product_id is None:
                 base_sym = symbol.split('-')[0].upper()
@@ -1463,6 +1497,8 @@ class NadoTradingService(BaseTradingService):
 
             if not sl_digest:
                 pos["sl_price"] = new_sl_price
+                if new_protection_state:
+                    pos["protection_state"] = new_protection_state
                 self._save_positions()
                 logger.info(f"[NadoTradingService] 🛡️ Software Stop Loss updated for {symbol} -> {new_sl_price:.4f}")
                 return True
@@ -1480,8 +1516,12 @@ class NadoTradingService(BaseTradingService):
                 
             # 2. Cancel old SL
             await self._cancel_trigger_digests(product_id, [sl_digest], sender=sender)
+            pos["sl_digest"] = None
+            pos["sl_price"] = new_sl_price
+            if new_protection_state:
+                pos["protection_state"] = new_protection_state
                 
-            # 3. Place new SL immediately
+            # 3. Place new SL immediately with retry
             exec_price = new_sl_price * 0.9 if direction == "LONG" else new_sl_price * 1.1
             
             exec_price_x18 = int(exec_price * 10**18)
@@ -1490,36 +1530,47 @@ class NadoTradingService(BaseTradingService):
             exec_price_x18 = (exec_price_x18 // price_increment) * price_increment
             trigger_price_x18 = (trigger_price_x18 // price_increment) * price_increment
             
-            try:
-                sl_res = await asyncio.to_thread(
-                    self.client.market.place_price_trigger_order,
-                    product_id=product_id,
-                    price_x18=str(exec_price_x18),
-                    amount_x18=pos["trigger_amount_x18"],
-                    trigger_price_x18=str(trigger_price_x18),
-                    trigger_type=pos["sl_type"],
-                    reduce_only=True
-                )
-                
-                if sl_res and sl_res.data and sl_res.data.digest:
-                    new_digest = sl_res.data.digest
-                    pos["sl_digest"] = new_digest
-                    pos["sl_price"] = new_sl_price
-                    self._save_positions()
-                    logger.info(f"[NadoTradingService] ✅ Stop Loss updated for {symbol} -> {new_sl_price:.4f}")
-                    return True
-                else:
-                    raise ValueError("Missing digest in Nado response")
+            max_trigger_retries = 3
+            new_digest = None
+            last_err = None
+            for attempt in range(max_trigger_retries):
+                try:
+                    sl_res = await asyncio.to_thread(
+                        self.client.market.place_price_trigger_order,
+                        product_id=product_id,
+                        price_x18=str(exec_price_x18),
+                        amount_x18=pos["trigger_amount_x18"],
+                        trigger_price_x18=str(trigger_price_x18),
+                        trigger_type=pos["sl_type"],
+                        reduce_only=True
+                    )
                     
-            except Exception as e:
-                logger.error(
-                    f"[NadoTradingService] 🚨 FATAL: Failed to place NEW on-chain SL for {symbol} after cancelling OLD SL ({e}). "
-                    f"Position is UNPROTECTED on-chain! Executing Emergency Force Close to lock in safety."
-                )
+                    if sl_res and sl_res.data and sl_res.data.digest:
+                        new_digest = sl_res.data.digest
+                        break
+                    else:
+                        raise ValueError("Missing digest in Nado response")
+                except Exception as e:
+                    last_err = e
+                    logger.warning(f"[NadoTradingService] ⚠️ On-chain SL placement attempt {attempt+1}/{max_trigger_retries} failed for {symbol}: {e}")
+                    if attempt < max_trigger_retries - 1:
+                        await asyncio.sleep(0.5)
+
+            if new_digest:
+                pos["sl_digest"] = new_digest
+                pos["unverified_triggers"] = False
+                self._save_positions()
+                logger.info(f"[NadoTradingService] ✅ Stop Loss updated for {symbol} -> {new_sl_price:.4f} (digest: {new_digest})")
+                return True
+            else:
                 pos["sl_digest"] = None
-                pos["is_closing"] = True
-                asyncio.create_task(self.force_close_position(symbol, bypass_check=True))
-                return False
+                pos["unverified_triggers"] = True
+                self._save_positions()
+                logger.warning(
+                    f"[NadoTradingService] ⚠️ Failed to place NEW on-chain SL for {symbol} after {max_trigger_retries} attempts ({last_err}). "
+                    f"Active Software Stop Loss remains ENFORCED at {new_sl_price:.4f} via Fast Price Monitor."
+                )
+                return True
 
     async def update_take_profit(self, symbol: str, new_tp_price: float) -> bool:
         """
@@ -1608,7 +1659,11 @@ class NadoTradingService(BaseTradingService):
                                 )
                                 
                                 async def _close_and_notify_fast(sym=symbol, t_name=trigger_name, p_dict=dict(pos), cur_p=current_price):
-                                    success, pnl = await self.force_close_position(sym, bypass_check=True)
+                                    if not hasattr(self, "_position_locks"):
+                                        self._position_locks = {}
+                                    lock = self._position_locks.setdefault(sym, asyncio.Lock())
+                                    async with lock:
+                                        success, pnl = await self.force_close_position(sym, bypass_check=True)
                                     if success:
                                         pnl_emoji = "🎉" if pnl >= 0 else "🔻"
                                         msg = (
