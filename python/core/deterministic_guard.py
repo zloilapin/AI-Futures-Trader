@@ -33,17 +33,20 @@ class DeterministicGuard:
         strategy_mode = strategy_profile.strategy_mode
         direction_bias = strategy_profile.direction_bias
 
+        # Get deterministic min_conviction threshold for this profile & strategy mode
+        profile_rules = risk_manager._get_profile_rules(profile, strategy_mode)
+        try:
+            min_conv = int(profile_rules.get("min_conviction", 75))
+        except Exception:
+            min_conv = 75
+
         raw_decision = str(ceo_proposal.get("decision", "HOLD")).upper()
         raw_conviction = int(ceo_proposal.get("conviction", 0) or 0)
-        raw_trade_action = str(ceo_proposal.get("trade_action", "ENTER" if raw_conviction >= 70 else "HOLD")).upper()
+        raw_trade_action = str(ceo_proposal.get("trade_action", "ENTER" if raw_conviction >= min_conv else "HOLD")).upper()
         dir_conf = int(ceo_proposal.get("directional_confidence", raw_conviction) or 0)
         entry_qual = int(ceo_proposal.get("entry_quality", raw_conviction) or 0)
         reasoning_en = ceo_proposal.get("reasoning_en", ceo_proposal.get("reasoning", ""))
         reasoning_ru = ceo_proposal.get("reasoning_ru", "")
-
-        # Get deterministic min_conviction threshold for this profile & strategy mode
-        profile_rules = risk_manager._get_profile_rules(profile, strategy_mode)
-        min_conv = profile_rules["min_conviction"]
 
         decision = raw_decision
         conviction = raw_conviction
@@ -104,6 +107,18 @@ class DeterministicGuard:
             da_msg = "⚖️ [Disputed Arbitration] Размер позиции ограничен REDUCE_SIZE из-за арбитражного спора."
             if logger:
                 logger.info(f"[System_Core] {da_msg}")
+
+        # 2.6. Pullback Retest Promotion: If pullback setup reached target, promote to ENTER
+        is_pullback_retest = bool(
+            ceo_proposal.get("is_pullback_retest") or 
+            (market_data and market_data.get("is_pullback_retest"))
+        )
+        if is_pullback_retest and trade_action == "WAIT_FOR_PULLBACK" and conviction >= min_conv and decision in ["LONG", "SHORT"] and entry_qual >= 60:
+            trade_action = "ENTER"
+            retest_msg = f"Откат к целевой зоне подтверждён (PULLBACK_RETEST). Вход по направлению {decision} без повторного ожидания."
+            print(f"🎯 [Pullback Retest Confirmed] {symbol}: {retest_msg}")
+            if logger:
+                logger.info(f"[System_Core] {retest_msg}")
 
         # 3. Actionability, Conviction & Pullback Checks
         is_actionable = True

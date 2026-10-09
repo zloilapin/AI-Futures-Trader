@@ -33,7 +33,10 @@ class ScannerAgent(BaseAgent):
             }
             
         # MEDIUM-19: Canonical Spread Calculation
-        spread_pct = float(ob_data.get("spread_pct", 0.0))
+        spread_pct_val = ob_data.get("spread_pct")
+        spread_pct = float(spread_pct_val) if spread_pct_val is not None else 0.0
+        if spread_pct == 0.0 and spread > 0 and current_price > 0:
+            spread_pct = round((spread / current_price) * 100, 4)
         atr_pct = round((atr_14 / current_price) * 100, 4) if current_price > 0 else 0.0
         
         # HIGH-20: Dynamic Spread Limits

@@ -31,8 +31,10 @@ class MemoryManager:
         """
         try:
             from core.state_store import StateStore
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = os.path.join(self.storage_path, f"cycle_{timestamp}.json")
+            sym = str(cycle_data.get("symbol", "")).replace('/', '-').replace(':', '_')
+            suffix = f"_{sym}" if sym else ""
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:19]
+            filename = os.path.join(self.storage_path, f"cycle_{timestamp}{suffix}.json")
             
             StateStore.save(filename, cycle_data)
                 

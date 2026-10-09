@@ -544,7 +544,7 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
             indicators = market_context.get("indicators", {})
             if isinstance(indicators, dict):
                 ema_20 = float(indicators.get("ema_20") or 0.0)
-                cur_price = float(market_context.get("price_data", {}).get("current_price") or indicators.get("current_price") or 0.0)
+                cur_price = float(market_context.get("price_data", {}).get("current_price") or market_context.get("current_price") or indicators.get("current_price") or 0.0)
                 atr_pct = float(indicators.get("atr_pct") or 1.5)
                 bb_pos = float(indicators.get("bb_position_pct") or 50.0)
 

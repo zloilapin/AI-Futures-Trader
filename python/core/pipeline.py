@@ -226,23 +226,32 @@ class TradingPipeline:
 
         # СТАДИЯ 1: UNIVERSE (Выбор активов)
         self.services.logger.info("[Stage 1] Universe Agent сканирует DEX на наличие ликвидных активов...")
-        active_perps = await self.services.fetcher.fetch_active_perps(limit=15)
-        broad_market_data = {
-            "trending_perps": active_perps, 
-            "volume_24h": "high"
-        } 
-        universe_report = await self.agents.universe.analyze(broad_market_data)
+        active_perps = []
+        try:
+            active_perps = await self.services.fetcher.fetch_active_perps(limit=15)
+            broad_market_data = {
+                "trending_perps": active_perps, 
+                "volume_24h": "high"
+            } 
+            universe_report = await self.agents.universe.analyze(broad_market_data)
+            selected_assets = universe_report.get("selected_pairs", [])
+        except Exception as e:
+            self.services.logger.error(f"[Stage 1] Ошибка выбора Universe: {e}. Используем резервный список.")
+            selected_assets = []
 
-        selected_assets = universe_report.get("selected_pairs", [])
         if not selected_assets:
             # Fallback to top 6 by 24h volume directly from the exchange if LLM fails
-            selected_assets = [p["symbol"] for p in active_perps[:6]]
+            if active_perps:
+                selected_assets = [p["symbol"] for p in active_perps[:6]]
+            else:
+                selected_assets = ["BTC-USD", "ETH-USD", "SOL-USD"]
 
         # Очищаем от дубликатов с сохранением приоритета от LLM
         selected_assets = list(dict.fromkeys(selected_assets))
 
-        valid_symbols = {p["symbol"] for p in active_perps}
-        selected_assets = [s for s in selected_assets if s in valid_symbols]
+        if active_perps:
+            valid_symbols = {p["symbol"] for p in active_perps}
+            selected_assets = [s for s in selected_assets if s in valid_symbols]
 
         self.services.logger.info(f"🎯 Отобраны уникальные валидные активы для сканирования: {', '.join(selected_assets)}")
         portfolio_data = await self.services.trading_service.get_portfolio_summary()
@@ -265,8 +274,10 @@ class TradingPipeline:
         ]
 
         # Приоритет для актива с подтвержденным откатом (PULLBACK_RETEST)
+        retest_symbol = None
         if getattr(self, "_priority_symbol", None):
             pri_sym = self._priority_symbol
+            retest_symbol = pri_sym
             self._priority_symbol = None
             pri_base = pri_sym.replace('/', '-').split('-')[0].upper()
             if pri_sym in selected_assets:
@@ -286,398 +297,455 @@ class TradingPipeline:
                 self.services.logger.info(f"[System_Core] {msg}")
                 break
 
-            print(f"\n🔍 ПОЛНЫЙ АНАЛИЗ (15m, 1H, 4H) NADO DEX: {symbol}")
-            tracker.record_scan()
-
-            # СТАДИЯ 2: СБОР ДАННЫХ И ПРОВЕРКА СТАТУСА
-            self.services.logger.info(f"[Stage 2] Сбор мульти-таймфреймовых данных (15m, 1H, 4H) для {symbol}...")
             try:
-                if symbol in macro_cache:
-                    market_data = macro_cache[symbol]
-                else:
-                    market_data = await self.services.fetcher.fetch_all_market_data(symbol)
+                is_retest = (symbol == retest_symbol)
+                print(f"\n🔍 ПОЛНЫЙ АНАЛИЗ (15m, 1H, 4H) NADO DEX: {symbol}" + (" [PULLBACK_RETEST]" if is_retest else ""))
+                tracker.record_scan()
 
-                # Inject Nado native market limits
-                limits = await self.services.trading_service.get_market_limits(symbol)
-                if "derivatives_data" not in market_data:
-                    market_data["derivatives_data"] = {}
-                if "size_increment" in limits:
-                    market_data["derivatives_data"]["size_increment"] = limits["size_increment"]
-                if "min_notional" in limits and limits["min_notional"] > 0:
-                    market_data["derivatives_data"]["min_notional"] = limits["min_notional"]
-                if "min_size" in limits:
-                    market_data["derivatives_data"]["min_size"] = limits["min_size"]
+                # СТАДИЯ 2: СБОР ДАННЫХ И ПРОВЕРКА СТАТУСА
+                self.services.logger.info(f"[Stage 2] Сбор мульти-таймфреймовых данных (15m, 1H, 4H) для {symbol}...")
+                try:
+                    if symbol in macro_cache and (time.time() - float(macro_cache[symbol].get("price_data", {}).get("timestamp", 0) or 0) < 45):
+                        market_data = macro_cache[symbol]
+                    else:
+                        market_data = await self.services.fetcher.fetch_all_market_data(symbol)
 
-            except Exception as e:
-                print(f"❌ Ошибка загрузки данных для {symbol}: {e}. Пропускаем.")
-                scan_summaries.append({"symbol": symbol, "status": "⏭ Пропуск", "reason": str(e)})
-                tracker.record_rejection("FETCH_ERROR")
-                continue
+                    # Inject Nado native market limits
+                    limits = await self.services.trading_service.get_market_limits(symbol)
+                    if "derivatives_data" not in market_data:
+                        market_data["derivatives_data"] = {}
+                    if "size_increment" in limits:
+                        market_data["derivatives_data"]["size_increment"] = limits["size_increment"]
+                    if "min_notional" in limits and limits["min_notional"] > 0:
+                        market_data["derivatives_data"]["min_notional"] = limits["min_notional"]
+                    if "min_size" in limits:
+                        market_data["derivatives_data"]["min_size"] = limits["min_size"]
 
-            # 2.1 DATA QUALITY GUARD (Strict Deterministic VETO)
-            try:
-                is_valid, dq_reason = self.data_guard.validate(symbol, market_data)
-            except Exception as e:
-                is_valid, dq_reason = False, f"DATA_GUARD_EXCEPTION: {e}"
+                    if is_retest:
+                        market_data["is_pullback_retest"] = True
 
-            if not is_valid:
-                print(f"🛑 Data Quality Guard забраковал данные {symbol}. Причина: {dq_reason}")
-                self.services.logger.warning(f"[System_Core] DATA QUALITY VETO | {symbol} | {dq_reason}")
-                scan_summaries.append({"symbol": symbol, "status": "⛔ DATA INVALID", "reason": dq_reason})
-                tracker.record_rejection("DATA_INVALID")
-                continue
-
-            current_price = market_data.get("price_data", {}).get("current_price", 0)
-
-            # 2.5 Scanner Agent (ATR Volatility & Spread Guard)
-            self.services.logger.info(f"[Stage 2.5] Scanner Agent проверяет ATR волатильность и спред для {symbol}...")
-            scan_result = await self.agents.scanner.analyze(market_data)
-
-            scanner_blocked = not scan_result.get("proceed", True)
-            scanner_reason = scan_result.get('reasoning', 'Неизвестная причина')
-            if scanner_blocked:
-                print(f"🛑 Scanner Agent пропустил {symbol}. Причина: {scanner_reason}")
-                self.services.logger.info(f"[System_Core] Пропуск {symbol}. Причина: {scanner_reason}")
-                scan_summaries.append({"symbol": symbol, "status": "⛔ СКАН ЗАБЛОКИРОВАН", "reason": scanner_reason})
-                tracker.record_rejection(scan_result.get('status', 'SCANNER_BLOCKED'))
-                continue
-
-            # СТАДИЯ 3: СИНДИКАТ АНАЛИТИКОВ
-            self.services.logger.info(f"[Stage 3] Запуск синдиката аналитиков для {symbol} (Concurrent)...")
-            analyst_list = [self.agents.candle, self.agents.orderbook, self.agents.oi_funding, self.agents.news, self.agents.indicator]
-
-            # QW Concurrency: Запуск аналитиков параллельно
-            reports = await asyncio.gather(*[agent.analyze(market_data) for agent in analyst_list], return_exceptions=True)
-
-            # Tag each report with agent_name for the deterministic CEO voting engine
-            valid_reports = []
-            has_critical_error = False
-
-            for agent, report in zip(analyst_list, reports):
-                if isinstance(report, Exception):
-                    self.services.logger.error(f"[Stage 3] Ошибка агента {agent.name}: {report}")
+                except Exception as e:
+                    print(f"❌ Ошибка загрузки данных для {symbol}: {e}. Пропускаем.")
+                    scan_summaries.append({"symbol": symbol, "status": "⏭ Пропуск", "reason": str(e)})
+                    tracker.record_rejection("FETCH_ERROR")
                     continue
 
-                if isinstance(report, dict):
-                    if report.get("signal") == "ERROR":
-                        self.services.logger.error(f"[Stage 3] Агент {agent.name} вернул статус ERROR. Данные недоступны.")
+                # 2.1 DATA QUALITY GUARD (Strict Deterministic VETO)
+                try:
+                    is_valid, dq_reason = self.data_guard.validate(symbol, market_data)
+                except Exception as e:
+                    is_valid, dq_reason = False, f"DATA_GUARD_EXCEPTION: {e}"
+
+                if not is_valid:
+                    print(f"🛑 Data Quality Guard забраковал данные {symbol}. Причина: {dq_reason}")
+                    self.services.logger.warning(f"[System_Core] DATA QUALITY VETO | {symbol} | {dq_reason}")
+                    scan_summaries.append({"symbol": symbol, "status": "⛔ DATA INVALID", "reason": dq_reason})
+                    tracker.record_rejection("DATA_INVALID")
+                    continue
+
+                current_price = market_data.get("price_data", {}).get("current_price", 0)
+
+                # 2.5 Scanner Agent (ATR Volatility & Spread Guard)
+                self.services.logger.info(f"[Stage 2.5] Scanner Agent проверяет ATR волатильность и спред для {symbol}...")
+                scan_result = await self.agents.scanner.analyze(market_data)
+
+                scanner_blocked = not scan_result.get("proceed", True)
+                scanner_reason = scan_result.get('reasoning', 'Неизвестная причина')
+                if scanner_blocked:
+                    print(f"🛑 Scanner Agent пропустил {symbol}. Причина: {scanner_reason}")
+                    self.services.logger.info(f"[System_Core] Пропуск {symbol}. Причина: {scanner_reason}")
+                    scan_summaries.append({"symbol": symbol, "status": "⛔ СКАН ЗАБЛОКИРОВАН", "reason": scanner_reason})
+                    tracker.record_rejection(scan_result.get('status', 'SCANNER_BLOCKED'))
+                    continue
+
+                # СТАДИЯ 3: СИНДИКАТ АНАЛИТИКОВ
+                self.services.logger.info(f"[Stage 3] Запуск синдиката аналитиков для {symbol} (Concurrent)...")
+                analyst_list = [self.agents.candle, self.agents.orderbook, self.agents.oi_funding, self.agents.news, self.agents.indicator]
+
+                # QW Concurrency: Запуск аналитиков параллельно
+                reports = await asyncio.gather(*[agent.analyze(market_data) for agent in analyst_list], return_exceptions=True)
+
+                # Tag each report with agent_name for the deterministic CEO voting engine
+                valid_reports = []
+                has_critical_error = False
+
+                for agent, report in zip(analyst_list, reports):
+                    if isinstance(report, Exception):
+                        self.services.logger.error(f"[Stage 3] Ошибка агента {agent.name}: {report}")
                         continue
-                    report["agent_name"] = agent.name
-                    valid_reports.append(report)
-                else:
-                    self.services.logger.error(f"[Stage 3] Агент {agent.name} вернул некорректный ответ.")
+
+                    if isinstance(report, dict):
+                        if report.get("signal") == "ERROR":
+                            self.services.logger.error(f"[Stage 3] Агент {agent.name} вернул статус ERROR. Данные недоступны.")
+                            continue
+                        report["agent_name"] = agent.name
+                        valid_reports.append(report)
+                    else:
+                        self.services.logger.error(f"[Stage 3] Агент {agent.name} вернул некорректный ответ.")
+                        continue
+
+                if len(valid_reports) < 3:
+                    has_critical_error = True
+
+                if has_critical_error:
+                    msg = f"🛑 Пропуск {symbol}. Причина: Слишком много ошибок агентов (успешно только {len(valid_reports)}/5)."
+                    print(msg)
+                    self.services.logger.info(f"[System_Core] {msg}")
+                    scan_summaries.append({
+                        "symbol": symbol,
+                        "decision": "HOLD",
+                        "conviction": 0,
+                        "scanner_status": "✅ OK" if not scanner_blocked else "⚠️ ЗАБЛОКИРОВАН СКАНЕРОМ",
+                        "scanner_reason": None if not scanner_blocked else scanner_reason,
+                        "risk_approved": False,
+                        "risk_reason": f"Fallback: недостаточно успешных аналитиков ({len(valid_reports)}/5)",
+                        "ceo_reasoning": "Bypassed (Too many agent errors)",
+                        "status": "🛑 ОШИБКА АГЕНТОВ"
+                    })
+                    tracker.record_rejection("AGENT_ERROR")
                     continue
 
-            if len(valid_reports) < 3:
-                has_critical_error = True
+                # --- STRATEGY ROUTER ---
+                strategy_profile = StrategyRouter.evaluate(
+                    symbol, market_data, valid_reports, macro_cache,
+                    detected_regime=detected_regime, profile=profile
+                )
+                has_directional_signal = strategy_profile.has_directional_signal
+                strategy_mode = strategy_profile.strategy_mode
+                
+                if has_directional_signal:
+                    self.services.logger.info(f"[System_Core] Strategy Router: {symbol} допущен ({strategy_profile.reasoning})")
 
-            if has_critical_error:
-                msg = f"🛑 Пропуск {symbol}. Причина: Слишком много ошибок агентов (успешно только {len(valid_reports)}/5)."
-                print(msg)
-                self.services.logger.info(f"[System_Core] {msg}")
-                scan_summaries.append({
+                if not has_directional_signal:
+                    msg = f"⏸️ Пропуск {symbol}. Причина: {strategy_profile.reasoning} Экономим токены."
+                    print(msg)
+                    self.services.logger.info(f"[System_Core] {msg}")
+
+                    scanner_status = "⚠️ ЗАБЛОКИРОВАН СКАНЕРОМ" if scanner_blocked else "✅ OK"
+                    scan_summaries.append({
+                        "symbol": symbol,
+                        "decision": "HOLD",
+                        "conviction": 0,
+                        "scanner_status": scanner_status,
+                        "scanner_reason": scanner_reason if scanner_blocked else None,
+                        "risk_approved": False,
+                        "risk_reason": "Pre-CEO Filter: нет направленного консенсуса аналитиков (боковик)",
+                        "ceo_reasoning": "Bypassed (Pre-CEO Filter)",
+                        "status": "⏸️ НЕТ СИГНАЛА"
+                    })
+                    tracker.record_rejection("NO_SIGNAL")
+                    continue
+
+                # СТАДИЯ 4: MULTI-AGENT DEBATE & CEO JUDGEMENT
+                self.services.logger.info(f"[Stage 4] Bull and Bear agents debating on {symbol}...")
+                
+                clean_mtf = self._clean_mtf_for_llm(market_data.get("multi_timeframe", {}))
+                debate_payload = {
                     "symbol": symbol,
-                    "decision": "HOLD",
-                    "conviction": 0,
-                    "scanner_status": "✅ OK" if not scanner_blocked else "⚠️ ЗАБЛОКИРОВАН СКАНЕРОМ",
-                    "scanner_reason": None if not scanner_blocked else scanner_reason,
-                    "risk_approved": False,
-                    "risk_reason": f"Fallback: недостаточно успешных аналитиков ({len(valid_reports)}/5)",
-                    "ceo_reasoning": "Bypassed (Too many agent errors)",
-                    "status": "🛑 ОШИБКА АГЕНТОВ"
-                })
-                tracker.record_rejection("AGENT_ERROR")
-                continue
-
-            # --- STRATEGY ROUTER ---
-            strategy_profile = StrategyRouter.evaluate(
-                symbol, market_data, valid_reports, macro_cache,
-                detected_regime=detected_regime, profile=profile
-            )
-            has_directional_signal = strategy_profile.has_directional_signal
-            strategy_mode = strategy_profile.strategy_mode
-            
-            if has_directional_signal:
-                self.services.logger.info(f"[System_Core] Strategy Router: {symbol} допущен ({strategy_profile.reasoning})")
-
-            if not has_directional_signal:
-                msg = f"⏸️ Пропуск {symbol}. Причина: {strategy_profile.reasoning} Экономим токены."
-                print(msg)
-                self.services.logger.info(f"[System_Core] {msg}")
-
-                scanner_status = "⚠️ ЗАБЛОКИРОВАН СКАНЕРОМ" if scanner_blocked else "✅ OK"
-                scan_summaries.append({
+                    "strategy_mode": strategy_mode,
+                    "multi_timeframe_context": clean_mtf,
+                    "analyst_reports": valid_reports
+                }
+                
+                # Запускаем Быка и Медведя параллельно
+                bull_verdict, bear_verdict = await asyncio.gather(
+                    self.agents.bull.analyze(debate_payload),
+                    self.agents.bear.analyze(debate_payload)
+                )
+                
+                bull_summary = str(bull_verdict.get('summary', 'N/A')).strip()
+                bear_summary = str(bear_verdict.get('summary', 'N/A')).strip()
+                print(f"🐂 Bull Thesis: {bull_summary}")
+                print(f"🐻 Bear Thesis: {bear_summary}")
+                
+                self.services.logger.info(f"[Stage 4] CEO Agent (Judge) evaluates the debate and MTF trend for {symbol}...")
+                historical_context = self.agents.memory.get_recent_context(limit=3)
+                
+                ceo_payload = {
                     "symbol": symbol,
-                    "decision": "HOLD",
-                    "conviction": 0,
-                    "scanner_status": scanner_status,
-                    "scanner_reason": scanner_reason if scanner_blocked else None,
-                    "risk_approved": False,
-                    "risk_reason": "Pre-CEO Filter: нет направленного консенсуса аналитиков (боковик)",
-                    "ceo_reasoning": "Bypassed (Pre-CEO Filter)",
-                    "status": "⏸️ НЕТ СИГНАЛА"
-                })
-                tracker.record_rejection("NO_SIGNAL")
-                continue
+                    "strategy_mode": strategy_mode,
+                    "direction_bias": strategy_profile.direction_bias,
+                    "router_reasoning": strategy_profile.reasoning,
+                    "macro_regime": detected_regime,
+                    "macro_profile": profile,
+                    "multi_timeframe_context": clean_mtf,
+                    "bull_thesis": bull_verdict,
+                    "bear_thesis": bear_verdict,
+                    "subordinate_analyst_reports": valid_reports,
+                    "historical_context": historical_context,
+                    "past_lessons_learned": recent_lessons,
+                    "indicators": market_data.get("indicators", {}),
+                    "news_data": market_data.get("news_data", {}),
+                    "price_data": market_data.get("price_data", {}),
+                    "current_price": current_price,
+                    "is_pullback_retest": is_retest
+                }
+                ceo_verdict = await self.agents.ceo.analyze(ceo_payload)
 
-            # СТАДИЯ 4: MULTI-AGENT DEBATE & CEO JUDGEMENT
-            self.services.logger.info(f"[Stage 4] Bull and Bear agents debating on {symbol}...")
-            
-            clean_mtf = self._clean_mtf_for_llm(market_data.get("multi_timeframe", {}))
-            debate_payload = {
-                "symbol": symbol,
-                "strategy_mode": strategy_mode,
-                "multi_timeframe_context": clean_mtf,
-                "analyst_reports": valid_reports
-            }
-            
-            # Запускаем Быка и Медведя параллельно
-            bull_verdict, bear_verdict = await asyncio.gather(
-                self.agents.bull.analyze(debate_payload),
-                self.agents.bear.analyze(debate_payload)
-            )
-            
-            bull_summary = str(bull_verdict.get('summary', 'N/A')).strip()
-            bear_summary = str(bear_verdict.get('summary', 'N/A')).strip()
-            print(f"🐂 Bull Thesis: {bull_summary}")
-            print(f"🐻 Bear Thesis: {bear_summary}")
-            
-            self.services.logger.info(f"[Stage 4] CEO Agent (Judge) evaluates the debate and MTF trend for {symbol}...")
-            historical_context = self.agents.memory.get_recent_context(limit=3)
-            
-            ceo_payload = {
-                "symbol": symbol,
-                "strategy_mode": strategy_mode,
-                "direction_bias": strategy_profile.direction_bias,
-                "router_reasoning": strategy_profile.reasoning,
-                "macro_regime": detected_regime,
-                "macro_profile": profile,
-                "multi_timeframe_context": clean_mtf,
-                "bull_thesis": bull_verdict,
-                "bear_thesis": bear_verdict,
-                "subordinate_analyst_reports": valid_reports,
-                "historical_context": historical_context,
-                "past_lessons_learned": recent_lessons,
-                "indicators": market_data.get("indicators", {}),
-                "news_data": market_data.get("news_data", {})
-            }
-            ceo_verdict = await self.agents.ceo.analyze(ceo_payload)
+                directional_conf = ceo_verdict.get("directional_confidence", ceo_verdict.get("conviction", 0))
+                entry_qual = ceo_verdict.get("entry_quality", ceo_verdict.get("conviction", 0))
 
-            directional_conf = ceo_verdict.get("directional_confidence", ceo_verdict.get("conviction", 0))
-            entry_qual = ceo_verdict.get("entry_quality", ceo_verdict.get("conviction", 0))
+                # STAGE 4.5: DETERMINISTIC GUARD -> FINAL TRADE DECISION
+                final_trade_decision = self.apply_pipeline_guards_and_sync(
+                    strategy_profile, ceo_verdict, profile, symbol=symbol, market_data=market_data
+                )
+                decision = final_trade_decision.decision
+                conviction = final_trade_decision.conviction
+                trade_action = final_trade_decision.trade_action
+                min_conv = final_trade_decision.min_conviction
 
-            # STAGE 4.5: DETERMINISTIC GUARD -> FINAL TRADE DECISION
-            final_trade_decision = self.apply_pipeline_guards_and_sync(
-                strategy_profile, ceo_verdict, profile, symbol=symbol, market_data=market_data
-            )
-            decision = final_trade_decision.decision
-            conviction = final_trade_decision.conviction
-            trade_action = final_trade_decision.trade_action
-            min_conv = final_trade_decision.min_conviction
+                if decision == "HOLD":
+                    conv_str = "N/A"
+                else:
+                    conv_str = f"{conviction}% (DirConf: {directional_conf}%, EntryQuality: {entry_qual}%, Action: {trade_action})"
 
-            if decision == "HOLD":
-                conv_str = "N/A"
-            else:
-                conv_str = f"{conviction}% (DirConf: {directional_conf}%, EntryQuality: {entry_qual}%, Action: {trade_action})"
+                print(f"⚖️ Решение CEO [{symbol}]: {decision} (Уверенность: {conv_str})")
 
-            print(f"⚖️ Решение CEO [{symbol}]: {decision} (Уверенность: {conv_str})")
+                # Enrich scan_result with routing info for cycle logs
+                scan_result["strategy_mode"] = strategy_mode
+                scan_result["direction_bias"] = strategy_profile.direction_bias
+                scan_result["router_reasoning"] = strategy_profile.reasoning
 
-            # Enrich scan_result with routing info for cycle logs
-            scan_result["strategy_mode"] = strategy_mode
-            scan_result["direction_bias"] = strategy_profile.direction_bias
-            scan_result["router_reasoning"] = strategy_profile.reasoning
+                # Execution Gate: Checks if Deterministic Guard approved candidate as actionable
+                if not final_trade_decision.is_actionable:
+                    # Регистрация в Pullback Watchlist для непрерывного фонового отслеживания отката (0 LLM токенов)
+                    if final_trade_decision.trade_action == "WAIT_FOR_PULLBACK" and final_trade_decision.decision in ["LONG", "SHORT"]:
+                        self.register_pullback_candidate(
+                            symbol=symbol,
+                            decision=final_trade_decision.decision,
+                            current_price=current_price,
+                            directional_conf=directional_conf,
+                            conviction=conviction,
+                            strategy_mode=strategy_mode,
+                            market_data=market_data,
+                            ceo_verdict=ceo_verdict,
+                            strategy_profile=strategy_profile
+                        )
 
-            # Execution Gate: Checks if Deterministic Guard approved candidate as actionable
-            if not final_trade_decision.is_actionable:
-                # Регистрация в Pullback Watchlist для непрерывного фонового отслеживания отката (0 LLM токенов)
-                if final_trade_decision.trade_action == "WAIT_FOR_PULLBACK" and final_trade_decision.decision in ["LONG", "SHORT"]:
-                    self.register_pullback_candidate(
+                    print(f"⏸️ Пропуск {symbol}. {final_trade_decision.guard_reason}")
+                    scanner_status = "⚠️ ЗАБЛОКИРОВАН СКАНЕРОМ" if scanner_blocked else "✅ OK"
+                    status_text = "⏳ ОЖИДАНИЕ ОТКАТА" if final_trade_decision.trade_action == "WAIT_FOR_PULLBACK" else "⏸️ НЕТ СИГНАЛА"
+                    asset_summary = {
+                        "symbol": symbol,
+                        "decision": decision,
+                        "conviction": conviction,
+                        "scanner_status": scanner_status,
+                        "scanner_reason": scanner_reason if scanner_blocked else None,
+                        "risk_approved": False,
+                        "risk_reason": final_trade_decision.guard_reason,
+                        "ceo_reasoning": ceo_verdict.get("reasoning_en", ceo_verdict.get("reasoning", "")),
+                        "status": status_text
+                    }
+                    scan_summaries.append(asset_summary)
+                    tracker.record_rejection(final_trade_decision.rejection_tag or "NO_SIGNAL")
+                    continue
+
+                # СТАДИЯ 5: РИСК-МЕНЕДЖМЕНТ
+                self.services.logger.info(f"[Stage 5] Fetching fresh price to prevent slippage on {symbol}...")
+                try:
+                    fresh_market_data = await self.services.fetcher.fetch_all_market_data(symbol)
+                    fresh_price_raw = fresh_market_data.get("price_data", {}).get("current_price") if isinstance(fresh_market_data, dict) else None
+                    try:
+                        fresh_price = float(fresh_price_raw) if fresh_price_raw is not None else float(current_price)
+                    except (ValueError, TypeError):
+                        fresh_price = float(current_price)
+
+                    if fresh_price > 0 and current_price > 0:
+                        deviation = abs(fresh_price - current_price) / current_price
+                        if deviation > 0.003: # 0.3%
+                            msg = f"⏸️ Пропуск {symbol}. Сильное проскальзывание цены во время анализа: {deviation*100:.2f}% (Signal: {current_price}, Fresh: {fresh_price})."
+                            print(msg)
+                            self.services.logger.info(f"[System_Core] Slippage Gate: {msg}")
+                            scan_summaries.append({
+                                "symbol": symbol,
+                                "decision": decision,
+                                "conviction": conviction,
+                                "scanner_status": "✅ OK",
+                                "scanner_reason": None,
+                                "risk_approved": False,
+                                "risk_reason": f"Slippage Gate: отклонение {deviation*100:.2f}%",
+                                "ceo_reasoning": "Bypassed by Slippage Gate",
+                                "status": "⏸️ НЕТ СИГНАЛА"
+                            })
+                            tracker.record_rejection("SLIPPAGE_VETO")
+                            continue
+                    
+                    # Update market data and price for RiskManager
+                    if fresh_price > 0:
+                        market_data["price_data"]["current_price"] = fresh_price
+                        current_price = fresh_price
+                except Exception as e:
+                    self.services.logger.error(f"[Stage 5] Failed to fetch fresh price for {symbol}: {e}. Proceeding with signal price.")
+                    
+                self.services.logger.info(f"[Stage 5] Risk Manager ({profile}, Regime: {detected_regime}) проверяет параметры сделки для {symbol}...")
+                portfolio_data["active_positions"] = self.services.trading_service.active_positions
+                risk_verdict = await self.agents.risk.analyze(
+                    final_trade_decision, 
+                    portfolio_data, 
+                    market_data, 
+                    effective_profile=profile,
+                    macro_regime=detected_regime,
+                    strategy_mode=strategy_mode
+                )
+
+                trade_success = False
+                execution_result = None
+                if risk_verdict.get("approved"):
+                    self.services.logger.info(f"✅ Status: APPROVED BY RISK MANAGER")
+                    print(f"💰 Position Amount: ${risk_verdict.get('notional_size_usd', 0):,.2f} ({risk_verdict.get('position_size_pct', 0)}% of portfolio)")
+                    print(f"🟢 Take Profit (TP): ${risk_verdict.get('take_profit_price', 0):,.2f} (+{risk_verdict.get('take_profit_pct', 0)}%)")
+                    # Автоматическая торговля 24/7 (полностью автономный режим)
+                    atr_14_val = float(market_data.get("indicators", {}).get("atr_14", 0) or 0)
+                    try:
+                        trade_success = await self.services.trading_service.open_position(
+                            symbol=symbol,
+                            direction=final_trade_decision.decision,
+                            entry_price=current_price,
+                            notional_usd=risk_verdict.get("notional_size_usd", 0),
+                            tp_price=risk_verdict.get("take_profit_price", 0),
+                            sl_price=risk_verdict.get("stop_loss_price", 0),
+                            leverage=risk_verdict.get("leverage", 10),
+                            original_thesis=final_trade_decision.reasoning_en,
+                            contracts=risk_verdict.get("contracts", 0.0),
+                            atr_value=atr_14_val
+                        )
+                    except Exception as e:
+                        self.services.logger.error(f"[Stage 5] Unexpected error placing order on exchange for {symbol}: {e}", exc_info=True)
+                        print(f"❌ Критическая ошибка при отправке ордера {symbol}: {e}")
+                        trade_success = False
+
+                    execution_status = "SUCCESS" if trade_success else "REJECTED_BY_EXCHANGE"
+                    execution_result = ExecutionResult(
                         symbol=symbol,
-                        decision=final_trade_decision.decision,
-                        current_price=current_price,
-                        directional_conf=directional_conf,
-                        conviction=conviction,
-                        strategy_mode=strategy_mode,
-                        market_data=market_data,
-                        ceo_verdict=ceo_verdict,
-                        strategy_profile=strategy_profile
+                        status=execution_status,
+                        executed_at=time.time(),
+                        notional_usd=float(risk_verdict.get("notional_size_usd", 0) or 0),
+                        actual_fill_price=float(risk_verdict.get("entry_price", current_price) or current_price)
+                    )
+                    if isinstance(risk_verdict, dict):
+                        risk_verdict["execution_status"] = execution_status
+                    elif hasattr(risk_verdict, "execution_status"):
+                        import dataclasses
+                        risk_verdict = dataclasses.replace(risk_verdict, execution_status=execution_status)
+
+                    if not trade_success:
+                        print(f"❌ Ошибка открытия позиции на бирже для {symbol}.")
+                        self.services.logger.error(f"❌ Status: REJECTED BY EXCHANGE ({symbol})")
+                        tracker.record_execution_failed()
+                    else:
+                        tracker.record_trade()
+                else:
+                    self.services.logger.error(f"❌ Status: VETOED BY RISK MANAGER ({risk_verdict.get('reasoning')})")
+                    veto_cat = risk_verdict.get("veto_category") or "RISK_VETO"
+                    tracker.record_rejection(veto_cat)
+                    execution_result = ExecutionResult(
+                        symbol=symbol,
+                        status="SKIPPED",
+                        executed_at=time.time(),
+                        error=f"Vetoed by Risk Manager: {veto_cat}"
                     )
 
-                print(f"⏸️ Пропуск {symbol}. {final_trade_decision.guard_reason}")
-                scanner_status = "⚠️ ЗАБЛОКИРОВАН СКАНЕРОМ" if scanner_blocked else "✅ OK"
-                status_text = "⏳ ОЖИДАНИЕ ОТКАТА" if final_trade_decision.trade_action == "WAIT_FOR_PULLBACK" else "⏸️ НЕТ СИГНАЛА"
+                # СТАДИЯ 6: ТЕЛЕГРАМ
+                # Собираем сводку по активу для отчёта ручного /scan
+                scanner_status = "✅ OK"
+                if risk_verdict.get("approved"):
+                    if trade_success:
+                        summary_status = "🚀 СИГНАЛ"
+                        summary_risk_reason = risk_verdict.get("reasoning", "")
+                    else:
+                        summary_status = "❌ ОШИБКА БИРЖИ"
+                        summary_risk_reason = f"Ордер отклонён биржей ({execution_status})"
+                else:
+                    summary_status = "⏸️ VETO"
+                    summary_risk_reason = risk_verdict.get("reasoning", "")
+
                 asset_summary = {
                     "symbol": symbol,
                     "decision": decision,
                     "conviction": conviction,
                     "scanner_status": scanner_status,
-                    "scanner_reason": scanner_reason if scanner_blocked else None,
-                    "risk_approved": False,
-                    "risk_reason": final_trade_decision.guard_reason,
-                    "ceo_reasoning": ceo_verdict.get("reasoning_en", ceo_verdict.get("reasoning", "")),
-                    "status": status_text
+                    "scanner_reason": None,
+                    "risk_approved": risk_verdict.get("approved", False),
+                    "risk_reason": summary_risk_reason,
+                    "ceo_reasoning": f"{ceo_verdict.get('reasoning_en', '')}\n\n{ceo_verdict.get('reasoning_ru', '')}".strip(),
+                    "status": summary_status
                 }
                 scan_summaries.append(asset_summary)
-                tracker.record_rejection(final_trade_decision.rejection_tag or "NO_SIGNAL")
-                continue
 
-            # СТАДИЯ 5: РИСК-МЕНЕДЖМЕНТ
-            self.services.logger.info(f"[Stage 5] Fetching fresh price to prevent slippage on {symbol}...")
-            try:
-                fresh_market_data = await self.services.fetcher.fetch_all_market_data(symbol)
-                fresh_price = fresh_market_data.get("price_data", {}).get("current_price", current_price)
-                if fresh_price > 0 and current_price > 0:
-                    deviation = abs(fresh_price - current_price) / current_price
-                    if deviation > 0.003: # 0.3%
-                        msg = f"⏸️ Пропуск {symbol}. Сильное проскальзывание цены во время анализа: {deviation*100:.2f}% (Signal: {current_price}, Fresh: {fresh_price})."
-                        print(msg)
-                        self.services.logger.info(f"[System_Core] Slippage Gate: {msg}")
-                        scan_summaries.append({
+                if risk_verdict.get("approved"):
+                    if trade_success:
+                        print(f"🚀 СДЕЛКА ИСПОЛНЕНА! Генерация Telegram-уведомления [{symbol}] ({decision}, Уверенность {conviction}%)...")
+
+                        final_trade_data = {
                             "symbol": symbol,
-                            "decision": decision,
-                            "conviction": conviction,
-                            "scanner_status": "✅ OK",
-                            "scanner_reason": None,
-                            "risk_approved": False,
-                            "risk_reason": f"Slippage Gate: отклонение {deviation*100:.2f}%",
-                            "ceo_reasoning": "Bypassed by Slippage Gate",
-                            "status": "⏸️ НЕТ СИГНАЛА"
-                        })
-                        tracker.record_rejection("SLIPPAGE_VETO")
-                        continue
-                
-                # Update market data and price for RiskManager
-                market_data["price_data"]["current_price"] = fresh_price
-                current_price = fresh_price
-            except Exception as e:
-                self.services.logger.error(f"[Stage 5] Failed to fetch fresh price for {symbol}: {e}. Proceeding with signal price.")
-                
-            self.services.logger.info(f"[Stage 5] Risk Manager ({profile}, Regime: {detected_regime}) проверяет параметры сделки для {symbol}...")
-            portfolio_data["active_positions"] = self.services.trading_service.active_positions
-            risk_verdict = await self.agents.risk.analyze(
-                final_trade_decision, 
-                portfolio_data, 
-                market_data, 
-                effective_profile=profile,
-                macro_regime=detected_regime,
-                strategy_mode=strategy_mode
-            )
+                            "ceo_verdict": final_trade_decision.to_dict(),
+                            "risk_verdict": risk_verdict
+                        }
+                        tg_response = await self.agents.telegram.analyze(final_trade_data)
+                        tg_message = tg_response.get("message", f"Отчет по {symbol}")
 
-            if risk_verdict.get("approved"):
-                self.services.logger.info(f"✅ Status: APPROVED BY RISK MANAGER")
-                print(f"💰 Position Amount: ${risk_verdict.get('notional_size_usd', 0):,.2f} ({risk_verdict.get('position_size_pct', 0)}% of portfolio)")
-                print(f"🟢 Take Profit (TP): ${risk_verdict.get('take_profit_price', 0):,.2f} (+{risk_verdict.get('take_profit_pct', 0)}%)")
-                # Автоматическая торговля 24/7 (полностью автономный режим)
-                atr_14_val = float(market_data.get("indicators", {}).get("atr_14", 0) or 0)
-                trade_success = await self.services.trading_service.open_position(
-                    symbol=symbol,
-                    direction=final_trade_decision.decision,
-                    entry_price=current_price,
-                    notional_usd=risk_verdict.get("notional_size_usd", 0),
-                    tp_price=risk_verdict.get("take_profit_price", 0),
-                    sl_price=risk_verdict.get("stop_loss_price", 0),
-                    leverage=risk_verdict.get("leverage", 10),
-                    original_thesis=final_trade_decision.reasoning_en,
-                    contracts=risk_verdict.get("contracts", 0.0),
-                    atr_value=atr_14_val
-                )
+                        print(f"\n--- ОТПРАВЛЕНО В TELEGRAM [{symbol}] ---")
+                        print(tg_message)
+                        print("-----------------------------")
 
-                execution_status = "SUCCESS" if trade_success else "REJECTED_BY_EXCHANGE"
-                execution_result = ExecutionResult(
-                    symbol=symbol,
-                    status=execution_status,
-                    executed_at=time.time(),
-                    notional_usd=float(risk_verdict.get("notional_size_usd", 0) or 0),
-                    actual_fill_price=float(risk_verdict.get("entry_price", current_price) or current_price)
-                )
-                if isinstance(risk_verdict, dict):
-                    risk_verdict["execution_status"] = execution_status
-                elif hasattr(risk_verdict, "execution_status"):
-                    import dataclasses
-                    risk_verdict = dataclasses.replace(risk_verdict, execution_status=execution_status)
+                        pending_id = risk_verdict.get("pending_trade_id")
+                        reply_markup = None
+                        if pending_id:
+                            reply_markup = {
+                                "inline_keyboard": [[
+                                    {"text": "✅ Одобрить", "callback_data": f"approve_{pending_id}"},
+                                    {"text": "❌ Отклонить", "callback_data": f"reject_{pending_id}"}
+                                ]]
+                            }
+                            if hasattr(self.services.trading_service, "pending_trades") and pending_id in self.services.trading_service.pending_trades:
+                                self.services.trading_service.pending_trades[pending_id]["tg_message"] = tg_message
 
-                if not trade_success:
-                    print(f"❌ Ошибка открытия позиции на бирже для {symbol}.")
-                    self.services.logger.error(f"❌ Status: REJECTED BY EXCHANGE ({symbol})")
-                    tracker.record_execution_failed()
+                        await self.services.tg_sender.send_message(tg_message, reply_markup=reply_markup)
+
+                        # Транслируем в канал только РЕАЛЬНО исполненные сделки
+                        if not pending_id:
+                            await self.services.tg_sender.broadcast_to_channel(tg_message)
+                    else:
+                        # Предупреждение оператору об ошибке исполнения на бирже (НЕ транслируем фантом в канал)
+                        fail_msg = (
+                            f"⚠️ *ОШИБКА ИСПОЛНЕНИЯ / EXCHANGE ERROR*\n\n"
+                            f"🪙 *Asset:* `{symbol}`\n"
+                            f"📊 *Decision:* `{decision}` (Conviction: {conviction}%)\n"
+                            f"❌ *Status:* Ордер отклонён биржей Nado (`{execution_status}`). Позиция НЕ открыта!\n"
+                            f"🛡 *Risk Check:* Одобрен риск-менеджером, но транзакция на бирже отклонена."
+                        )
+                        print(f"⚠️ [Telegram Alert] Отправка уведомления о сбое биржи для {symbol}...")
+                        await self.services.tg_sender.send_message(fail_msg)
+                elif risk_verdict.get("pending_trade_id"):
+                    pass
                 else:
-                    tracker.record_trade()
-            else:
-                self.services.logger.error(f"❌ Status: VETOED BY RISK MANAGER ({risk_verdict.get('reasoning')})")
-                veto_cat = risk_verdict.get("veto_category") or "RISK_VETO"
-                tracker.record_rejection(veto_cat)
-                execution_result = ExecutionResult(
-                    symbol=symbol,
-                    status="SKIPPED",
-                    executed_at=time.time(),
-                    error=f"Vetoed by Risk Manager: {veto_cat}"
-                )
+                    print(f"ℹ️ [Telegram] Пропуск отправки для {symbol}. Решение '{decision}' с уверенностью {conviction}% (Фильтр: LONG/SHORT и Уверенность ≥ {min_conv}%).")
 
-            # СТАДИЯ 6: ТЕЛЕГРАМ
-            # Собираем сводку по активу для отчёта ручного /scan
-            scanner_status = "✅ OK"
-            asset_summary = {
-                "symbol": symbol,
-                "decision": decision,
-                "conviction": conviction,
-                "scanner_status": scanner_status,
-                "scanner_reason": None,
-                "risk_approved": risk_verdict.get("approved", False),
-                "risk_reason": risk_verdict.get("reasoning", ""),
-                "ceo_reasoning": f"{ceo_verdict.get('reasoning_en', '')}\n\n{ceo_verdict.get('reasoning_ru', '')}".strip(),
-                "status": "🚀 СИГНАЛ" if risk_verdict.get("approved") else "⏸️ VETO"
-            }
-            scan_summaries.append(asset_summary)
-
-            if risk_verdict.get("approved") or risk_verdict.get("pending_trade_id"):
-                print(f"🚀 НАЙДЕН СИГНАЛ! Генерация Telegram-уведомления [{symbol}] ({decision}, Уверенность {conviction}%)...")
-
-                final_trade_data = {
+                # СТАДИЯ 7: СОХРАНЕНИЕ В ПАМЯТЬ
+                cycle_record = {
                     "symbol": symbol,
-                    "ceo_verdict": final_trade_decision.to_dict(),
-                    "risk_verdict": risk_verdict
+                    "market_conditions": scan_result,
+                    "analysts": valid_reports,
+                    "ceo_decision": final_trade_decision.to_dict(),
+                    "risk_assessment": risk_verdict.to_dict() if hasattr(risk_verdict, "to_dict") else risk_verdict,
+                    "execution_result": execution_result.to_dict() if execution_result else None,
+                    "status": "APPROVED" if (risk_verdict.get("approved") and trade_success) else "VETOED"
                 }
-                tg_response = await self.agents.telegram.analyze(final_trade_data)
-                tg_message = tg_response.get("message", f"Отчет по {symbol}")
+                self.agents.memory.save_cycle(cycle_record)
+                self.services.logger.info(f"[System_Core] Торговый цикл успешно завершен для {symbol}.")
 
-                print(f"\n--- ОТПРАВЛЕНО В TELEGRAM [{symbol}] ---")
-                print(tg_message)
-                print("-----------------------------")
+                await asyncio.sleep(1.5)
 
-                reply_markup = None
-                pending_id = risk_verdict.get("pending_trade_id")
-                if pending_id:
-                    reply_markup = {
-                        "inline_keyboard": [[
-                            {"text": "✅ Одобрить", "callback_data": f"approve_{pending_id}"},
-                            {"text": "❌ Отклонить", "callback_data": f"reject_{pending_id}"}
-                        ]]
-                    }
-                    if hasattr(self.services.trading_service, "pending_trades") and pending_id in self.services.trading_service.pending_trades:
-                        self.services.trading_service.pending_trades[pending_id]["tg_message"] = tg_message
-
-                await self.services.tg_sender.send_message(tg_message, reply_markup=reply_markup)
-
-                # Если сделка не требует ручного подтверждения (дневной режим), транслируем сразу
-                if not pending_id:
-                    await self.services.tg_sender.broadcast_to_channel(tg_message)
-            else:
-                print(f"ℹ️ [Telegram] Пропуск отправки для {symbol}. Решение '{decision}' с уверенностью {conviction}% (Фильтр: LONG/SHORT и Уверенность ≥ {min_conv}%).")
-
-            # СТАДИЯ 7: СОХРАНЕНИЕ В ПАМЯТЬ
-            cycle_record = {
-                "symbol": symbol,
-                "market_conditions": scan_result,
-                "analysts": valid_reports,
-                "ceo_decision": final_trade_decision.to_dict(),
-                "risk_assessment": risk_verdict.to_dict() if hasattr(risk_verdict, "to_dict") else risk_verdict,
-                "execution_result": execution_result.to_dict() if execution_result else None,
-                "status": "APPROVED" if risk_verdict.get("approved") else "VETOED"
-            }
-            self.agents.memory.save_cycle(cycle_record)
-            self.services.logger.info(f"[System_Core] Торговый цикл успешно завершен для {symbol}.")
-
-            await asyncio.sleep(1.5)
+            except Exception as e:
+                self.services.logger.error(f"[Pipeline] Ошибка обработки символа {symbol}: {type(e).__name__}: {e}", exc_info=True)
+                print(f"❌ [Pipeline] Критическая ошибка при обработке {symbol}: {e}. Изолируем и продолжаем...")
+                scan_summaries.append({
+                    "symbol": symbol,
+                    "status": "❌ ОШИБКА ЦИКЛА",
+                    "reason": f"{type(e).__name__}: {str(e)[:150]}"
+                })
+                tracker.record_rejection("SYMBOL_PROCESSING_ERROR")
+                continue
 
         # Если сканирование было запрошено вручную через /scan — всегда присылаем подробный отчёт (сводку)
         if force_scan:
