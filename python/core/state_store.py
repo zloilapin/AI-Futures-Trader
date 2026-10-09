@@ -47,19 +47,36 @@ class StateStore:
     def save(cls, filepath: str, data: Any):
         filepath = cls._normalize_path(filepath)
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        temp_filepath = f"{filepath}.tmp"
+        import uuid
+        import time
+        temp_filepath = f"{filepath}.{os.getpid()}_{threading.get_ident()}_{uuid.uuid4().hex[:6]}.tmp"
         
         with cls._get_lock(filepath):
             try:
                 with open(temp_filepath, "w", encoding="utf-8") as f:
                     json.dump(data, f, indent=4, ensure_ascii=False, default=str)
                 
-                # Atomic replace
-                os.replace(temp_filepath, filepath)
+                # Atomic replace with retry loop for Windows file lock contention
+                for attempt in range(5):
+                    try:
+                        os.replace(temp_filepath, filepath)
+                        break
+                    except (PermissionError, OSError) as pe:
+                        if attempt < 4:
+                            time.sleep(0.05 * (attempt + 1))
+                        else:
+                            # Direct write fallback if os.replace is locked on Windows
+                            try:
+                                with open(filepath, "w", encoding="utf-8") as f:
+                                    json.dump(data, f, indent=4, ensure_ascii=False, default=str)
+                                break
+                            except Exception:
+                                raise pe
             except Exception as e:
                 print(f"❌ [StateStore] Failed to save {filepath}: {e}")
+            finally:
                 if os.path.exists(temp_filepath):
                     try:
                         os.remove(temp_filepath)
-                    except:
+                    except Exception:
                         pass
