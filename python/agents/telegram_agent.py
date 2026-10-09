@@ -69,6 +69,10 @@ class TelegramAgent(BaseAgent):
         else:
             conv_str = f"Primary {primary_conviction}% (Direct)"
 
+        small_size_warning = ""
+        if 0 < notional_usd < 100:
+            small_size_warning = "\n⚠️ *Защита:* Программный TP/SL (Fast Monitor 5с + Sentinel). На бирже Nado триггеры требуют объем ≥ $100.\n"
+
         message = (
             f"🚀 *TRADE SIGNAL | NADO DEX{net_badge}*\n\n"
             f"🪙 *Asset / Монета:* `{symbol}`\n"
@@ -78,7 +82,8 @@ class TelegramAgent(BaseAgent):
             f"🎯 *Entry / Цена входа:* `${self._format_price(entry_price)}`\n\n"
             f"🟢 *Take Profit (TP):* `${self._format_price(tp_price)}` (+{tp_pct}%)\n"
             f"🔴 *Stop Loss (SL):* `${self._format_price(sl_price)}` (-{sl_pct}%)\n"
-            f"⚖️ *Risk/Reward:* `{rr_ratio}`\n\n"
+            f"⚖️ *Risk/Reward:* `{rr_ratio}`\n"
+            f"{small_size_warning}\n"
             f"📝 *Analysis / Аналитика:*\n{reasoning}"
         )
         return message

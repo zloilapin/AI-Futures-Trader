@@ -257,16 +257,22 @@ class TradingPipeline:
         # QW Quiet Rest disabled: Bot runs 24/7 (48 cycles per day at 30 min intervals)
 
         # Фильтруем активы: не сканируем то, что уже открыто
-        selected_assets = [s for s in selected_assets if s not in self.services.trading_service.active_positions]
+        active_bases = {k.replace('/', '-').split('-')[0].upper() for k in self.services.trading_service.active_positions}
+        selected_assets = [
+            s for s in selected_assets 
+            if s not in self.services.trading_service.active_positions 
+            and s.replace('/', '-').split('-')[0].upper() not in active_bases
+        ]
 
         # Приоритет для актива с подтвержденным откатом (PULLBACK_RETEST)
         if getattr(self, "_priority_symbol", None):
             pri_sym = self._priority_symbol
             self._priority_symbol = None
+            pri_base = pri_sym.replace('/', '-').split('-')[0].upper()
             if pri_sym in selected_assets:
                 selected_assets = [pri_sym] + [s for s in selected_assets if s != pri_sym]
                 print(f"🎯 [Pullback Priority] {pri_sym} перемещен в начало очереди анализа (PULLBACK_RETEST).")
-            elif pri_sym not in self.services.trading_service.active_positions:
+            elif pri_sym not in self.services.trading_service.active_positions and pri_base not in active_bases:
                 selected_assets = [pri_sym] + selected_assets
                 print(f"🎯 [Pullback Priority] {pri_sym} добавлен первым в очередь анализа (PULLBACK_RETEST).")
 

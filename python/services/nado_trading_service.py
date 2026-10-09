@@ -268,6 +268,18 @@ class NadoTradingService(BaseTradingService):
         if not self.is_connected:
             logger.error(f"[NadoTradingService] Cannot open {direction} on {symbol} - SDK not connected.")
             return False
+
+        clean_sym = symbol.replace('/', '-').strip().upper()
+        base_sym = clean_sym.split('-')[0]
+        canonical_sym = f"{base_sym}-USD"
+        
+        # Guard: Strict duplicate position prevention
+        if any(k in self.active_positions for k in [canonical_sym, base_sym, clean_sym, symbol]):
+            logger.warning(
+                f"[NadoTradingService] ⚠️ Позиция по {symbol} ({canonical_sym}) уже открыта в active_positions! "
+                f"Блокировка дублирующего ордера для защиты капитала."
+            )
+            return False
             
         logger.info(f"[NadoTradingService] 🚀 Routing {direction} {symbol} to Nado DEX...")
         
@@ -616,6 +628,7 @@ class NadoTradingService(BaseTradingService):
                 "tp_type": tp_type if tp_price > 0 else None,
                 "trigger_amount_x18": trigger_amount_x18,
                 "original_thesis": original_thesis,
+                "native_triggers_placed": bool(sl_digest or tp_digest),
                 "open_time": time.time()
             }
             self._save_positions()
@@ -840,6 +853,14 @@ class NadoTradingService(BaseTradingService):
                 estimated_fees = size_usd * 0.001
                 target_pnl = gross_pnl - estimated_fees
                 logger.info(f"[NadoTradingService] 💰 Gross PnL: ${gross_pnl:.2f}, Est Fees: ${estimated_fees:.2f} -> Net PnL: ${target_pnl:.2f}")
+                # Cancel any remaining trigger orders on exchange (e.g. if TP hit, cancel SL; if SL hit, cancel TP)
+                product_id = pos.get("product_id") or self.product_map.get(base_symbol)
+                sl_dig = pos.get("sl_digest")
+                tp_dig = pos.get("tp_digest")
+                digests_to_cancel = [d for d in [sl_dig, tp_dig] if d]
+                if digests_to_cancel and product_id is not None:
+                    await self._cancel_trigger_digests(product_id, digests_to_cancel, sender=pos.get("sender"))
+
                 if symbol in self.active_positions:
                     del self.active_positions[symbol]
                 alias_key = base_symbol if '-' in symbol else f"{base_symbol}-USD"
@@ -884,7 +905,11 @@ class NadoTradingService(BaseTradingService):
                         pos["is_closing"] = True
                         reason = "SL" if hit_sl else "TP"
                         logger.info(f"[NadoTradingService] 🚨 Stage 1.5 Software {reason} triggered for {symbol} at {current_price:.4f}!")
-                        success, realized_pnl = await self.force_close_position(symbol, bypass_check=True)
+                        if not hasattr(self, "_position_locks"):
+                            self._position_locks = {}
+                        lock = self._position_locks.setdefault(symbol, asyncio.Lock())
+                        async with lock:
+                            success, realized_pnl = await self.force_close_position(symbol, bypass_check=True)
                         if success:
                             closed_reports.append({
                                 "symbol": symbol,
@@ -943,6 +968,14 @@ class NadoTradingService(BaseTradingService):
                     res = await asyncio.to_thread(self.client.market.close_position, subaccount, product_id)
                     logger.info(f"[NadoTradingService] 🧹 Successfully forced closed {symbol}. TX: {res}")
                     
+                    # Cancel any remaining trigger orders on exchange
+                    pos_data = self.active_positions.get(symbol) or self.active_positions.get(base_symbol) or {}
+                    sl_dig = pos_data.get("sl_digest")
+                    tp_dig = pos_data.get("tp_digest")
+                    digests_to_cancel = [d for d in [sl_dig, tp_dig] if d]
+                    if digests_to_cancel:
+                        await self._cancel_trigger_digests(product_id, digests_to_cancel, sender=pos_data.get("sender", subaccount))
+
                     # Clean up local cache and update stats
                     if symbol in self.active_positions:
                         del self.active_positions[symbol]
@@ -1072,6 +1105,33 @@ class NadoTradingService(BaseTradingService):
             logger.warning(f"[NadoTradingService] ⚠️ Failed to query trigger orders for product {product_id}: {e}")
             
         return []
+
+    async def _cancel_trigger_digests(self, product_id: int, digests: List[str], sender: str = None) -> bool:
+        """
+        Cancels active trigger order digests from Nado book.
+        Prevents zombie / orphaned trigger orders after position closures.
+        """
+        valid_digests = [d for d in digests if d and isinstance(d, str)]
+        if not valid_digests or not self.is_connected or product_id is None:
+            return False
+
+        target_sender = sender or self.default_subaccount_id
+        if not target_sender:
+            return False
+
+        try:
+            from nado_protocol.trigger_client.types.execute import CancelTriggerOrdersParams
+            cancel_params = CancelTriggerOrdersParams(
+                productIds=[product_id],
+                digests=valid_digests,
+                sender=target_sender
+            )
+            await asyncio.to_thread(self.client.market.cancel_trigger_orders, cancel_params)
+            logger.info(f"[NadoTradingService] 🗑️ Successfully cancelled {len(valid_digests)} trigger orders on product {product_id}: {valid_digests}")
+            return True
+        except Exception as e:
+            logger.warning(f"[NadoTradingService] ⚠️ Failed to cancel trigger orders {valid_digests}: {e}")
+            return False
 
     async def sync_with_exchange(self, is_startup: bool = False) -> None:
         """Syncs local state with active positions on Nado."""
@@ -1387,8 +1447,6 @@ class NadoTradingService(BaseTradingService):
                 logger.error(f"[NadoTradingService] Cannot update on-chain SL for {symbol} - missing product_id.")
                 return False
 
-            from nado_protocol.engine_client.types.execute import CancelOrdersParams
-            
             # 1. Fetch market params for correct increments
             params_dict = self._get_market_parameters(product_id)
             price_increment = params_dict["price_increment_x18"]
@@ -1397,15 +1455,7 @@ class NadoTradingService(BaseTradingService):
                 return False
                 
             # 2. Cancel old SL
-            cancel_params = CancelOrdersParams(
-                productIds=[product_id],
-                digests=[sl_digest],
-                sender=sender
-            )
-            try:
-                await asyncio.to_thread(self.client.market.cancel_trigger_orders, cancel_params)
-            except Exception as e:
-                logger.warning(f"[NadoTradingService] Failed to cancel old SL for {symbol}: {e}. Proceeding to place new SL.")
+            await self._cancel_trigger_digests(product_id, [sl_digest], sender=sender)
                 
             # 3. Place new SL immediately
             exec_price = new_sl_price * 0.9 if direction == "LONG" else new_sl_price * 1.1
