@@ -25,6 +25,8 @@ class TPTier:
     realized_pnl_usd: float = 0.0
     executed_at: Optional[float] = None
     error_message: Optional[str] = None
+    retry_count: int = 0
+    last_attempt_time: Optional[float] = None
 
     @property
     def remaining_tier_contracts(self) -> float:
@@ -36,7 +38,9 @@ class TPTier:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "TPTier":
-        return cls(**data)
+        valid_fields = set(cls.__dataclass_fields__.keys())
+        filtered = {k: v for k, v in data.items() if k in valid_fields}
+        return cls(**filtered)
 
 
 @dataclass
@@ -61,6 +65,8 @@ class PartialTPPlan:
         Strict sequential invariant:
         - If any earlier tier is SUBMITTING or PARTIALLY_FILLED (with remaining >= min_size),
           it MUST be completed/resolved before any subsequent tier can be processed.
+        - Unclosable dust (< min_size) on intermediate tiers is absorbed into the final tier.
+        - FAILED tiers are returned for bounded retry or halting.
         - Returns None if all tiers are FILLED or no actionable tier exists.
         """
         for tier in self.tiers:
@@ -75,14 +81,18 @@ class PartialTPPlan:
                     return tier
                 else:
                     # Dust remainder (< min_size) cannot be closed as a standalone order on exchange.
-                    # Mark this tier as FILLED; the dust remainder is automatically absorbed into the final tier.
+                    # Mark this tier as FILLED; absorb dust remainder into the final tier.
                     tier.status = "FILLED"
+                    final_tier = next((t for t in self.tiers if t.is_final), None)
+                    if final_tier and final_tier != tier:
+                        final_tier.close_contracts = round(final_tier.close_contracts + rem, 8)
                     continue
             
             # 3. Next pending tier (strictly sequential)
             if tier.status == "PENDING":
                 return tier
                 
+            # 4. Failed tier (caller evaluates retry policy vs exhaustion)
             if tier.status == "FAILED":
                 return tier
 

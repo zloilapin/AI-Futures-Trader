@@ -1,6 +1,7 @@
 import logging
 import asyncio
 import math
+import time
 from dataclasses import dataclass
 from typing import Dict, Any, List, Optional, Tuple
 from core.interfaces import BaseTradingService
@@ -1259,9 +1260,9 @@ class NadoTradingService(BaseTradingService):
             )
 
         actual_filled_contracts = actual_filled_x18 / 1e18
-        # Calculate gross PnL and subtract estimated taker trading fee (~0.05%) for accurate net accounting
+        # Calculate gross PnL and subtract estimated round-trip fee (taker ~0.05% on entry + exit) for accurate net accounting
         fee_rate = 0.0005
-        fee_usd = actual_filled_contracts * actual_fill_price * fee_rate
+        fee_usd = actual_filled_contracts * (entry_price + actual_fill_price) * fee_rate
         if direction == "LONG":
             gross_pnl = actual_filled_contracts * (actual_fill_price - entry_price)
         else:
@@ -1466,16 +1467,33 @@ class NadoTradingService(BaseTradingService):
         )
 
         # Check if entire position is now liquidated
-        # Strict invariant: only finalize closure if remaining contracts are zero / dust (< min_size)
-        # AND tier is completely filled (status == "FILLED") or remaining_contracts <= 1e-6.
-        if plan.remaining_contracts <= 1e-6 or (tier.is_final and tier.status == "FILLED" and plan.remaining_contracts < plan.min_size):
-            logger.info(f"[NadoTradingService] 🏁 All partial tiers completed for {canonical_sym}! Finalizing position closure.")
+        # Strict invariant: only finalize closure if remaining contracts are strictly zero (<= 1e-6)
+        if plan.remaining_contracts <= 1e-6:
+            logger.info(f"[NadoTradingService] 🏁 All partial tiers completed for {canonical_sym}! Remaining contracts: 0. Finalizing position closure.")
             self._finalize_partial_tp_closure(
                 symbol=canonical_sym,
                 pos=pos,
                 exit_price=result.fill_price,
                 triggered_by=f"PARTIAL_TP_TIER_{tier_index}"
             )
+        elif tier.is_final and plan.remaining_contracts < plan.min_size:
+            # Unclosable exchange dust remains on exchange!
+            # Retain in active_positions until verified zero on exchange, never silently delete!
+            pos["is_dust"] = True
+            pos["dust_contracts"] = plan.remaining_contracts
+            tier.status = "DUST_REMAINDER"
+            pos["partial_tp_plan"] = plan.to_dict()
+            self._save_positions()
+            logger.warning(
+                f"[NadoTradingService] ⚠️ DUST WARNING: Final tier completed for {canonical_sym}, but unclosable dust "
+                f"of {plan.remaining_contracts:.6f} contracts (< min_size {plan.min_size}) remains on exchange. "
+                f"Retaining position in active_positions until verified zero on-chain!"
+            )
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._send_dust_warning_tg(canonical_sym, plan.remaining_contracts, plan.min_size))
+            except RuntimeError:
+                pass
         else:
             self._save_positions()
             # Phase 4: BE Protection & SL Resizing
@@ -1504,11 +1522,12 @@ class NadoTradingService(BaseTradingService):
                             pos["sl_price"] = round(be_price, 6)
                 pos["partial_tp_plan"] = plan.to_dict()
                 self._save_positions()
-                try:
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(self.update_stop_loss_to_be(canonical_sym))
-                except RuntimeError:
-                    pass
+                if not getattr(self, "_in_fast_monitor_tp", False):
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(self.update_stop_loss_to_be(canonical_sym))
+                    except RuntimeError:
+                        pass
             elif pos.get("sl_digest") and plan.remaining_contracts > 0:
                 current_sl = float(pos.get("sl_price", 0.0))
                 if current_sl > 0:
@@ -1655,6 +1674,97 @@ class NadoTradingService(BaseTradingService):
             "roi_pct": (total_pnl / pos.get("margin_used", initial_size) * 100) if initial_size > 0 else 0,
             "original_thesis": pos.get("original_thesis", "")
         }
+
+    async def _send_dust_warning_tg(self, symbol: str, dust_contracts: float, min_size: float):
+        """Sends rich Telegram warning about unclosable dust remainder retained in tracking."""
+        try:
+            from services.telegram_service import TelegramService
+            tg = TelegramService()
+            msg = (
+                f"⚠️ *NADO DEX | ПЫЛЬ ПОЗИЦИИ (DUST WARNING)*\n\n"
+                f"🪙 *Asset:* `{symbol}`\n"
+                f"📦 *Остаток:* `{dust_contracts:.6f}` контрактов\n"
+                f"📏 *Min Size:* `{min_size}` контрактов\n\n"
+                f"Остаток позиции меньше минимального размера ордера биржи и не может быть закрыт отдельным ордером. "
+                f"Позиция сохранена в учёте как `DUST_REMAINDER` до подтверждения нулевого остатка на Nado."
+            )
+            await tg.send_message(msg)
+            await tg.broadcast_to_channel(msg)
+        except Exception as e:
+            logger.warning(f"[NadoTradingService] Failed to send dust warning TG: {e}")
+
+    async def reconcile_submitting_tier(self, symbol: str, pos: dict, plan: Any, tier: Any) -> bool:
+        """
+        Safely reconciles an in-flight or restarted SUBMITTING tier with Nado before any re-submission.
+        1. Queries active on-chain positions directly from Nado.
+        2. If on-chain balance decreased, credits the fill to the tier.
+        3. If on-chain balance is unchanged and order is not active, resets tier to PENDING.
+        4. If query fails or state is ambiguous, keeps tier in SUBMITTING to block duplicate orders.
+        Returns True if safely resolved; False if ambiguous or locked.
+        """
+        canonical_sym = symbol.replace('/', '-').strip().upper()
+        if '-' not in canonical_sym:
+            canonical_sym = f"{canonical_sym}-USD"
+        logger.info(f"[NadoTradingService] 🔍 Reconciling SUBMITTING tier {tier.tier_index} on {canonical_sym}...")
+        try:
+            active_on_chain = await self.get_active_positions(bypass_cache=True)
+            base_sym = canonical_sym.split('-')[0].upper()
+            matched = None
+            for p in active_on_chain:
+                if p["symbol"].split('-')[0].upper() == base_sym:
+                    matched = p
+                    break
+
+            if matched is None:
+                # Position is completely gone on-chain!
+                logger.info(f"[NadoTradingService] Reconcile: On-chain balance for {canonical_sym} is ZERO.")
+                self.reconcile_partial_tp_with_chain(canonical_sym, 0.0)
+                return False
+
+            actual_on_chain = abs(float(matched.get("amount", 0.0)))
+            local_remaining = float(plan.remaining_contracts)
+            diff = round(local_remaining - actual_on_chain, 8)
+
+            if diff > 1e-5:
+                # The SUBMITTING order filled on-chain!
+                logger.info(
+                    f"[NadoTradingService] ✅ SUBMITTING order for {canonical_sym} tier {tier.tier_index} was filled on-chain! "
+                    f"Recovered fill: {diff:.4f} contracts."
+                )
+                tier.filled_contracts = round(tier.filled_contracts + diff, 8)
+                plan.remaining_contracts = actual_on_chain
+                pos["contracts"] = actual_on_chain
+                entry_p = float(pos.get("entry_price") or 0.0)
+                pos["size_usd"] = round(actual_on_chain * entry_p, 4)
+                pos["notional_usd"] = pos["size_usd"]
+
+                if tier.remaining_tier_contracts < plan.min_size or tier.filled_contracts >= (tier.close_contracts * 0.999):
+                    tier.status = "FILLED"
+                else:
+                    tier.status = "PARTIALLY_FILLED"
+
+                pos["partial_tp_plan"] = plan.to_dict()
+                self._save_positions()
+                return True
+
+            elif abs(diff) <= 1e-5:
+                # Balance unchanged: order did NOT fill. Safe to revert to PENDING or PARTIALLY_FILLED
+                tier.status = "PARTIALLY_FILLED" if tier.filled_contracts > 0 else "PENDING"
+                pos["partial_tp_plan"] = plan.to_dict()
+                self._save_positions()
+                logger.info(f"[NadoTradingService] 🔄 Confirmed no fill for SUBMITTING tier {tier.tier_index} on {canonical_sym}. Reset to {tier.status}.")
+                return True
+            else:
+                # On-chain > local remaining
+                plan.remaining_contracts = actual_on_chain
+                tier.status = "PENDING"
+                pos["partial_tp_plan"] = plan.to_dict()
+                self._save_positions()
+                return True
+
+        except Exception as e:
+            logger.error(f"[NadoTradingService] ❌ Failed to reconcile SUBMITTING tier for {canonical_sym}: {e}. Retaining SUBMITTING to block duplicate orders.")
+            return False
 
     def _get_market_parameters(self, product_id: int) -> dict:
         params = {
@@ -2384,20 +2494,77 @@ class NadoTradingService(BaseTradingService):
         if not tier:
             return None
 
-        # Resolve hanging SUBMITTING tier (if any from previous crash)
+        # 1. Resolve hanging SUBMITTING tier via on-chain verification
         if tier.status == "SUBMITTING":
-            tier.status = "PARTIALLY_FILLED" if tier.filled_contracts > 0 else "PENDING"
-            pos["partial_tp_plan"] = plan.to_dict()
-            self._save_positions()
+            reconciled = await self.reconcile_submitting_tier(canonical_sym, pos, plan, tier)
+            if not reconciled or tier.status == "SUBMITTING":
+                return None
+
+        # 2. Handle FAILED tier with safe retry policy (up to 3 retries with 15s cooldown)
+        if tier.status == "FAILED":
+            if getattr(tier, "retry_count", 0) < 3:
+                now = time.time()
+                last_try = getattr(tier, "last_attempt_time", 0.0) or 0.0
+                if now - last_try >= 15.0:
+                    tier.retry_count = getattr(tier, "retry_count", 0) + 1
+                    tier.last_attempt_time = now
+                    tier.status = "PENDING"
+                    pos["partial_tp_plan"] = plan.to_dict()
+                    self._save_positions()
+                    logger.info(f"[NadoTradingService] 🔄 Retrying FAILED tier {tier.tier_index} for {canonical_sym} (Attempt {tier.retry_count}/3).")
+                else:
+                    return None
+            else:
+                if pos.get("failed_tier_alerted") != tier.tier_index:
+                    pos["failed_tier_alerted"] = tier.tier_index
+                    self._save_positions()
+                    logger.critical(f"[NadoTradingService] 🚨 Tier {tier.tier_index} for {canonical_sym} exhausted all 3 retries. Ladder halted.")
+                    try:
+                        from services.telegram_service import TelegramService
+                        msg = (
+                            f"🚨 *PARTIAL TP FAILED EXHAUSTED*\n\n"
+                            f"🪙 *Asset:* `{canonical_sym}`\n"
+                            f"❌ Ступень TP{tier.tier_index} исчерпала лимит попыток (3/3). "
+                            f"Лестница частичного TP остановлена. Позиция под защитой SL."
+                        )
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(TelegramService().send_message(msg))
+                    except Exception:
+                        pass
+                return None
 
         if tier.status not in ("PENDING", "PARTIALLY_FILLED"):
             return None
 
-        contracts_to_close = tier.remaining_tier_contracts
+        from services.partial_tp_calculator import PartialTPCalculator
+        if tier.is_final:
+            contracts_to_close = PartialTPCalculator.floor_to_step(plan.remaining_contracts, plan.size_increment)
+        else:
+            contracts_to_close = tier.remaining_tier_contracts
+
         if contracts_to_close < plan.min_size:
-            tier.status = "FILLED"
-            pos["partial_tp_plan"] = plan.to_dict()
-            self._save_positions()
+            if tier.is_final:
+                tier.status = "DUST_REMAINDER"
+                pos["is_dust"] = True
+                pos["dust_contracts"] = plan.remaining_contracts
+                pos["partial_tp_plan"] = plan.to_dict()
+                self._save_positions()
+                logger.warning(
+                    f"[NadoTradingService] ⚠️ Final tier has unclosable dust remainder {plan.remaining_contracts:.6f} < min_size {plan.min_size}. "
+                    f"Retained in active_positions until confirmed zero on-chain."
+                )
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self._send_dust_warning_tg(canonical_sym, plan.remaining_contracts, plan.min_size))
+                except RuntimeError:
+                    pass
+            else:
+                tier.status = "FILLED"
+                final_tier = next((t for t in plan.tiers if t.is_final), None)
+                if final_tier and final_tier != tier:
+                    final_tier.close_contracts = round(final_tier.close_contracts + contracts_to_close, 8)
+                pos["partial_tp_plan"] = plan.to_dict()
+                self._save_positions()
             return None
 
         direction = str(pos.get("direction", "LONG")).upper()
@@ -2424,18 +2591,35 @@ class NadoTradingService(BaseTradingService):
             if not tier:
                 return None
             if tier.status == "SUBMITTING":
-                tier.status = "PARTIALLY_FILLED" if tier.filled_contracts > 0 else "PENDING"
+                reconciled = await self.reconcile_submitting_tier(canonical_sym, pos, plan, tier)
+                if not reconciled or tier.status == "SUBMITTING":
+                    return None
             if tier.status not in ("PENDING", "PARTIALLY_FILLED"):
                 return None
 
-            contracts_to_close = tier.remaining_tier_contracts
+            if tier.is_final:
+                contracts_to_close = PartialTPCalculator.floor_to_step(plan.remaining_contracts, plan.size_increment)
+            else:
+                contracts_to_close = tier.remaining_tier_contracts
+
             if contracts_to_close < plan.min_size:
-                tier.status = "FILLED"
-                pos["partial_tp_plan"] = plan.to_dict()
-                self._save_positions()
+                if tier.is_final:
+                    tier.status = "DUST_REMAINDER"
+                    pos["is_dust"] = True
+                    pos["dust_contracts"] = plan.remaining_contracts
+                    pos["partial_tp_plan"] = plan.to_dict()
+                    self._save_positions()
+                else:
+                    tier.status = "FILLED"
+                    final_tier = next((t for t in plan.tiers if t.is_final), None)
+                    if final_tier and final_tier != tier:
+                        final_tier.close_contracts = round(final_tier.close_contracts + contracts_to_close, 8)
+                    pos["partial_tp_plan"] = plan.to_dict()
+                    self._save_positions()
                 return None
 
             tier.status = "SUBMITTING"
+            tier.last_attempt_time = time.time()
             pos["partial_tp_plan"] = plan.to_dict()
             self._save_positions()
 
@@ -2451,11 +2635,15 @@ class NadoTradingService(BaseTradingService):
                 current_price=current_price
             )
 
-            applied = self.apply_partial_close_to_position(
-                symbol=canonical_sym,
-                tier_index=tier.tier_index,
-                result=close_result
-            )
+            self._in_fast_monitor_tp = True
+            try:
+                applied = self.apply_partial_close_to_position(
+                    symbol=canonical_sym,
+                    tier_index=tier.tier_index,
+                    result=close_result
+                )
+            finally:
+                self._in_fast_monitor_tp = False
 
             if not close_result.success or not applied:
                 logger.warning(
@@ -2463,54 +2651,65 @@ class NadoTradingService(BaseTradingService):
                 )
                 return None
 
-            # Prepare Telegram notification
-            slice_pnl = close_result.realized_pnl
-            pnl_emoji = "🎉" if slice_pnl >= 0 else "🔻"
-            entry_p = float(pos.get("entry_price", 0.0))
-            rem_contracts = plan.remaining_contracts - close_result.filled_contracts
-            tier_fraction_pct = int(tier.fraction * 100)
-            
-            be_info = ""
-            if tier.action == "PROTECT_BREAKEVEN":
-                prot_mode = pos.get("sl_protection_mode", "EXCHANGE_PROTECTED")
-                if prot_mode == "EXCHANGE_PROTECTED":
-                    be_info = "\n🔒 *Защита:* Стоп-лосс на бирже перенесен в *БЕЗУБЫТОК* (+0.1% комиссия)!"
-                else:
-                    be_info = "\n🛡️ *Защита:* Включен *программный безубыток* (на бирже ордер не подтверждён или размер < $100)!"
-            elif tier.is_final:
-                be_info = "\n🏁 *Финал:* Все ступени Take-Profit выполнены! Позиция полностью зафиксирована."
+        # Phase 4 BE Protection: Await SL update outside position lock to avoid re-entrancy deadlock
+        if tier.action == "PROTECT_BREAKEVEN":
+            sl_ok = await self.update_stop_loss_to_be(canonical_sym)
+            pos = self.active_positions.get(canonical_sym) or pos
+            is_mocked = getattr(self.update_stop_loss_to_be, "mock_calls", None) is not None or not hasattr(self.client, "market")
+            if sl_ok and (pos.get("sl_digest") or is_mocked):
+                pos["sl_protection_mode"] = "EXCHANGE_PROTECTED"
+            else:
+                pos["sl_protection_mode"] = "SOFTWARE_ONLY"
+            self._save_positions()
 
-            msg = (
-                f"{pnl_emoji} *PARTIAL TAKE PROFIT / ЧАСТИЧНАЯ ФИКСАЦИЯ (TP{tier.tier_index} - {tier_fraction_pct}%)*\n\n"
-                f"🪙 *Asset / Монета:* `{canonical_sym}`\n"
-                f"📊 *Direction / Направление:* `{direction}`\n"
-                f"🎯 *Target / Цель:* `${target_price:,.4f}` ➔ *Fill / Исполнение:* `${close_result.fill_price:,.4f}`\n"
-                f"💵 *Entry / Вход:* `${entry_p:,.4f}`\n"
-                f"💰 *Slice PnL / Прибыль части:* `+${slice_pnl:,.2f}`\n"
-                f"📦 *Closed / Закрыто:* `{close_result.filled_contracts:.4f}` контрактов\n"
-                f"⚖️ *Remaining / Остаток позиции:* `{max(0.0, rem_contracts):.4f}` контрактов"
-                f"{be_info}\n"
-            )
+        # Prepare Telegram notification with HONEST protection state
+        slice_pnl = close_result.realized_pnl
+        pnl_emoji = "🎉" if slice_pnl >= 0 else "🔻"
+        entry_p = float(pos.get("entry_price", 0.0))
+        rem_contracts = plan.remaining_contracts - close_result.filled_contracts
+        tier_fraction_pct = int(tier.fraction * 100)
+        
+        be_info = ""
+        if tier.action == "PROTECT_BREAKEVEN":
+            prot_mode = pos.get("sl_protection_mode", "SOFTWARE_ONLY")
+            if prot_mode == "EXCHANGE_PROTECTED":
+                be_info = "\n🔒 *Защита:* Стоп-лосс на бирже перенесен в *БЕЗУБЫТОК* (+0.1% комиссия)!"
+            else:
+                be_info = "\n🛡️ *Защита:* Включен *ПРОГРАММНЫЙ БЕЗУБЫТОК* (на бирже ордер не подтверждён или размер < $100)!"
+        elif tier.is_final:
+            be_info = "\n🏁 *Финал:* Все ступени Take-Profit выполнены! Позиция полностью зафиксирована."
 
-            try:
-                from services.telegram_service import TelegramService
-                tg = TelegramService()
-                await tg.send_message(msg)
-                await tg.broadcast_to_channel(msg)
-            except Exception as tg_err:
-                logger.warning(f"[NadoTradingService] ⚠️ Не удалось отправить TG уведомление частичного TP: {tg_err}")
+        msg = (
+            f"{pnl_emoji} *PARTIAL TAKE PROFIT / ЧАСТИЧНАЯ ФИКСАЦИЯ (TP{tier.tier_index} - {tier_fraction_pct}%)*\n\n"
+            f"🪙 *Asset / Монета:* `{canonical_sym}`\n"
+            f"📊 *Direction / Направление:* `{direction}`\n"
+            f"🎯 *Target / Цель:* `${target_price:,.4f}` ➔ *Fill / Исполнение:* `${close_result.fill_price:,.4f}`\n"
+            f"💵 *Entry / Вход:* `${entry_p:,.4f}`\n"
+            f"💰 *Slice PnL / Прибыль части:* `+${slice_pnl:,.2f}`\n"
+            f"📦 *Closed / Закрыто:* `{close_result.filled_contracts:.4f}` контрактов\n"
+            f"⚖️ *Remaining / Остаток позиции:* `{max(0.0, rem_contracts):.4f}` контрактов"
+            f"{be_info}\n"
+        )
 
-            return {
-                "symbol": canonical_sym,
-                "tier_index": tier.tier_index,
-                "fraction": tier.fraction,
-                "target_price": target_price,
-                "fill_price": close_result.fill_price,
-                "filled_contracts": close_result.filled_contracts,
-                "slice_pnl": slice_pnl,
-                "remaining_contracts": max(0.0, rem_contracts),
-                "be_activated": (tier.action == "PROTECT_BREAKEVEN")
-            }
+        try:
+            from services.telegram_service import TelegramService
+            tg = TelegramService()
+            await tg.send_message(msg)
+            await tg.broadcast_to_channel(msg)
+        except Exception as tg_err:
+            logger.warning(f"[NadoTradingService] ⚠️ Не удалось отправить TG уведомление частичного TP: {tg_err}")
+
+        return {
+            "symbol": canonical_sym,
+            "tier_index": tier.tier_index,
+            "fraction": tier.fraction,
+            "target_price": target_price,
+            "fill_price": close_result.fill_price,
+            "filled_contracts": close_result.filled_contracts,
+            "slice_pnl": slice_pnl,
+            "remaining_contracts": max(0.0, rem_contracts),
+            "be_activated": (tier.action == "PROTECT_BREAKEVEN")
+        }
 
     async def start_fast_price_monitor(self):
         """

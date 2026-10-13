@@ -85,8 +85,8 @@ async def test_execute_partial_close_long_counter_sell(mock_service):
     assert result.digest == "0xmock_digest_long_close"
     assert result.filled_contracts == pytest.approx(0.4)
     assert result.fill_price == pytest.approx(105.0)
-    # Net PnL for LONG: 0.4 * (105.0 - 100.0) - 0.05% fee (0.021) = +1.979
-    assert result.realized_pnl == pytest.approx(1.979)
+    # Net PnL for LONG: 0.4 * (105.0 - 100.0) - round-trip fee (0.4 * 205.0 * 0.0005 = 0.041) = +1.959
+    assert result.realized_pnl == pytest.approx(1.959)
     assert result.is_partial_fill is False
 
     # Verify place_order call arguments
@@ -136,8 +136,8 @@ async def test_execute_partial_close_short_counter_buy(mock_service):
 
     assert result.success is True
     assert result.filled_contracts == pytest.approx(0.4)
-    # Net PnL for SHORT: 0.4 * (106.78 - 105.0) - 0.05% fee (0.021) = +0.691
-    assert result.realized_pnl == pytest.approx(0.691)
+    # Net PnL for SHORT: 0.4 * (106.78 - 105.0) - round-trip fee (0.4 * 211.78 * 0.0005 = 0.042356) = +0.6696
+    assert result.realized_pnl == pytest.approx(0.6696)
 
     place_params = mock_service.client.market.place_order.call_args[0][0]
     order = place_params.order
@@ -200,8 +200,8 @@ async def test_execute_partial_close_partial_fill_handling(mock_service):
     assert result.success is True
     assert result.is_partial_fill is True
     assert result.filled_contracts == pytest.approx(0.2)
-    # Net PnL calculated strictly on 0.2 filled minus fee: 0.2 * (105 - 100) - 0.0105 fee = +0.9895
-    assert result.realized_pnl == pytest.approx(0.9895)
+    # Net PnL calculated on 0.2 filled minus round-trip fee: 0.2 * (105 - 100) - 0.2 * 205 * 0.0005 (0.0205) = +0.9795
+    assert result.realized_pnl == pytest.approx(0.9795)
 
 
 @pytest.mark.asyncio
