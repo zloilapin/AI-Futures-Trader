@@ -323,21 +323,6 @@ class RiskManager(BaseAgent):
                 else:
                     daily_drawdown_pct = 0.0
 
-        # Sanity Guard: An external withdrawal / baseline mismatch must not be confused with trading loss.
-        # If there are 0 active positions and 0 trade losses today, an extreme drawdown cannot be from trading.
-        active_positions = portfolio_data.get("active_positions", {})
-        num_active = len(active_positions) if isinstance(active_positions, (dict, list)) else 0
-        unrealized_pnl = float(portfolio_data.get("unrealized_pnl", 0.0) or 0.0)
-        daily_trades = int(portfolio_data.get("daily_trades_count", 0) or 0)
-        
-        if num_active == 0 and daily_trades == 0 and unrealized_pnl == 0.0 and daily_drawdown_pct > 0.15:
-            self.logger.warning(
-                f"[{self.name}] ⚠️ External transfer / baseline discrepancy detected: daily_drawdown_pct="
-                f"{daily_drawdown_pct*100:.2f}% with 0 active positions and 0 trades today. "
-                f"Disregarding external transfer to avoid false lockout."
-            )
-            daily_drawdown_pct = 0.0
-
         if daily_drawdown_pct >= max_daily_dd:
             msg = f"Daily drawdown limit reached ({daily_drawdown_pct*100:.2f}% >= {max_daily_dd*100:.2f}% limit). Trading halted to protect capital."
             self.logger.warning(f"[{self.name}] 🚨 MAX_DAILY_DRAWDOWN VETO: {msg}")
@@ -736,14 +721,6 @@ class RiskManager(BaseAgent):
                 f"Falling back to size_increment ({size_increment}) as true minimum order size."
             )
             min_size = size_increment
-        
-        if min_size > 0 and (min_size * current_price) > max_notional_usd:
-            self.logger.info(f"[{self.name}] ℹ️ Reported min_size ({min_size}) exceeds max account notional (${max_notional_usd:.2f}). Treating as unconfigured testnet artifact.")
-            min_size = 0.0
-
-        if min_notional > 0 and min_notional > max_notional_usd:
-            self.logger.info(f"[{self.name}] ℹ️ Reported min_notional ({min_notional}) exceeds max account notional (${max_notional_usd:.2f}). Treating as unconfigured testnet artifact.")
-            min_notional = 0.0
         
         if notional_usd <= 0 or contracts <= 0:
             msg = "Calculated order size is 0. Blocking trade."

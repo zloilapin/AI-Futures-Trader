@@ -212,14 +212,15 @@ def test_nado_update_stop_loss_on_chain_retry_and_software_fallback():
 
                     success = asyncio.run(service.update_stop_loss("BTC-USD", 60100.0, new_protection_state="BREAK_EVEN"))
 
-                    # Must succeed via software stop-loss fallback
-                    assert success is True
+                    # When on-chain placement fails, success is False (honest exchange semantics)
+                    assert success is False
                     # Old digest was cancelled
                     mock_cancel.assert_called_once_with(1, ["0xold_digest"], sender="0x1234")
                     # sl_price is updated to new level for Fast Price Monitor
                     assert service.active_positions["BTC-USD"]["sl_price"] == 60100.0
                     assert service.active_positions["BTC-USD"]["sl_digest"] is None
                     assert service.active_positions["BTC-USD"]["unverified_triggers"] is True
+                    assert service.active_positions["BTC-USD"]["sl_protection_mode"] == "SOFTWARE_ONLY"
                     # MUST NOT execute emergency panic market closure
                     mock_force_close.assert_not_called()
 

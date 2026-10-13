@@ -26,6 +26,11 @@ class TPTier:
     executed_at: Optional[float] = None
     error_message: Optional[str] = None
 
+    @property
+    def remaining_tier_contracts(self) -> float:
+        """Returns pending contracts remaining to be filled for this specific tier."""
+        return max(0.0, round(self.close_contracts - self.filled_contracts, 8))
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
@@ -50,12 +55,42 @@ class PartialTPPlan:
     be_activated: bool = False
     created_at: Optional[float] = None
 
-    def get_next_pending_tier(self) -> Optional[TPTier]:
-        """Returns the first tier with PENDING status, or None if all completed/submitting."""
+    def get_active_or_next_tier(self) -> Optional[TPTier]:
+        """
+        Returns the currently active tier to execute or resolve.
+        Strict sequential invariant:
+        - If any earlier tier is SUBMITTING or PARTIALLY_FILLED (with remaining >= min_size),
+          it MUST be completed/resolved before any subsequent tier can be processed.
+        - Returns None if all tiers are FILLED or no actionable tier exists.
+        """
         for tier in self.tiers:
+            # 1. In-flight or crash-recovery tier
+            if tier.status == "SUBMITTING":
+                return tier
+            
+            # 2. Incomplete partial fill that still has tradable volume
+            if tier.status == "PARTIALLY_FILLED":
+                rem = tier.remaining_tier_contracts
+                if rem >= self.min_size and rem >= self.size_increment:
+                    return tier
+                else:
+                    # Dust remainder (< min_size) cannot be closed as a standalone order on exchange.
+                    # Mark this tier as FILLED; the dust remainder is automatically absorbed into the final tier.
+                    tier.status = "FILLED"
+                    continue
+            
+            # 3. Next pending tier (strictly sequential)
             if tier.status == "PENDING":
                 return tier
+                
+            if tier.status == "FAILED":
+                return tier
+
         return None
+
+    def get_next_pending_tier(self) -> Optional[TPTier]:
+        """Backward-compatible alias pointing to get_active_or_next_tier."""
+        return self.get_active_or_next_tier()
 
     def get_tier(self, tier_index: int) -> Optional[TPTier]:
         """Returns tier by its 1-indexed number."""
@@ -121,6 +156,28 @@ class PartialTPCalculator:
         rounded = ticks * tick_size
         
         # Determine decimal places of tick_size for clean float representation
+        tick_str = f"{tick_size:.10f}".rstrip("0")
+        decimals = len(tick_str.split(".")[1]) if "." in tick_str else 0
+        return round(rounded, min(decimals, 8))
+
+    @staticmethod
+    def ceil_to_tick(price: float, tick_size: float) -> float:
+        """Rounds price UP to next tick away from entry (for LONG TP)."""
+        if tick_size <= 0:
+            return round(price, 6)
+        ticks = math.ceil(round(price / tick_size, 8))
+        rounded = ticks * tick_size
+        tick_str = f"{tick_size:.10f}".rstrip("0")
+        decimals = len(tick_str.split(".")[1]) if "." in tick_str else 0
+        return round(rounded, min(decimals, 8))
+
+    @staticmethod
+    def floor_to_tick(price: float, tick_size: float) -> float:
+        """Rounds price DOWN to next tick away from entry (for SHORT TP)."""
+        if tick_size <= 0:
+            return round(price, 6)
+        ticks = math.floor(round(price / tick_size, 8))
+        rounded = ticks * tick_size
         tick_str = f"{tick_size:.10f}".rstrip("0")
         decimals = len(tick_str.split(".")[1]) if "." in tick_str else 0
         return round(rounded, min(decimals, 8))
@@ -197,13 +254,14 @@ class PartialTPCalculator:
         # Total distance
         delta_tp = abs(tp_final_price - entry_price)
 
-        # Helper to compute price at fraction f
+        # Helper to compute price at fraction f (Directed Rounding ensures targets never move closer to entry)
         def get_price_at(fraction: float) -> float:
             if dir_clean == "LONG":
                 raw_price = entry_price + (delta_tp * fraction)
+                return cls.ceil_to_tick(raw_price, price_inc)
             else:
                 raw_price = entry_price - (delta_tp * fraction)
-            return cls.round_to_tick(raw_price, price_inc)
+                return cls.floor_to_tick(raw_price, price_inc)
 
         # Total contracts rounded down to step size
         total_contracts = cls.floor_to_step(total_contracts, size_inc)

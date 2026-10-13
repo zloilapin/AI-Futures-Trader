@@ -261,3 +261,60 @@ def test_validation_rejects_invalid_inputs():
     # Inverted SHORT (TP > Entry)
     with pytest.raises(ValueError, match="must be < entry_price"):
         PartialTPCalculator.calculate_plan("SOL-USD", "SHORT", 100.0, 110.0, 1.0, valid_params)
+
+
+def test_partially_filled_tier_strictly_blocks_subsequent_tier_and_calculates_remainder():
+    """
+    Verifies that a PARTIALLY_FILLED tier remains active with remaining contracts
+    and strictly PREVENTS the state machine from jumping to the next tier!
+    """
+    params = {"size_increment": 0.1, "min_size": 0.1, "price_increment": 0.01}
+    plan = PartialTPCalculator.calculate_plan("SOL-USD", "LONG", 100.0, 120.0, 1.6, params)
+
+    t1 = plan.get_active_or_next_tier()
+    assert t1.tier_index == 1
+    assert t1.close_contracts == 0.4
+    assert t1.remaining_tier_contracts == 0.4
+
+    # Simulate partial fill: 0.25 filled out of 0.40
+    t1.status = "PARTIALLY_FILLED"
+    t1.filled_contracts = 0.25
+    assert t1.remaining_tier_contracts == pytest.approx(0.15)
+
+    # get_active_or_next_tier MUST still return tier 1 (never tier 2!)
+    active = plan.get_active_or_next_tier()
+    assert active is not None
+    assert active.tier_index == 1
+    assert active.status == "PARTIALLY_FILLED"
+    assert active.remaining_tier_contracts == pytest.approx(0.15)
+
+
+def test_submitting_tier_strictly_blocks_subsequent_tier():
+    """Verifies that an in-flight SUBMITTING tier is returned and blocks jumping to tier 2."""
+    params = {"size_increment": 0.1, "min_size": 0.1, "price_increment": 0.01}
+    plan = PartialTPCalculator.calculate_plan("SOL-USD", "LONG", 100.0, 120.0, 1.6, params)
+
+    t1 = plan.tiers[0]
+    t1.status = "SUBMITTING"
+
+    active = plan.get_active_or_next_tier()
+    assert active is not None
+    assert active.tier_index == 1
+    assert active.status == "SUBMITTING"
+
+
+def test_directed_rounding_never_moves_tp_closer_to_entry():
+    """
+    Verifies that directed rounding for LONG rounds up (away from entry)
+    and for SHORT rounds down (away from entry).
+    """
+    tick = 0.05
+    # LONG: entry 100.0, distance 1.01 -> raw 101.01 -> ceil should be 101.05 (not 101.00)
+    ceil_res = PartialTPCalculator.ceil_to_tick(101.01, tick)
+    assert ceil_res == pytest.approx(101.05)
+    assert ceil_res >= 101.01
+
+    # SHORT: entry 100.0, distance 1.01 -> raw 98.99 -> floor should be 98.95 (not 99.00)
+    floor_res = PartialTPCalculator.floor_to_tick(98.99, tick)
+    assert floor_res == pytest.approx(98.95)
+    assert floor_res <= 98.99

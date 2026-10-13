@@ -97,6 +97,28 @@ async def test_risk_manager_vetos_negative_daily_pnl_pct(risk_mgr, base_market_d
     assert verdict["approved"] is False
     assert verdict["veto_category"] == "MAX_DAILY_DRAWDOWN"
 
+
+@pytest.mark.asyncio
+async def test_risk_manager_never_resets_extreme_drawdown_even_with_zero_positions(risk_mgr, base_market_data, base_portfolio_data):
+    """
+    Verifies that an extreme drawdown (e.g. 20%) is NEVER swept under the rug or reset to 0.0
+    even if active_positions is empty and daily_trades is 0!
+    """
+    ceo_decision = {
+        "symbol": "BTC-USD",
+        "decision": "LONG",
+        "conviction": 80,
+        "trade_action": "ENTER"
+    }
+    
+    # 20% drawdown with 0 active positions and 0 daily trades
+    portfolio = dict(base_portfolio_data, daily_drawdown_pct=0.20, active_positions={}, daily_trades_count=0, unrealized_pnl=0.0)
+    verdict = await risk_mgr.analyze(ceo_decision, portfolio, base_market_data, effective_profile="BALANCED")
+    
+    assert verdict["approved"] is False
+    assert verdict["veto_category"] == "MAX_DAILY_DRAWDOWN"
+
+
 @pytest.mark.asyncio
 async def test_risk_manager_allows_safe_daily_drawdown(risk_mgr, base_market_data, base_portfolio_data):
     """
@@ -345,10 +367,10 @@ async def test_nado_trading_service_reanchors_on_external_transfer():
     assert service._daily_start_balance == 8.54
 
 @pytest.mark.asyncio
-async def test_risk_manager_ignores_fake_drawdown_on_external_transfer(risk_mgr, base_market_data, base_portfolio_data):
+async def test_risk_manager_strictly_vetos_extreme_drawdown_without_fake_reset(risk_mgr, base_market_data, base_portfolio_data):
     """
-    Verifies that RiskManager does NOT veto a trade when an apparent extreme drawdown (>15%)
-    is reported with 0 active positions, 0 trades today, and 0 unrealized PnL.
+    Verifies that RiskManager strictly enforces MAX_DAILY_DRAWDOWN when an extreme drawdown
+    is reported, and never dangerously sweeps it under the rug even with 0 active positions.
     """
     ceo_decision = {
         "symbol": "SOL-USD",
@@ -371,8 +393,9 @@ async def test_risk_manager_ignores_fake_drawdown_on_external_transfer(risk_mgr,
     )
     
     verdict = await risk_mgr.analyze(ceo_decision, portfolio, base_market_data, effective_profile="AGGRESSIVE")
-    # Must NOT be vetoed by MAX_DAILY_DRAWDOWN
-    assert verdict.get("veto_category") != "MAX_DAILY_DRAWDOWN"
+    # Must be vetoed by MAX_DAILY_DRAWDOWN to protect remaining capital
+    assert verdict.get("veto_category") == "MAX_DAILY_DRAWDOWN"
+    assert verdict.get("approved") is False
 
 # ==============================================================================
 # 7. INSTITUTIONAL SAFETY INVARIANTS TESTS

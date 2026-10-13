@@ -622,7 +622,7 @@ class TradingPipeline:
                     final_trade_decision, 
                     portfolio_data, 
                     market_data, 
-                    effective_profile=profile,
+                    effective_profile=effective_asset_profile,
                     macro_regime=detected_regime,
                     strategy_mode=strategy_mode
                 )

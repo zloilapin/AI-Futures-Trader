@@ -331,3 +331,112 @@ def test_legacy_position_backward_compatibility(mock_service):
 
     # Position remains completely untouched
     assert mock_service.active_positions["SOL-USD"]["size_usd"] == 170.85
+
+
+def test_final_tier_partial_fill_does_not_prematurely_delete_position(mock_service):
+    """
+    Verifies that if the final tier is only partially filled (e.g. 0.3 filled out of 0.4),
+    the position is NEVER prematurely deleted from active_positions!
+    """
+    mock_service.active_positions["SOL-USD"] = {
+        "direction": "LONG",
+        "entry_price": 100.0,
+        "tp_price": 104.0,
+        "size_usd": 160.0,
+        "contracts": 1.6,
+        "product_id": 8
+    }
+    mock_service.initialize_partial_tp_plan("SOL-USD")
+
+    # Complete tiers 1, 2, 3
+    for i in range(1, 4):
+        res = PartialCloseResult(success=True, requested_contracts=0.4, filled_contracts=0.4, fill_price=100.0 + i)
+        mock_service.apply_partial_close_to_position("SOL-USD", i, res)
+
+    # Now execute final tier 4, but matching engine only fills 0.3 out of 0.4!
+    partial_final_res = PartialCloseResult(
+        success=True,
+        digest="0xmock_partial_final",
+        requested_contracts=0.4,
+        filled_contracts=0.3,
+        fill_price=104.0,
+        realized_pnl=1.20,
+        is_partial_fill=True
+    )
+    mock_service.apply_partial_close_to_position("SOL-USD", 4, partial_final_res)
+
+    # Position MUST STILL BE ALIVE in active_positions with 0.1 SOL remaining!
+    assert "SOL-USD" in mock_service.active_positions
+    pos = mock_service.active_positions["SOL-USD"]
+    assert pos["contracts"] == pytest.approx(0.1)
+    plan = PartialTPPlan.from_dict(pos["partial_tp_plan"])
+    assert plan.remaining_contracts == pytest.approx(0.1)
+    assert plan.tiers[3].status == "PARTIALLY_FILLED"
+    assert plan.tiers[3].remaining_tier_contracts == pytest.approx(0.1)
+
+
+def test_hanging_submitting_tier_recovery_in_reconcile(mock_service):
+    """
+    Verifies that if a process restart leaves a tier in SUBMITTING status,
+    reconciliation checks on-chain reality and safely recovers it to PENDING.
+    """
+    mock_service.active_positions["SOL-USD"] = {
+        "direction": "LONG",
+        "entry_price": 100.0,
+        "tp_price": 104.0,
+        "size_usd": 160.0,
+        "contracts": 1.6,
+        "product_id": 8
+    }
+    plan = mock_service.initialize_partial_tp_plan("SOL-USD")
+    plan.tiers[0].status = "SUBMITTING"
+    mock_service.active_positions["SOL-USD"]["partial_tp_plan"] = plan.to_dict()
+
+    # On-chain balance is still 1.6 SOL (IOC expired without fill)
+    reconciled = mock_service.reconcile_partial_tp_with_chain("SOL-USD", on_chain_contracts=1.6)
+    assert reconciled is True
+
+    pos = mock_service.active_positions["SOL-USD"]
+    recovered_plan = PartialTPPlan.from_dict(pos["partial_tp_plan"])
+    assert recovered_plan.tiers[0].status == "PENDING"
+    assert recovered_plan.get_active_or_next_tier().tier_index == 1
+
+
+def test_partially_filled_tier_cumulative_execution(mock_service):
+    """
+    Verifies that a tier can be completed across multiple partial fills cumulatively:
+    Fill 1: 0.25 / 0.40 -> PARTIALLY_FILLED (0.15 remaining).
+    Fill 2: 0.15 / 0.15 -> FILLED (0.40 total).
+    Only then does the next tier become active!
+    """
+    mock_service.active_positions["SOL-USD"] = {
+        "direction": "LONG",
+        "entry_price": 100.0,
+        "tp_price": 104.0,
+        "size_usd": 160.0,
+        "contracts": 1.6,
+        "product_id": 8
+    }
+    mock_service.initialize_partial_tp_plan("SOL-USD")
+
+    # Slice 1: fill 0.25
+    res1 = PartialCloseResult(success=True, requested_contracts=0.40, filled_contracts=0.25, fill_price=101.0, is_partial_fill=True)
+    mock_service.apply_partial_close_to_position("SOL-USD", 1, res1)
+
+    pos = mock_service.active_positions["SOL-USD"]
+    plan1 = PartialTPPlan.from_dict(pos["partial_tp_plan"])
+    assert plan1.tiers[0].status == "PARTIALLY_FILLED"
+    assert plan1.tiers[0].filled_contracts == pytest.approx(0.25)
+    assert plan1.get_active_or_next_tier().tier_index == 1
+    assert plan1.get_active_or_next_tier().remaining_tier_contracts == pytest.approx(0.15)
+
+    # Slice 2: fill remaining 0.15
+    res2 = PartialCloseResult(success=True, requested_contracts=0.15, filled_contracts=0.15, fill_price=101.0, is_partial_fill=False)
+    mock_service.apply_partial_close_to_position("SOL-USD", 1, res2)
+
+    pos = mock_service.active_positions["SOL-USD"]
+    plan2 = PartialTPPlan.from_dict(pos["partial_tp_plan"])
+    assert plan2.tiers[0].status == "FILLED"
+    assert plan2.tiers[0].filled_contracts == pytest.approx(0.40)
+    # Next active tier is now tier 2!
+    assert plan2.get_active_or_next_tier().tier_index == 2
