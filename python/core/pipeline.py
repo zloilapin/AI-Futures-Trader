@@ -487,13 +487,26 @@ class TradingPipeline:
                 historical_context = self.agents.memory.get_recent_context(limit=3, symbol=symbol)
                 symbol_lessons = self.agents.reflector.get_lessons(limit=5, symbol=symbol)
                 
+                # Per-Asset Profile Resolution:
+                # If user configured AGGRESSIVE, but macro regime was downgraded to BALANCED due to BTC chop,
+                # do NOT penalize an asset that exhibits FULL_ALIGNMENT or confirmed BREAKOUT momentum.
+                effective_asset_profile = profile
+                if getattr(config, "TRADING_PROFILE", "BALANCED") == "AGGRESSIVE" and profile == "BALANCED":
+                    asset_mtf_align = market_data.get("multi_timeframe", {}).get("mtf_alignment", "")
+                    if asset_mtf_align == "FULL_ALIGNMENT" or strategy_mode == "BREAKOUT":
+                        effective_asset_profile = "AGGRESSIVE"
+                        self.services.logger.info(
+                            f"⚡ [Asset Profile Uplift] {symbol} имеет {asset_mtf_align or strategy_mode}. "
+                            f"Применен профиль AGGRESSIVE вместо макро BALANCED."
+                        )
+
                 ceo_payload = {
                     "symbol": symbol,
                     "strategy_mode": strategy_mode,
                     "direction_bias": strategy_profile.direction_bias,
                     "router_reasoning": strategy_profile.reasoning,
                     "macro_regime": detected_regime,
-                    "macro_profile": profile,
+                    "macro_profile": effective_asset_profile,
                     "multi_timeframe_context": clean_mtf,
                     "bull_thesis": bull_verdict,
                     "bear_thesis": bear_verdict,
@@ -513,7 +526,7 @@ class TradingPipeline:
 
                 # STAGE 4.5: DETERMINISTIC GUARD -> FINAL TRADE DECISION
                 final_trade_decision = self.apply_pipeline_guards_and_sync(
-                    strategy_profile, ceo_verdict, profile, symbol=symbol, market_data=market_data
+                    strategy_profile, ceo_verdict, effective_asset_profile, symbol=symbol, market_data=market_data
                 )
                 decision = final_trade_decision.decision
                 conviction = final_trade_decision.conviction
@@ -603,7 +616,7 @@ class TradingPipeline:
                 except Exception as e:
                     self.services.logger.error(f"[Stage 5] Failed to fetch fresh price for {symbol}: {e}. Proceeding with signal price.")
                     
-                self.services.logger.info(f"[Stage 5] Risk Manager ({profile}, Regime: {detected_regime}) проверяет параметры сделки для {symbol}...")
+                self.services.logger.info(f"[Stage 5] Risk Manager (Macro Profile: {profile}, Candidate Profile: {effective_asset_profile}, Regime: {detected_regime}) проверяет параметры сделки для {symbol}...")
                 portfolio_data["active_positions"] = self.services.trading_service.active_positions
                 risk_verdict = await self.agents.risk.analyze(
                     final_trade_decision, 

@@ -19,5 +19,26 @@
         "root_cause": "Bearish trend in the 15m, 1h, and 4h timeframes, with a strong bearish candle pattern and a lower sweep.",
         "actionable_rule": "WARNING: Do not enter SHORT when the 15m, 1h, and 4h trends are BEARISH, and the RSI-14 value is > 30, with a strong bearish candle pattern and a lower sweep.",
         "trade_outcome": "LOSS"
+    },
+    {
+        "symbol": "ETH-USD",
+        "reasoning": "The trade was SHORT with multi-timeframe bearish alignment (15m/1h/4h). Entry triggered by bearish engulfing and RSI in sell impulse zone (29.6). Exit was at 2413.3 with a positive PNL. Market context showed continued bearish momentum with RSI at 11.19 at exit, extreme oversold conditions, and accelerating MACD histogram.",
+        "root_cause": "Successful SHORT due to strong MTF bearish alignment and oversold RSI confirming bearish momentum. No divergence or reversal signals present at entry or exit.",
+        "actionable_rule": "CONFIRM: Enter SHORT when MTF trends are FULL_ALIGNMENT bearish and RSI < 30 in sell impulse zone. Exit when RSI reaches extreme oversold (<15) or shows divergence.",
+        "trade_outcome": "WIN"
+    },
+    {
+        "symbol": "HYPE-USD",
+        "reasoning": "The trade was a SHORT position entered during FULL_ALIGNMENT of bearish trends across all timeframes (15m, 1h, 4h). The entry was supported by a Bearish Engulfing pattern, price below VWAP/EMA-20, and a strong ADX reading of 51.8 indicating a strong trend. The RSI was neutral at 34.2, not indicating overbought conditions. The trade exited at a lower price, resulting in a positive PNL.",
+        "root_cause": "Successful SHORT entry during FULL_ALIGNMENT of bearish trends with strong ADX confirmation and neutral RSI avoiding overbought conditions.",
+        "actionable_rule": "CONFIRM: Enter SHORT when all timeframes (15m, 1h, 4h) show FULL_ALIGNMENT to BEARISH, ADX > 50, and RSI is not overbought (RSI < 60).",
+        "trade_outcome": "WIN"
+    },
+    {
+        "symbol": "SOL-USD",
+        "reasoning": "The trade was initiated as a SHORT based on bearish trends in 1H/4H timeframes and price below VWAP/EMA-20. However, the 15m trend was BULLISH, and the MTF alignment was MIXED_CHOP, indicating a lack of strong directional bias. The RSI was above 60 (63.34), suggesting overbought conditions, and the MACD was bullish. The price continued to rise, leading to a loss.",
+        "root_cause": "Entered SHORT into mixed timeframe alignment (MIXED_CHOP) with bullish 15m trend and RSI > 60.",
+        "actionable_rule": "WARNING: Do not enter SHORT when MTF alignment is MIXED_CHOP, 15m trend is BULLISH, and RSI > 60.",
+        "trade_outcome": "LOSS"
     }
 ]

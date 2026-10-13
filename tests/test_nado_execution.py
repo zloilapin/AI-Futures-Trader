@@ -167,3 +167,86 @@ def test_telegram_signal_sub_100_notional_warning():
 
     msg_over_100 = tg_agent.format_signal(over_100_data)
     assert "На бирже Nado триггеры требуют объем ≥ $100" not in msg_over_100
+
+@pytest.mark.asyncio
+async def test_manual_close_short_zero_tp_sl_never_yields_zero_exit_price():
+    """Verifies that a manually closed SHORT without explicit TP/SL (e.g. SOL-USD) does not yield exit_price 0.0."""
+    service = get_mock_service()
+    service.active_positions["SOL-USD"] = {
+        "direction": "SHORT",
+        "entry_price": 109.41,
+        "size_usd": 32.80,
+        "margin_used": 6.56,
+        "tp_price": 0.0,
+        "sl_price": 0.0,
+        "product_id": 4,
+        "sl_digest": None,
+        "tp_digest": None,
+        "sender": service.default_subaccount_id
+    }
+    # Position closed on exchange
+    service.get_active_positions = AsyncMock(return_value=[])
+
+    closed_reports = await service.check_and_update_positions("SOL-USD", 108.50)
+    assert len(closed_reports) == 1
+    report = closed_reports[0]
+    assert report["exit_price"] == 108.50  # Must be real market exit price, NEVER 0.0
+    # Expected gross PnL for short: (109.41 - 108.50) / 109.41 * 32.80 = 0.2727
+    expected_gross = (109.41 - 108.50) / 109.41 * 32.80
+    expected_fees = 32.80 * 0.001
+    assert abs(report["pnl_usd"] - (expected_gross - expected_fees)) < 0.01
+    assert "SOL-USD" not in service.active_positions
+
+@pytest.mark.asyncio
+async def test_manual_close_long_zero_tp_sl_never_yields_zero_exit_price():
+    """Verifies that a manually closed LONG without explicit TP/SL does not yield exit_price 0.0."""
+    service = get_mock_service()
+    service.active_positions["ETH-USD"] = {
+        "direction": "LONG",
+        "entry_price": 2500.0,
+        "size_usd": 50.0,
+        "margin_used": 10.0,
+        "tp_price": 0.0,
+        "sl_price": 0.0,
+        "product_id": 3,
+        "sl_digest": None,
+        "tp_digest": None,
+        "sender": service.default_subaccount_id
+    }
+    service.get_active_positions = AsyncMock(return_value=[])
+
+    closed_reports = await service.check_and_update_positions("ETH-USD", 2550.0)
+    assert len(closed_reports) == 1
+    report = closed_reports[0]
+    assert report["exit_price"] == 2550.0  # Must be real market price, NEVER 0.0
+    expected_gross = (2550.0 - 2500.0) / 2500.0 * 50.0
+    expected_fees = 50.0 * 0.001
+    assert abs(report["pnl_usd"] - (expected_gross - expected_fees)) < 0.01
+    assert "ETH-USD" not in service.active_positions
+
+@pytest.mark.asyncio
+async def test_closure_fallback_when_current_price_is_zero():
+    """Verifies that if current_price is 0 or unavailable, exit_price safely falls back to entry_price (breakeven)."""
+    service = get_mock_service()
+    service.active_positions["SOL-USD"] = {
+        "direction": "SHORT",
+        "entry_price": 109.41,
+        "size_usd": 32.80,
+        "margin_used": 6.56,
+        "tp_price": 0.0,
+        "sl_price": 0.0,
+        "product_id": 4,
+        "sl_digest": None,
+        "tp_digest": None,
+        "sender": service.default_subaccount_id
+    }
+    service.get_active_positions = AsyncMock(return_value=[])
+
+    closed_reports = await service.check_and_update_positions("SOL-USD", 0.0)
+    assert len(closed_reports) == 1
+    report = closed_reports[0]
+    assert report["exit_price"] == 109.41  # Falls back to entry_price, NEVER 0.0
+    # Gross PnL is 0, Net PnL is only fees (-0.03)
+    assert report["pnl_usd"] < 0  # Only fees
+    assert abs(report["pnl_usd"] - (-32.80 * 0.001)) < 0.01
+

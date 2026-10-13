@@ -856,7 +856,11 @@ class MarketDataService:
                         # Extract min_size and size_increment
                         try:
                             result["size_increment"] = float(p.book_info.size_increment) / 1e18
-                            result["min_size"] = float(getattr(p.book_info, "min_size", 0)) / 1e18
+                            raw_min_size = float(getattr(p.book_info, "min_size", 0)) / 1e18
+                            if raw_min_size == 100.0 or raw_min_size <= 0.0:
+                                result["min_size"] = result["size_increment"]
+                            else:
+                                result["min_size"] = max(raw_min_size, result["size_increment"])
                             result["min_notional"] = 0.0
                         except Exception:
                             pass

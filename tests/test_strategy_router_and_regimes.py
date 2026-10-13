@@ -153,7 +153,7 @@ def test_full_alignment_zero_analysts_allows_trend():
 def test_volatility_momentum_routing_scalping():
     """
     Verification of Volatility Momentum scalping trigger
-    (volume >= 100%, bb_width > 10%, Order Book confirmed).
+    (volume >= 100%, realistic bb_width >= 0.8% or atr_pct >= 0.25%, Order Book confirmed).
     """
     market_data = {
         "multi_timeframe": {
@@ -162,7 +162,8 @@ def test_volatility_momentum_routing_scalping():
         },
         "indicators": {
             "volume_spike_pct": 130.0,
-            "bb_width_pct": 12.0,
+            "bb_width_pct": 1.2,
+            "atr_pct": 0.35,
             "donchian_high": 110.0,
             "donchian_low": 90.0,
             "last_closed_candle_close": 98.0
@@ -185,6 +186,78 @@ def test_volatility_momentum_routing_scalping():
     assert profile.has_directional_signal is True
     assert profile.strategy_mode == "VOLATILITY_MOMENTUM"
     assert profile.direction_bias == "LONG"
+
+def test_volatility_momentum_triggers_on_stable_oi():
+    """
+    Verification that VOLATILITY_MOMENTUM activates when OI is stable (not falling).
+    """
+    market_data = {
+        "multi_timeframe": {
+            "mtf_alignment": "COUNTER_TREND_WARNING",
+            "trend_1h": "NEUTRAL"
+        },
+        "indicators": {
+            "volume_spike_pct": 150.0,
+            "bb_width_pct": 0.95,
+            "atr_pct": 0.30,
+            "donchian_high": 110.0,
+            "donchian_low": 90.0,
+            "last_closed_candle_close": 95.0
+        },
+        "price_data": {"current_price": 95.0},
+        "derivatives_data": {"open_interest_trend": "stable"}
+    }
+    valid_reports = [
+        {"agent_name": "Candle_Agent", "signal": "BEARISH"},
+        {"agent_name": "Order_Book_Agent", "signal": "BEARISH"}
+    ]
+    macro_cache = {}
+
+    profile = StrategyRouter.evaluate(
+        "SOL-USD", market_data, valid_reports, macro_cache,
+        detected_regime="RANGE_CHOPPY", profile="BALANCED"
+    )
+
+    assert profile.has_directional_signal is True
+    assert profile.strategy_mode == "VOLATILITY_MOMENTUM"
+    assert profile.direction_bias == "SHORT"
+
+def test_volatility_momentum_ignores_dead_quiet_chop():
+    """
+    Verification that quiet dead chop (bb_width < 0.8% and atr_pct < 0.25%)
+    does NOT trigger scalping, preventing overtrading on noise.
+    """
+    market_data = {
+        "multi_timeframe": {
+            "mtf_alignment": "MIXED_CHOP",
+            "trend_1h": "NEUTRAL"
+        },
+        "indicators": {
+            "volume_spike_pct": 110.0,
+            "bb_width_pct": 0.35, # Quiet chop
+            "atr_pct": 0.10,
+            "bb_position_pct": 50.0,
+            "donchian_high": 110.0,
+            "donchian_low": 90.0,
+            "last_closed_candle_close": 98.0
+        },
+        "price_data": {"current_price": 98.0},
+        "derivatives_data": {"open_interest_trend": "rising"}
+    }
+    valid_reports = [
+        {"agent_name": "Price_Action_Agent", "signal": "BULLISH"},
+        {"agent_name": "Order_Book_Agent", "signal": "BULLISH"}
+    ]
+    macro_cache = {}
+
+    profile = StrategyRouter.evaluate(
+        "ETH-USD", market_data, valid_reports, macro_cache,
+        detected_regime="RANGE_CHOPPY", profile="BALANCED"
+    )
+
+    # Should fall through to MEAN_REVERSION chop rejection (bb_pos=50%)
+    assert profile.has_directional_signal is False
+    assert profile.strategy_mode != "VOLATILITY_MOMENTUM"
 
 # ==============================================================================
 # 2. RISK MANAGER STRATEGY MODE TESTS (P1 Audited Fixes)
@@ -1096,5 +1169,51 @@ async def test_execution_and_risk_strictly_blocks_wait_and_hold(mock_logger, moc
     # Passing "WAIT_FOR_PULLBACK" must also be rejected
     res_wait = await service.open_position("BTC-USD", "WAIT_FOR_PULLBACK", 100.0, 100.0, 105.0, 95.0, 5)
     assert res_wait is False
+
+
+def test_strategy_router_relative_momentum_leader_long():
+    """
+    Validates symmetric RELATIVE_MOMENTUM LONG routing when an altcoin
+    is outperforming BTC (rs_divergence >= 5.0) during neutral/bullish BTC regime.
+    """
+    market_data = {
+        "multi_timeframe": {"trend_1h": "BULLISH", "mtf_alignment": "TRANSITION"},
+        "indicators": {
+            "bb_position_pct": 50.0,
+            "bb_width_pct": 1.2,
+            "atr_pct": 0.4,
+            "donchian_high_20": 200.0,
+            "donchian_low_20": 100.0,
+            "volume_spike_pct": 80.0,
+            "asset_return_24h": 12.0
+        },
+        "price_data": {"current_price": 150.0},
+        "derivatives_data": {"open_interest_trend": "rising"}
+    }
+    macro_cache = {
+        "BTC-USD": {
+            "indicators": {"asset_return_24h": 4.0}, # rs_divergence = 12 - 4 = +8.0%
+            "multi_timeframe": {"trend_1h": "NEUTRAL"}
+        }
+    }
+    analyst_reports = [
+        {"agent_name": "Trend_Agent", "signal": "BULLISH"},
+        {"agent_name": "Order_Book_Agent", "signal": "BULLISH"},
+        {"agent_name": "News_Agent", "signal": "NEUTRAL"}
+    ]
+    
+    profile = StrategyRouter.evaluate(
+        symbol="SOL-USD",
+        market_data=market_data,
+        valid_reports=analyst_reports,
+        detected_regime="RANGE_CHOPPY",
+        macro_cache=macro_cache
+    )
+    
+    assert profile.has_directional_signal is True
+    assert profile.strategy_mode == "RELATIVE_MOMENTUM"
+    assert profile.direction_bias == "LONG"
+    assert "Лидер рынка" in profile.reasoning
+
 
 

@@ -77,7 +77,7 @@ class RiskManager(BaseAgent):
                 "max_daily_drawdown_pct": 0.06, # 6% max daily loss
                 "max_concurrent_positions": max_concurrent,
                 "sl_mult": 1.5,
-                "tp_mult": 2.2,
+                "tp_mult": 2.6,
                 "min_rr": 1.25,
                 "target_margin_pct": 0.10,
                 "max_margin_pct": 0.20,
@@ -90,7 +90,10 @@ class RiskManager(BaseAgent):
             }
             
         # --- CENTRALIZED STRATEGY ROUTING ---
-        if strategy_mode in ["BREAKOUT", "VOLATILITY_MOMENTUM"]:
+        if strategy_mode == "VOLATILITY_MOMENTUM":
+            rules["min_conviction"] = 65  # Fast/early entries naturally score lower initially
+            rules["min_rr"] = 1.00        # Scalp / momentum quick-grab allows 1.00:1 net RR
+        elif strategy_mode == "BREAKOUT":
             rules["min_conviction"] = 65  # Fast/early entries naturally score lower initially
             rules["min_rr"] = min(rules.get("min_rr", 1.25), 1.10)
         elif strategy_mode == "RELATIVE_MOMENTUM":
@@ -168,7 +171,8 @@ class RiskManager(BaseAgent):
         where:
           p = win rate (0.0 to 1.0)
           b = realized reward-to-risk ratio
-        Clamped to [0.50, 1.25] to prevent overleveraging while rewarding statistical edge.
+        Clamped to [0.50, 1.00] as asymmetric downside damping only.
+        Does NOT boost above 1.00 to prevent overleveraging on short-term sample clustering.
         Only activated when total_trades >= 15.
         """
         if total_trades < 15 or realized_rr <= 0 or win_rate <= 0:
@@ -177,12 +181,11 @@ class RiskManager(BaseAgent):
         q = 1.0 - win_rate
         f_star = (win_rate * realized_rr - q) / realized_rr
         
-        # Half-Kelly multiplier centered at 1.0:
+        # Asymmetric downside damping only:
         if f_star <= 0:
             return 0.50
         
-        half_kelly_mult = 1.0 + (0.5 * f_star)
-        return max(0.50, min(1.25, half_kelly_mult))
+        return 1.0
 
     def _build_veto_result(self, veto_category: str, reason: str, trade_action: str = "HOLD") -> Dict[str, Any]:
         """Uniform dictionary constructor for rejected / vetoed trade candidates."""
@@ -320,6 +323,21 @@ class RiskManager(BaseAgent):
                 else:
                     daily_drawdown_pct = 0.0
 
+        # Sanity Guard: An external withdrawal / baseline mismatch must not be confused with trading loss.
+        # If there are 0 active positions and 0 trade losses today, an extreme drawdown cannot be from trading.
+        active_positions = portfolio_data.get("active_positions", {})
+        num_active = len(active_positions) if isinstance(active_positions, (dict, list)) else 0
+        unrealized_pnl = float(portfolio_data.get("unrealized_pnl", 0.0) or 0.0)
+        daily_trades = int(portfolio_data.get("daily_trades_count", 0) or 0)
+        
+        if num_active == 0 and daily_trades == 0 and unrealized_pnl == 0.0 and daily_drawdown_pct > 0.15:
+            self.logger.warning(
+                f"[{self.name}] ⚠️ External transfer / baseline discrepancy detected: daily_drawdown_pct="
+                f"{daily_drawdown_pct*100:.2f}% with 0 active positions and 0 trades today. "
+                f"Disregarding external transfer to avoid false lockout."
+            )
+            daily_drawdown_pct = 0.0
+
         if daily_drawdown_pct >= max_daily_dd:
             msg = f"Daily drawdown limit reached ({daily_drawdown_pct*100:.2f}% >= {max_daily_dd*100:.2f}% limit). Trading halted to protect capital."
             self.logger.warning(f"[{self.name}] 🚨 MAX_DAILY_DRAWDOWN VETO: {msg}")
@@ -335,6 +353,22 @@ class RiskManager(BaseAgent):
             msg = f"Maximum concurrent positions reached ({num_active} >= {max_positions} limit)."
             self.logger.warning(f"[{self.name}] 🚫 MAX_CONCURRENT_POSITIONS VETO: {msg}")
             return self._build_veto_result("MAX_CONCURRENT_POSITIONS", msg, trade_action)
+
+        # Gate 2.2b: Directional Cluster Cap in Choppy/Transition Regimes
+        # Prevents opening all positions in the same direction when market lacks a clear macro trend.
+        if macro_regime in ["RANGE_CHOPPY", "TRANSITION", "HIGH_VOLATILITY"]:
+            same_dir_count = 0
+            pos_list = list(active_positions.values()) if isinstance(active_positions, dict) else (active_positions if isinstance(active_positions, list) else [])
+            for p in pos_list:
+                if isinstance(p, dict):
+                    p_dir = str(p.get("direction", p.get("side", ""))).upper()
+                    if (decision == "LONG" and ("LONG" in p_dir or "BUY" in p_dir)) or \
+                       (decision == "SHORT" and ("SHORT" in p_dir or "SELL" in p_dir)):
+                        same_dir_count += 1
+            if same_dir_count >= 2:
+                msg = f"Directional cluster limit reached: {same_dir_count} active {decision} positions already open in {macro_regime} regime."
+                self.logger.warning(f"[{self.name}] 🚫 DIRECTIONAL_CLUSTER_CAP VETO: {msg}")
+                return self._build_veto_result("DIRECTIONAL_CLUSTER_CAP", msg, trade_action)
 
         # Gate 2.3: Duplicate Asset Exposure Veto Gate
         if symbol:
@@ -384,11 +418,20 @@ class RiskManager(BaseAgent):
             return self._build_veto_result("TOTAL_OPEN_RISK_CAP", msg, trade_action)
 
         # ═══ Stage 3: Dynamic Price Distances & Slippage Alignment ═══
+        order_book_data = market_data.get("order_book_data", {})
+        if not isinstance(order_book_data, dict):
+            order_book_data = {}
+        market_spread_pct = float(order_book_data.get("spread_pct") or 0.0) / 100.0
+
         base_asset = symbol.split('-')[0].upper() if symbol else ""
-        if base_asset in ["BTC", "ETH"]:
-            expected_slippage_pct = 0.005 # 0.5%
+        if strategy_mode == "VOLATILITY_MOMENTUM" or base_asset in ["BTC", "ETH"]:
+            base_slip = 0.001  # 0.10% (10 bps) for liquid majors & fast scalps
         else:
-            expected_slippage_pct = 0.01  # 1.0%
+            base_slip = 0.002  # 0.20% (20 bps) for altcoins
+
+        # Half the bid-ask spread is the minimum crossing cost
+        half_spread_pct = market_spread_pct / 2.0
+        expected_slippage_pct = max(base_slip, half_spread_pct)
             
         if decision == "LONG":
             execution_entry = current_price * (1.0 + expected_slippage_pct)
@@ -424,9 +467,12 @@ class RiskManager(BaseAgent):
             tp_dist_base = dist_to_mean * 0.90
             sl_dist_base = max(atr_14 * sl_mult, current_price * 0.008)
         elif strategy_mode == "VOLATILITY_MOMENTUM":
-            # Scalping mode with tight SL (0.5% min) and TP (1.0% min)
-            sl_dist_base = max(atr_14 * sl_mult, current_price * 0.005)
-            tp_dist_base = max(atr_14 * tp_mult, current_price * 0.010)
+            # Scalping mode: BTC/ETH can tolerate tighter noise floors (0.6% / 1.2%),
+            # while altcoins require at least 1.0% SL and 2.0% TP to prevent 1-min noise wicks from prematurely hitting stops
+            min_sl_ratio = 0.006 if base_asset in ["BTC", "ETH"] else 0.010
+            min_tp_ratio = 0.012 if base_asset in ["BTC", "ETH"] else 0.020
+            sl_dist_base = max(atr_14 * sl_mult, current_price * min_sl_ratio)
+            tp_dist_base = max(atr_14 * tp_mult, current_price * min_tp_ratio)
         else:
             sl_dist_base = max(atr_14 * sl_mult, current_price * config.MIN_SL_PCT)
             tp_dist_base = max(atr_14 * tp_mult, current_price * config.MIN_TP_PCT)
@@ -478,14 +524,14 @@ class RiskManager(BaseAgent):
         unit_net_loss = distance_to_sl + unit_entry_fee + unit_sl_exit_fee + unit_funding_cost
         realized_rr = unit_net_profit / unit_net_loss if unit_net_loss > 0 else 0.0
 
-        # Strict Risk/Reward Floor Validation:
-        # For Mean Reversion, capping TP to the mean must not reduce net RR below 1.00:1
-        if strategy_mode == "MEAN_REVERSION" and realized_rr < 1.0:
-            msg = f"Mean Reversion net RR ({realized_rr:.2f}) is below minimum acceptable 1.00:1 ratio after TP mean cap and fees."
-            self.logger.warning(f"[{self.name}] ❌ POOR_RISK_REWARD VETO: {msg}")
-            return self._build_veto_result("POOR_RISK_REWARD", msg, trade_action)
-        elif realized_rr <= 0.0:
-            msg = f"{strategy_mode} net profit is non-positive ({realized_rr:.2f} RR) after execution slippage and exchange fees."
+        # Strict Risk/Reward Floor Validation (UNIVERSAL — applies to ALL strategy modes):
+        # min_rr_required is loaded from profile rules and MUST be enforced here.
+        if realized_rr < min_rr_required:
+            msg = (f"{strategy_mode} net RR ({realized_rr:.2f}) is below minimum required "
+                   f"{min_rr_required:.2f}:1 for {profile_name} profile "
+                   f"(after slippage and fees). "
+                   f"TP dist={distance_to_tp:.4f}, SL dist={distance_to_sl:.4f}, "
+                   f"fees={unit_entry_fee + unit_tp_exit_fee:.4f}")
             self.logger.warning(f"[{self.name}] ❌ POOR_RISK_REWARD VETO: {msg}")
             return self._build_veto_result("POOR_RISK_REWARD", msg, trade_action)
 
@@ -549,8 +595,17 @@ class RiskManager(BaseAgent):
         conf_mult = self._get_conviction_multiplier(min_conviction, conviction)
         action_mult = 0.75 if trade_action == "REDUCE_SIZE" else 1.0
 
-        # Combine into dynamic risk percentage
+        # Combine into dynamic risk percentage with a safe floor check
         dynamic_risk_pct = base_risk * conf_mult * quality_mult * dd_mult * action_mult * kelly_mult
+        min_viable_risk = base_risk * 0.35  # Protect at least 35% of base risk to meet exchange minimums
+
+        if dynamic_risk_pct < min_viable_risk:
+            msg = (f"Dynamic risk ({dynamic_risk_pct*100:.3f}%) fell below minimum viable risk "
+                   f"({min_viable_risk*100:.3f}%). Cumulative penalties (DD x{dd_mult}, Qual x{quality_mult:.2f}, "
+                   f"Kelly x{kelly_mult:.2f}) suppress viable trade edge. Vetoing to protect capital.")
+            self.logger.warning(f"[{self.name}] 🚫 PENALTY_SUPPRESSION VETO: {msg}")
+            return self._build_veto_result("PENALTY_SUPPRESSION", msg, trade_action)
+
         dynamic_risk_pct = min(dynamic_risk_pct, risk_cap)
         
         self.logger.info(
@@ -590,7 +645,7 @@ class RiskManager(BaseAgent):
         # ═══ Stage 7: Target Margin & Required Leverage ═══
         target_margin_pct = profile_rules.get("target_margin_pct", 0.10)
         usable_margin = min(available_margin * 0.8, total_balance * max_margin_pct)
-        target_margin_usd = min(total_balance * target_margin_pct, usable_margin) * dd_mult
+        target_margin_usd = min(total_balance * target_margin_pct, usable_margin) * dd_mult * action_mult
         
         if target_margin_usd > 0:
             required_leverage = notional_usd / target_margin_usd
@@ -610,7 +665,21 @@ class RiskManager(BaseAgent):
         else:
             vol_max_leverage = 15.0
             
-        safe_ceiling_leverage = min(max_leverage, vol_max_leverage)
+        # Liquidation Precedence Guard:
+        # Stop loss MUST trigger well before liquidation price.
+        # Minimum safety cushion is 30% between SL and liquidation distance:
+        # sl_dist_pct <= liq_dist_pct * 0.70 => 1/L >= (sl_dist_pct / 0.70) + mmf
+        mmf = float(derivatives_data.get("maintenance_margin_pct", 0.025) or 0.025)
+        if mmf <= 0 or mmf >= 0.5:
+            mmf = 0.025
+        sl_dist_pct = distance_to_sl / execution_entry if execution_entry > 0 else 0.05
+        if sl_dist_pct > 0:
+            max_liq_leverage = 1.0 / ((sl_dist_pct / 0.70) + mmf)
+        else:
+            max_liq_leverage = max_leverage
+
+        liq_safe_ceiling = max(1.0, float(int(max_liq_leverage)))
+        safe_ceiling_leverage = min(max_leverage, vol_max_leverage, liq_safe_ceiling)
         final_leverage = min(required_leverage, safe_ceiling_leverage)
         final_leverage = max(1.0, float(int(final_leverage)))
         
@@ -626,11 +695,26 @@ class RiskManager(BaseAgent):
             risk_amount_usd = contracts * distance_to_sl
             
         effective_leverage = final_leverage
+
+        # Compute exact liquidation price
+        # LONG: Entry * (1 - 1/L + MMF)
+        # SHORT: Entry * (1 + 1/L - MMF)
+        if decision == "LONG":
+            liq_price = execution_entry * (1.0 - (1.0 / effective_leverage) + mmf)
+        else:
+            liq_price = execution_entry * (1.0 + (1.0 / effective_leverage) - mmf)
+        liq_price = max(0.0, round(liq_price, 6))
+
+        # Absolute safety check: SL must NOT breach or equal liquidation price
+        if (decision == "LONG" and sl_price <= liq_price) or (decision == "SHORT" and sl_price >= liq_price):
+            msg = f"Liquidation precedence violation: SL ({sl_price}) is beyond or equal to liquidation price ({liq_price:.4f})."
+            self.logger.warning(f"[{self.name}] ❌ LIQUIDATION_RISK VETO: {msg}")
+            return self._build_veto_result("LIQUIDATION_RISK", msg, trade_action)
         
         self.logger.info(
             f"[{self.name}] Final Effective Leverage: {effective_leverage}x "
             f"(Profile Max: {max_leverage}x, Volatility Max: {vol_max_leverage}x, "
-            f"Required: {required_leverage:.1f}x)"
+            f"Liq Safe Max: {liq_safe_ceiling:.0f}x, Required: {required_leverage:.1f}x, Liq Price: {liq_price:.4f})"
         )
 
         # ═══ Stage 8: Rounding, Increments & Exchange Sanity ═══
@@ -644,14 +728,35 @@ class RiskManager(BaseAgent):
         min_size = float(derivatives_data.get("min_size") or 0.0)
         min_notional = float(derivatives_data.get("min_notional") or 0.0)
         
+        # Guard against unconfirmed dummy default min_size (100.0) present in Nado engine across all markets.
+        # Fall back to size_increment as the true minimum order granularity.
+        if min_size == 100.0:
+            self.logger.info(
+                f"[{self.name}] ℹ️ Reported min_size is unconfirmed engine dummy default (100.0). "
+                f"Falling back to size_increment ({size_increment}) as true minimum order size."
+            )
+            min_size = size_increment
+        
         if min_size > 0 and (min_size * current_price) > max_notional_usd:
             self.logger.info(f"[{self.name}] ℹ️ Reported min_size ({min_size}) exceeds max account notional (${max_notional_usd:.2f}). Treating as unconfigured testnet artifact.")
             min_size = 0.0
+
+        if min_notional > 0 and min_notional > max_notional_usd:
+            self.logger.info(f"[{self.name}] ℹ️ Reported min_notional ({min_notional}) exceeds max account notional (${max_notional_usd:.2f}). Treating as unconfigured testnet artifact.")
+            min_notional = 0.0
         
         if notional_usd <= 0 or contracts <= 0:
             msg = "Calculated order size is 0. Blocking trade."
             self.logger.warning(f"[{self.name}] 🚫 ZERO SIZE VETO: {msg}")
             return self._build_veto_result("MIN_SIZE", msg, trade_action)
+        elif min_size > 0 and contracts < min_size:
+            msg = f"Calculated contracts ({contracts}) is below exchange minimum size ({min_size})."
+            self.logger.warning(f"[{self.name}] 🚫 MIN_SIZE VETO: {msg}")
+            return self._build_veto_result("MIN_SIZE", msg, trade_action)
+        elif min_notional > 0 and notional_usd < min_notional:
+            msg = f"Calculated notional (${notional_usd:.2f}) is below exchange minimum notional (${min_notional:.2f})."
+            self.logger.warning(f"[{self.name}] 🚫 MIN_NOTIONAL VETO: {msg}")
+            return self._build_veto_result("MIN_NOTIONAL", msg, trade_action)
         elif notional_usd > max_notional_usd:
             msg = f"Required notional ${notional_usd:.2f} exceeds max allowed ${max_notional_usd:.2f}."
             self.logger.warning(f"[{self.name}] 🚫 MAX NOTIONAL VETO: {msg}")
@@ -692,7 +797,7 @@ class RiskManager(BaseAgent):
             "stop_loss_price": sl_price,
             "stop_loss_pct": round(abs(sl_price - execution_entry) / execution_entry * 100, 2) if execution_entry > 0 else 0,
             "risk_reward_ratio": rr_ratio,
-            "liquidation_price": 0.0,
+            "liquidation_price": liq_price,
             "position_size_pct": margin_pct,
         }
 

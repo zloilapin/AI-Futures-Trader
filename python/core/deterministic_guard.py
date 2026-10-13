@@ -55,8 +55,8 @@ class DeterministicGuard:
         guard_reason = "Passed deterministic guard."
         rejection_tag = None
 
-        # 1. Direction Guard: Never allow CEO to reverse specialized setup bias (Breakout / Mean Reversion)
-        if strategy_mode in ["BREAKOUT", "MEAN_REVERSION"] and decision in ["LONG", "SHORT"]:
+        # 1. Direction Guard: Never allow CEO to reverse specialized setup bias (Breakout / Mean Reversion / Scalping)
+        if strategy_mode in ["BREAKOUT", "MEAN_REVERSION", "VOLATILITY_MOMENTUM"] and decision in ["LONG", "SHORT"]:
             if decision != direction_bias:
                 guard_msg = f"🛡️ [Strategy Guard] Решение CEO {decision} противоречит {strategy_mode} bias ({direction_bias}). Сделка отменена в HOLD для защиты капитала."
                 print(guard_msg)
