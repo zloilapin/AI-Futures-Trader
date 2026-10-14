@@ -19,6 +19,9 @@ class PartialCloseResult:
     realized_pnl: float = 0.0
     error: Optional[str] = None
     is_partial_fill: bool = False
+    is_ambiguous: bool = False
+    fee_usd: float = 0.0
+    is_estimated_fee: bool = True
 
 class NadoTradingService(BaseTradingService):
     """
@@ -105,6 +108,7 @@ class NadoTradingService(BaseTradingService):
             return {"total_usd": 0.0, "current_balance": 0.0, "balance": 0.0, "margin_used": 0.0, "free_margin": 0.0, "pnl": 0.0}
         
         try:
+            self._load_state()
             summary = await asyncio.to_thread(self.client.subaccount.get_engine_subaccount_summary, self.default_subaccount_id)
             
             # SubaccountInfoData has a healths array. index 0 is Initial Margin health
@@ -200,6 +204,7 @@ class NadoTradingService(BaseTradingService):
     async def get_active_positions(self, bypass_cache: bool = False) -> List[Dict[str, Any]]:
         """Returns active open positions from Nado."""
         if not self.is_connected:
+            self._last_positions_fetch_ok = True
             return []
             
         import time
@@ -208,6 +213,7 @@ class NadoTradingService(BaseTradingService):
                 return self._pos_cache
                 
         active_list = []
+        self._last_positions_fetch_ok = False
         try:
             # Reverse map for product_id -> symbol (prefer canonical pair format BASE-USD)
             id_to_symbol = {}
@@ -232,6 +238,7 @@ class NadoTradingService(BaseTradingService):
             # Fetch all subaccounts for this address
             res = await asyncio.to_thread(self.client.subaccount.get_subaccounts, address)
             if not res or not res.subaccounts:
+                self._last_positions_fetch_ok = (res is not None)
                 return []
                 
             for sa in res.subaccounts:
@@ -308,8 +315,9 @@ class NadoTradingService(BaseTradingService):
             self._pos_cache = active_list
             import time
             self._pos_cache_time = time.time()
-            
+            self._last_positions_fetch_ok = True
         except Exception as e:
+            self._last_positions_fetch_ok = False
             logger.error(f"[NadoTradingService] ❌ Failed to fetch active positions: {e}")
             
         return active_list
@@ -706,9 +714,9 @@ class NadoTradingService(BaseTradingService):
         from core.state_store import StateStore
         state_file = "data/memory/nado_state.json"
         state = StateStore.load(state_file)
-        if "initial_balance" in state:
+        if state.get("initial_balance") is not None:
             self._initial_balance = float(state["initial_balance"])
-            logger.info(f"[NadoTradingService] 💾 Loaded initial balance: {self._initial_balance}")
+            logger.debug(f"[NadoTradingService] 💾 Loaded initial balance: {self._initial_balance}")
         if "daily_start_balance" in state and state["daily_start_balance"] is not None:
             self._daily_start_balance = float(state["daily_start_balance"])
         if "daily_start_date" in state and state["daily_start_date"] is not None:
@@ -793,23 +801,45 @@ class NadoTradingService(BaseTradingService):
         try:
             # Bypass cache for checking closures to be perfectly accurate
             positions = await self.get_active_positions(bypass_cache=True)
+            if not getattr(self, "_last_positions_fetch_ok", True):
+                logger.warning(f"[NadoTradingService] ⚠️ Active positions fetch unconfirmed. Skipping closure check for {symbol}.")
+                return closed_reports
+
+            pos = self.active_positions[symbol]
+            canonical_sym = symbol.replace('/', '-').strip().upper()
+            if '-' not in canonical_sym:
+                canonical_sym = f"{canonical_sym}-USD"
+            base_symbol = canonical_sym.split('-')[0].upper()
+            prod_id = pos.get("product_id") or self.product_map.get(canonical_sym) or self.product_map.get(base_symbol)
             
-            # If the position is no longer in the active list, it was closed natively!
-            base_symbol = symbol.split('-')[0].upper()
             still_open = False
             target_pnl = 0.0
             
             for p in positions:
-                p_base = p["symbol"].split('-')[0].upper()
-                if p_base == base_symbol:
+                p_prod = p.get("_product_id") or p.get("product_id") or self.product_map.get(p.get("symbol"))
+                if prod_id is not None and p_prod is not None:
+                    if p_prod == prod_id:
+                        still_open = True
+                        break
+                elif p.get("symbol") == canonical_sym or p.get("symbol") == symbol:
                     still_open = True
                     break
                     
             if not still_open:
+                # If position was DUST_REMAINDER, finalize cleanly
+                is_dust_pos = pos.get("is_dust") or (
+                    pos.get("partial_tp_plan") and any(
+                        t.get("status") == "DUST_REMAINDER" for t in pos["partial_tp_plan"].get("tiers", [])
+                    )
+                )
+                if is_dust_pos:
+                    logger.info(f"[NadoTradingService] 🧹 DUST_REMAINDER position for {symbol} confirmed zero on-chain. Finalizing position.")
+                    del self.active_positions[symbol]
+                    self._save_positions()
+                    return [{"symbol": symbol, "status": "CLOSED", "reason": "DUST_ZERO_CONFIRMED"}]
+
                 # Position is gone, meaning Nado native Trigger Order (SL/TP) executed!
                 logger.info(f"[NadoTradingService] ⚡ Native Trigger executed for {symbol}! Position closed on-chain.")
-                
-                pos = self.active_positions[symbol]
                 direction = str(pos.get("direction", "LONG")).upper()
                 entry_price = float(pos.get("entry_price") or 0.0)
                 size_usd = float(pos.get("size_usd") or 0.0)
@@ -1218,7 +1248,9 @@ class NadoTradingService(BaseTradingService):
         try:
             res = await asyncio.to_thread(self.client.market.place_order, params)
         except Exception as place_err:
-            return PartialCloseResult(success=False, error=f"Order submission failed: {place_err}")
+            err_str = str(place_err).lower()
+            is_ambig = any(k in err_str for k in ["timeout", "timed out", "connection", "network", "reset", "502", "503", "504", "disconnected", "eof"])
+            return PartialCloseResult(success=False, error=f"Order submission failed: {place_err}", is_ambiguous=is_ambig)
 
         digest = getattr(getattr(res, "data", None), "digest", None)
         if not digest:
@@ -1230,12 +1262,17 @@ class NadoTradingService(BaseTradingService):
         filled = False
         actual_filled_x18 = 0
         actual_fill_price = current_price
+        had_poll_error = False
+        saw_order_info = False
+        actual_fee_val = 0.0
+        is_estimated_fee = True
 
         for attempt in range(max_poll_attempts):
             await asyncio.sleep(1.0)
             try:
                 hist_data = await asyncio.to_thread(self.client.market.get_historical_orders_by_digest, [digest])
                 if hist_data and getattr(hist_data, "orders", None):
+                    saw_order_info = True
                     order_info = hist_data.orders[0]
                     base_f = abs(int(getattr(order_info, "base_filled", 0)))
                     if base_f > 0:
@@ -1247,22 +1284,34 @@ class NadoTradingService(BaseTradingService):
                                 actual_fill_price = quote_f / base_f
                         except Exception:
                             actual_fill_price = current_price
+
+                        raw_fee = getattr(order_info, "fee", getattr(order_info, "fee_x18", None))
+                        if raw_fee is not None and isinstance(raw_fee, (int, float, str)):
+                            try:
+                                f_val = float(raw_fee) / 1e18 if float(raw_fee) > 1e10 else float(raw_fee)
+                                if f_val > 0:
+                                    actual_fee_val = f_val
+                                    is_estimated_fee = False
+                            except (ValueError, TypeError):
+                                pass
                         break
             except Exception as poll_e:
+                had_poll_error = True
                 logger.warning(f"[NadoTradingService] ⚠️ Polling digest {digest} error: {poll_e}")
 
         if not filled or actual_filled_x18 == 0:
+            is_ambig = (not saw_order_info and had_poll_error)
+            err_msg = "Polling order fill status failed due to network error." if is_ambig else "IOC order expired without fills (market moved or lack of matching depth)."
             return PartialCloseResult(
                 success=False,
                 digest=digest,
                 requested_contracts=contracts_to_close,
-                error="IOC order expired without fills (market moved or lack of matching depth)."
+                error=err_msg,
+                is_ambiguous=is_ambig
             )
 
         actual_filled_contracts = actual_filled_x18 / 1e18
-        # Calculate gross PnL and subtract estimated round-trip fee (taker ~0.05% on entry + exit) for accurate net accounting
-        fee_rate = 0.0005
-        fee_usd = actual_filled_contracts * (entry_price + actual_fill_price) * fee_rate
+        fee_usd = actual_fee_val if not is_estimated_fee and actual_fee_val > 0 else (actual_filled_contracts * (entry_price + actual_fill_price) * 0.0005)
         if direction == "LONG":
             gross_pnl = actual_filled_contracts * (actual_fill_price - entry_price)
         else:
@@ -1274,7 +1323,7 @@ class NadoTradingService(BaseTradingService):
         logger.info(
             f"[NadoTradingService] ✅ Partial Close FILLED for {symbol}: "
             f"{actual_filled_contracts:.4f} contracts @ {actual_fill_price:.4f}. "
-            f"Slice PnL: ${slice_pnl:.2f}. Partial fill: {is_partial}"
+            f"Slice PnL: ${slice_pnl:.2f} (Fee: ${fee_usd:.2f}, Est: {is_estimated_fee}). Partial fill: {is_partial}"
         )
 
         return PartialCloseResult(
@@ -1284,7 +1333,9 @@ class NadoTradingService(BaseTradingService):
             filled_contracts=actual_filled_contracts,
             fill_price=actual_fill_price,
             realized_pnl=slice_pnl,
-            is_partial_fill=is_partial
+            is_partial_fill=is_partial,
+            fee_usd=fee_usd,
+            is_estimated_fee=is_estimated_fee
         )
 
     def initialize_partial_tp_plan(self, symbol: str) -> Optional[Any]:
@@ -1404,13 +1455,55 @@ class NadoTradingService(BaseTradingService):
             return True
 
         if not result.success:
-            # Revert from SUBMITTING to PENDING so monitor can retry on next valid tick
-            tier.status = "PENDING"
-            tier.error_message = result.error
-            pos["partial_tp_plan"] = plan.to_dict()
-            self._save_positions()
-            logger.warning(f"[NadoTradingService] ⚠️ Tier {tier_index} execution failed for {symbol}: {result.error}. Reverted to PENDING.")
-            return False
+            if getattr(result, "is_ambiguous", False):
+                # Retain SUBMITTING so fast monitor or reconciler checks exchange before any resubmission
+                tier.status = "SUBMITTING"
+                tier.error_message = f"Ambiguous result: {result.error}"
+                if result.digest:
+                    tier.order_digest = result.digest
+                pos["partial_tp_plan"] = plan.to_dict()
+                self._save_positions()
+                logger.warning(
+                    f"[NadoTradingService] ⚠️ Tier {tier_index} on {canonical_sym} has AMBIGUOUS execution: {result.error}. "
+                    f"Retaining SUBMITTING to block duplicate orders until reconciled with exchange."
+                )
+                return False
+            else:
+                # Definitive rejection / failure: increment retry count and transition to FAILED
+                import time
+                tier.retry_count = getattr(tier, "retry_count", 0) + 1
+                tier.last_attempt_time = time.time()
+                tier.error_message = result.error
+                if tier.retry_count >= 3:
+                    tier.status = "HALTED"
+                    pos["partial_tp_plan"] = plan.to_dict()
+                    pos["failed_tier_alerted"] = tier.tier_index
+                    self._save_positions()
+                    logger.critical(
+                        f"[NadoTradingService] 🚨 Tier {tier_index} on {canonical_sym} exhausted all {tier.retry_count} retries ({result.error}). "
+                        f"Halting partial TP ladder."
+                    )
+                    try:
+                        from services.telegram_service import TelegramService
+                        msg = (
+                            f"🚨 *PARTIAL TP FAILED EXHAUSTED*\n\n"
+                            f"🪙 *Asset:* `{canonical_sym}`\n"
+                            f"❌ Ступень TP{tier.tier_index} исчерпала лимит попыток (3/3): {result.error}.\n"
+                            f"Лестница частичного TP остановлена. Позиция под защитой SL."
+                        )
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(TelegramService().send_message(msg))
+                    except Exception:
+                        pass
+                else:
+                    tier.status = "FAILED"
+                    pos["partial_tp_plan"] = plan.to_dict()
+                    self._save_positions()
+                    logger.warning(
+                        f"[NadoTradingService] ⚠️ Tier {tier_index} execution failed definitively for {canonical_sym}: {result.error}. "
+                        f"Status set to FAILED (Attempt {tier.retry_count}/3, 15s cooldown)."
+                    )
+                return False
 
         filled = float(result.filled_contracts)
         if filled <= 0:
@@ -1498,28 +1591,11 @@ class NadoTradingService(BaseTradingService):
             self._save_positions()
             # Phase 4: BE Protection & SL Resizing
             if tier.action == "PROTECT_BREAKEVEN":
-                pos["protection_state"] = "BREAK_EVEN"
+                # Do NOT prematurely set pos["protection_state"] = "BREAK_EVEN" or mutate pos["sl_price"]
+                # until update_stop_loss_to_be actually confirms the stop on-chain or sets software fallback!
+                # Mark protection_state as PENDING_BREAK_EVEN to honestly reflect in-flight state.
+                pos["protection_state"] = "PENDING_BREAK_EVEN"
                 plan.be_activated = True
-                entry_p = float(pos.get("entry_price") or 0.0)
-                direction = str(pos.get("direction", "LONG")).upper()
-                if entry_p > 0:
-                    fee_pct = 0.001
-                    product_id = pos.get("product_id") or self.product_map.get(canonical_sym.split('-')[0].upper())
-                    params = self._get_market_parameters(product_id) if product_id is not None else {}
-                    price_inc = float(params.get("price_increment_x18", 0)) / 1e18 if params.get("price_increment_x18") else 0.001
-                    cost_buffer = entry_p * fee_pct
-                    if direction == "LONG":
-                        raw_be = entry_p + cost_buffer
-                        be_price = math.ceil(raw_be / price_inc) * price_inc if price_inc > 0 else raw_be
-                        current_sl = float(pos.get("sl_price") or 0.0)
-                        if be_price > current_sl:
-                            pos["sl_price"] = round(be_price, 6)
-                    else:
-                        raw_be = entry_p - cost_buffer
-                        be_price = math.floor(raw_be / price_inc) * price_inc if price_inc > 0 else raw_be
-                        current_sl = float(pos.get("sl_price") or 0.0)
-                        if current_sl <= 0 or be_price < current_sl:
-                            pos["sl_price"] = round(be_price, 6)
                 pos["partial_tp_plan"] = plan.to_dict()
                 self._save_positions()
                 if not getattr(self, "_in_fast_monitor_tp", False):
@@ -1693,59 +1769,210 @@ class NadoTradingService(BaseTradingService):
         except Exception as e:
             logger.warning(f"[NadoTradingService] Failed to send dust warning TG: {e}")
 
+    def _sync_position_contracts(self, pos: dict, plan: Any, actual_on_chain: float, entry_p: float = 0.0):
+        """
+        Atomically synchronizes all dependent position fields when on-chain contract volume changes:
+        - plan.remaining_contracts
+        - pos["contracts"]
+        - pos["size_usd"]
+        - pos["notional_usd"]
+        - pos["margin_used"]
+        - pos["trigger_amount_x18"]
+        - pos["partial_tp_plan"]
+        """
+        actual_contracts = round(max(0.0, float(actual_on_chain)), 8)
+        entry_price = float(entry_p or pos.get("entry_price") or 0.0)
+        direction = str(pos.get("direction", "LONG")).upper()
+        leverage = float(pos.get("leverage") or 1.0)
+
+        plan.remaining_contracts = actual_contracts
+        pos["contracts"] = actual_contracts
+        pos["size_usd"] = round(actual_contracts * entry_price, 4)
+        pos["notional_usd"] = pos["size_usd"]
+        pos["margin_used"] = round(pos["size_usd"] / leverage, 4) if leverage > 0 else pos["size_usd"]
+
+        trig_amt = int(actual_contracts * 1e18)
+        pos["trigger_amount_x18"] = str(trig_amt if direction == "SHORT" else -trig_amt)
+        pos["partial_tp_plan"] = plan.to_dict()
+
     async def reconcile_submitting_tier(self, symbol: str, pos: dict, plan: Any, tier: Any) -> bool:
         """
         Safely reconciles an in-flight or restarted SUBMITTING tier with Nado before any re-submission.
-        1. Queries active on-chain positions directly from Nado.
-        2. If on-chain balance decreased, credits the fill to the tier.
-        3. If on-chain balance is unchanged and order is not active, resets tier to PENDING.
+        1. Queries active on-chain positions directly from Nado using exact product_id.
+        2. If on-chain balance decreased, verifies if a matching TP closing order executed in fill history.
+           - If verified TP fill: attributes exact fill_price, fee, realized_pnl, digest and marks FILLED/PARTIALLY_FILLED.
+           - If external reduction (SL, user manual close): updates position size, but does NOT attribute TP profit.
+        3. If on-chain balance is unchanged, safely resets tier to PENDING (or PARTIALLY_FILLED if prior fills exist).
         4. If query fails or state is ambiguous, keeps tier in SUBMITTING to block duplicate orders.
         Returns True if safely resolved; False if ambiguous or locked.
         """
         canonical_sym = symbol.replace('/', '-').strip().upper()
         if '-' not in canonical_sym:
             canonical_sym = f"{canonical_sym}-USD"
+        base_sym = canonical_sym.split('-')[0].upper()
         logger.info(f"[NadoTradingService] 🔍 Reconciling SUBMITTING tier {tier.tier_index} on {canonical_sym}...")
         try:
+            prod_id = pos.get("product_id") or self.product_map.get(canonical_sym) or self.product_map.get(base_sym)
+            if prod_id is None:
+                logger.warning(f"[NadoTradingService] Reconcile: cannot determine product_id for {canonical_sym}. Retaining SUBMITTING.")
+                return False
+
             active_on_chain = await self.get_active_positions(bypass_cache=True)
-            base_sym = canonical_sym.split('-')[0].upper()
             matched = None
             for p in active_on_chain:
-                if p["symbol"].split('-')[0].upper() == base_sym:
+                p_prod_id = p.get("_product_id") or p.get("product_id") or self.product_map.get(p.get("symbol"))
+                if p_prod_id is not None and p_prod_id == prod_id:
+                    matched = p
+                    break
+                elif p.get("symbol") == canonical_sym:
                     matched = p
                     break
 
             if matched is None:
-                # Position is completely gone on-chain!
-                logger.info(f"[NadoTradingService] Reconcile: On-chain balance for {canonical_sym} is ZERO.")
-                self.reconcile_partial_tp_with_chain(canonical_sym, 0.0)
-                return False
+                # Do NOT blindly assume 0.0 unless positions query succeeded and zero is confirmed!
+                if not getattr(self, "_last_positions_fetch_ok", True):
+                    logger.warning(
+                        f"[NadoTradingService] ⚠️ Reconcile: Cannot confirm zero balance for {canonical_sym} "
+                        f"(positions query not confirmed). Retaining SUBMITTING to protect position."
+                    )
+                    return False
+
+                # Double check with engine subaccount summary directly if available
+                subaccount_id = pos.get("sender") or self.default_subaccount_id
+                confirmed_zero = False
+                if hasattr(self.client, "subaccount") and hasattr(self.client.subaccount, "get_engine_subaccount_summary") and subaccount_id:
+                    try:
+                        summary = await asyncio.to_thread(self.client.subaccount.get_engine_subaccount_summary, subaccount_id)
+                        if hasattr(summary, "perp_balances"):
+                            found = False
+                            for pb in summary.perp_balances:
+                                if pb.product_id == prod_id and abs(float(pb.balance.amount) / 1e18) >= 1e-6:
+                                    found = True
+                                    break
+                            confirmed_zero = not found
+                    except Exception as e:
+                        logger.warning(f"[NadoTradingService] ⚠️ Reconcile subaccount check failed for {canonical_sym}: {e}")
+                        confirmed_zero = False
+                else:
+                    confirmed_zero = True
+
+                if confirmed_zero:
+                    logger.info(f"[NadoTradingService] ✅ Reconcile: On-chain balance for {canonical_sym} confirmed ZERO.")
+                    self.reconcile_partial_tp_with_chain(canonical_sym, 0.0)
+                    return False
+                else:
+                    logger.warning(f"[NadoTradingService] ⚠️ Reconcile: Zero balance unconfirmed for {canonical_sym}. Retaining SUBMITTING.")
+                    return False
 
             actual_on_chain = abs(float(matched.get("amount", 0.0)))
             local_remaining = float(plan.remaining_contracts)
             diff = round(local_remaining - actual_on_chain, 8)
 
             if diff > 1e-5:
-                # The SUBMITTING order filled on-chain!
-                logger.info(
-                    f"[NadoTradingService] ✅ SUBMITTING order for {canonical_sym} tier {tier.tier_index} was filled on-chain! "
-                    f"Recovered fill: {diff:.4f} contracts."
-                )
-                tier.filled_contracts = round(tier.filled_contracts + diff, 8)
-                plan.remaining_contracts = actual_on_chain
-                pos["contracts"] = actual_on_chain
+                # Balance decreased on-chain! Verify whether this was our TP order or an external close.
+                direction = str(pos.get("direction", "LONG")).upper()
                 entry_p = float(pos.get("entry_price") or 0.0)
-                pos["size_usd"] = round(actual_on_chain * entry_p, 4)
-                pos["notional_usd"] = pos["size_usd"]
 
-                if tier.remaining_tier_contracts < plan.min_size or tier.filled_contracts >= (tier.close_contracts * 0.999):
-                    tier.status = "FILLED"
+                matching_order = None
+                subaccount_id = pos.get("sender") or self.default_subaccount_id
+                attempt_time = getattr(tier, "last_attempt_time", 0.0) or getattr(tier, "executed_at", 0.0) or (time.time() - 60.0)
+
+                # 1. Check by order digest if known
+                if tier.order_digest and hasattr(self.client, "market") and hasattr(self.client.market, "get_historical_orders_by_digest"):
+                    try:
+                        hist_res = await asyncio.to_thread(self.client.market.get_historical_orders_by_digest, [tier.order_digest])
+                        if hist_res and getattr(hist_res, "orders", None):
+                            for o in hist_res.orders:
+                                if abs(float(getattr(o, "base_filled", 0))) > 0:
+                                    matching_order = o
+                                    break
+                    except Exception as e:
+                        logger.warning(f"[NadoTradingService] ⚠️ Digest query failed during reconcile: {e}")
+
+                # 2. Check by subaccount historical orders if digest not matched
+                if not matching_order and prod_id is not None and subaccount_id and hasattr(self.client, "market") and hasattr(self.client.market, "get_subaccount_historical_orders"):
+                    try:
+                        from nado_protocol.indexer_client.types.query import IndexerSubaccountHistoricalOrdersParams
+                        params = IndexerSubaccountHistoricalOrdersParams(
+                            subaccounts=[subaccount_id],
+                            product_ids=[prod_id],
+                            limit=20
+                        )
+                        hist_res = await asyncio.to_thread(self.client.market.get_subaccount_historical_orders, params)
+                        if hist_res and getattr(hist_res, "orders", None):
+                            for o in hist_res.orders:
+                                bf = float(getattr(o, "base_filled", 0))
+                                base_f = abs(bf)
+                                is_closing_dir = (direction == "LONG" and bf < 0) or (direction == "SHORT" and bf > 0)
+                                if is_closing_dir and base_f > 0:
+                                    ts = getattr(o, "timestamp", None)
+                                    o_time = float(ts) / 1000.0 if ts and len(str(ts)) > 10 else float(ts or 0)
+                                    if attempt_time > 0 and o_time > 0 and o_time < (attempt_time - 15.0):
+                                        continue
+                                    if abs(base_f - diff) / max(diff, 1e-6) <= 0.15:
+                                        matching_order = o
+                                        break
+                    except Exception as e:
+                        logger.warning(f"[NadoTradingService] ⚠️ Historical orders query failed during reconcile: {e}")
+
+                if matching_order:
+                    # Verified on-chain execution of our TP order!
+                    quote_f = abs(float(getattr(matching_order, "quote_filled", 0)))
+                    base_f = abs(float(getattr(matching_order, "base_filled", diff)))
+                    fill_p = quote_f / base_f if base_f > 0 and quote_f > 0 else float(tier.target_price or entry_p)
+                    order_dig = getattr(matching_order, "digest", tier.order_digest)
+
+                    raw_fee = getattr(matching_order, "fee", getattr(matching_order, "fee_x18", None))
+                    fee_usd = 0.0
+                    if raw_fee is not None and isinstance(raw_fee, (int, float, str)):
+                        try:
+                            fee_usd = float(raw_fee) / 1e18 if float(raw_fee) > 1e10 else float(raw_fee)
+                        except (ValueError, TypeError):
+                            fee_usd = 0.0
+                    if fee_usd <= 0:
+                        fee_usd = base_f * (entry_p + fill_p) * 0.0005
+
+                    gross_slice_pnl = base_f * (fill_p - entry_p) if direction == "LONG" else base_f * (entry_p - fill_p)
+                    slice_pnl = round(gross_slice_pnl - fee_usd, 4)
+
+                    logger.info(
+                        f"[NadoTradingService] ✅ SUBMITTING order for {canonical_sym} tier {tier.tier_index} verified on-chain! "
+                        f"Recovered fill: {base_f:.4f} contracts @ {fill_p:.4f} (PnL: +${slice_pnl:.2f}, Fee: ${fee_usd:.2f}, Digest: {order_dig})."
+                    )
+                    tier.filled_contracts = round(tier.filled_contracts + base_f, 8)
+                    tier.fill_price = fill_p
+                    tier.order_digest = order_dig
+                    tier.realized_pnl_usd = round(tier.realized_pnl_usd + slice_pnl, 4)
+                    tier.executed_at = time.time()
+
+                    current_acc = float(pos.get("accumulated_realized_pnl", 0.0))
+                    pos["accumulated_realized_pnl"] = round(current_acc + slice_pnl, 4)
+
+                    self._sync_position_contracts(pos, plan, actual_on_chain, entry_p)
+
+                    if tier.remaining_tier_contracts < plan.min_size or tier.filled_contracts >= (tier.close_contracts * 0.999):
+                        tier.status = "FILLED"
+                    else:
+                        tier.status = "PARTIALLY_FILLED"
+
+                    pos["partial_tp_plan"] = plan.to_dict()
+                    self._save_positions()
+                    return True
                 else:
-                    tier.status = "PARTIALLY_FILLED"
+                    # On-chain position decreased, but NO matching TP order found in exchange history!
+                    # It was an external closure, manual close, or SL.
+                    logger.warning(
+                        f"[NadoTradingService] ⚠️ External position reduction detected for {canonical_sym}: "
+                        f"on-chain contracts {actual_on_chain:.4f} < local {local_remaining:.4f} (diff: {diff:.4f}), "
+                        f"but NO matching TP order fill found. Adjusting position size without crediting TP profit."
+                    )
+                    self._sync_position_contracts(pos, plan, actual_on_chain, entry_p)
 
-                pos["partial_tp_plan"] = plan.to_dict()
-                self._save_positions()
-                return True
+                    # Do NOT credit tier filled contracts or PnL! Reset tier status to PENDING / PARTIALLY_FILLED
+                    tier.status = "PARTIALLY_FILLED" if tier.filled_contracts > 0 else "PENDING"
+                    pos["partial_tp_plan"] = plan.to_dict()
+                    self._save_positions()
+                    return True
 
             elif abs(diff) <= 1e-5:
                 # Balance unchanged: order did NOT fill. Safe to revert to PENDING or PARTIALLY_FILLED
@@ -1755,8 +1982,9 @@ class NadoTradingService(BaseTradingService):
                 logger.info(f"[NadoTradingService] 🔄 Confirmed no fill for SUBMITTING tier {tier.tier_index} on {canonical_sym}. Reset to {tier.status}.")
                 return True
             else:
-                # On-chain > local remaining
-                plan.remaining_contracts = actual_on_chain
+                # On-chain > local remaining: synchronize all fields
+                entry_p = float(pos.get("entry_price") or 0.0)
+                self._sync_position_contracts(pos, plan, actual_on_chain, entry_p)
                 tier.status = "PENDING"
                 pos["partial_tp_plan"] = plan.to_dict()
                 self._save_positions()
@@ -2376,13 +2604,6 @@ class NadoTradingService(BaseTradingService):
                 logger.error(f"[NadoTradingService] Cannot update SL for {symbol} - price_increment is 0")
                 return False
                 
-            # 2. Cancel old SL
-            await self._cancel_trigger_digests(product_id, [sl_digest], sender=sender)
-            pos["sl_digest"] = None
-            pos["sl_price"] = new_sl_price
-            if new_protection_state:
-                pos["protection_state"] = new_protection_state
-
             # Compute trigger amount (strictly aligned to remaining contracts)
             if new_contracts is not None and new_contracts > 0:
                 amount_base = float(new_contracts)
@@ -2395,7 +2616,8 @@ class NadoTradingService(BaseTradingService):
             trigger_amount_str = str(-amount_x18_val if direction == "LONG" else amount_x18_val)
             pos["trigger_amount_x18"] = trigger_amount_str
                 
-            # 3. Place new SL immediately with retry
+            # Place new SL trigger FIRST before cancelling the old trigger order
+            # This ensures zero gap of vulnerability on the exchange!
             exec_price = new_sl_price * 0.9 if direction == "LONG" else new_sl_price * 1.1
             
             exec_price_x18 = int(exec_price * 10**18)
@@ -2415,8 +2637,9 @@ class NadoTradingService(BaseTradingService):
                         price_x18=str(exec_price_x18),
                         amount_x18=trigger_amount_str,
                         trigger_price_x18=str(trigger_price_x18),
-                        trigger_type=pos["sl_type"],
+                        trigger_type=pos.get("sl_type") or ("oracle_price_below" if direction == "LONG" else "oracle_price_above"),
                         reduce_only=True
+
                     )
                     
                     if sl_res and sl_res.data and sl_res.data.digest:
@@ -2431,14 +2654,29 @@ class NadoTradingService(BaseTradingService):
                         await asyncio.sleep(0.5)
 
             if new_digest:
+                # Cancel old SL trigger only after new SL trigger is confirmed on-chain
+                if sl_digest and sl_digest != new_digest:
+                    await self._cancel_trigger_digests(product_id, [sl_digest], sender=sender)
+
                 pos["sl_digest"] = new_digest
+                pos["sl_price"] = new_sl_price
+                if new_protection_state:
+                    pos["protection_state"] = new_protection_state
                 pos["unverified_triggers"] = False
                 pos["sl_protection_mode"] = "EXCHANGE_PROTECTED"
                 self._save_positions()
                 logger.info(f"[NadoTradingService] ✅ Stop Loss updated on-chain for {symbol} -> {new_sl_price:.4f} (digest: {new_digest})")
                 return True
             else:
-                pos["sl_digest"] = None
+                if sl_digest:
+                    # Clean up old trigger upon transitioning to Software Stop Loss
+                    await self._cancel_trigger_digests(product_id, [sl_digest], sender=sender)
+                    pos["sl_digest"] = None
+
+
+                pos["sl_price"] = new_sl_price
+                if new_protection_state:
+                    pos["protection_state"] = new_protection_state
                 pos["unverified_triggers"] = True
                 pos["sl_protection_mode"] = "SOFTWARE_ONLY"
                 self._save_positions()
@@ -2500,14 +2738,16 @@ class NadoTradingService(BaseTradingService):
             if not reconciled or tier.status == "SUBMITTING":
                 return None
 
-        # 2. Handle FAILED tier with safe retry policy (up to 3 retries with 15s cooldown)
+        # 2. Block HALTED tier immediately
+        if tier.status == "HALTED":
+            return None
+
+        # 3. Handle FAILED tier with safe retry policy (up to 3 retries with 15s cooldown)
         if tier.status == "FAILED":
             if getattr(tier, "retry_count", 0) < 3:
                 now = time.time()
                 last_try = getattr(tier, "last_attempt_time", 0.0) or 0.0
                 if now - last_try >= 15.0:
-                    tier.retry_count = getattr(tier, "retry_count", 0) + 1
-                    tier.last_attempt_time = now
                     tier.status = "PENDING"
                     pos["partial_tp_plan"] = plan.to_dict()
                     self._save_positions()
@@ -2515,6 +2755,8 @@ class NadoTradingService(BaseTradingService):
                 else:
                     return None
             else:
+                tier.status = "HALTED"
+                pos["partial_tp_plan"] = plan.to_dict()
                 if pos.get("failed_tier_alerted") != tier.tier_index:
                     pos["failed_tier_alerted"] = tier.tier_index
                     self._save_positions()
@@ -2588,7 +2830,7 @@ class NadoTradingService(BaseTradingService):
                 return None
             plan = PartialTPPlan.from_dict(pos["partial_tp_plan"])
             tier = plan.get_active_or_next_tier()
-            if not tier:
+            if not tier or tier.status == "HALTED":
                 return None
             if tier.status == "SUBMITTING":
                 reconciled = await self.reconcile_submitting_tier(canonical_sym, pos, plan, tier)
@@ -2679,13 +2921,14 @@ class NadoTradingService(BaseTradingService):
         elif tier.is_final:
             be_info = "\n🏁 *Финал:* Все ступени Take-Profit выполнены! Позиция полностью зафиксирована."
 
+        pnl_prefix = "+" if slice_pnl > 0 else ""
         msg = (
             f"{pnl_emoji} *PARTIAL TAKE PROFIT / ЧАСТИЧНАЯ ФИКСАЦИЯ (TP{tier.tier_index} - {tier_fraction_pct}%)*\n\n"
             f"🪙 *Asset / Монета:* `{canonical_sym}`\n"
             f"📊 *Direction / Направление:* `{direction}`\n"
             f"🎯 *Target / Цель:* `${target_price:,.4f}` ➔ *Fill / Исполнение:* `${close_result.fill_price:,.4f}`\n"
             f"💵 *Entry / Вход:* `${entry_p:,.4f}`\n"
-            f"💰 *Slice PnL / Прибыль части:* `+${slice_pnl:,.2f}`\n"
+            f"💰 *Slice PnL / Прибыль части:* `{pnl_prefix}${slice_pnl:,.2f}`\n"
             f"📦 *Closed / Закрыто:* `{close_result.filled_contracts:.4f}` контрактов\n"
             f"⚖️ *Remaining / Остаток позиции:* `{max(0.0, rem_contracts):.4f}` контрактов"
             f"{be_info}\n"

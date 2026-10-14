@@ -70,6 +70,10 @@ class PartialTPPlan:
         - Returns None if all tiers are FILLED or no actionable tier exists.
         """
         for tier in self.tiers:
+            # 0. Halted tier stops the entire ladder
+            if tier.status == "HALTED":
+                return None
+
             # 1. In-flight or crash-recovery tier
             if tier.status == "SUBMITTING":
                 return tier

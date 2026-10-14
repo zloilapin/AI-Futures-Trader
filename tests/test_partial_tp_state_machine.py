@@ -177,10 +177,12 @@ def test_apply_partial_close_failed_result_reverts_to_pending(mock_service):
     assert success is False
     updated_plan = PartialTPPlan.from_dict(pos["partial_tp_plan"])
     tier1 = updated_plan.get_tier(1)
-    assert tier1.status == "PENDING"
+    assert tier1.status == "FAILED"
+    assert tier1.retry_count == 1
     assert tier1.error_message == "IOC order expired without fills"
     assert updated_plan.remaining_contracts == pytest.approx(1.6)
     assert pos["contracts"] == pytest.approx(1.6)
+
 
 
 def test_apply_partial_close_partial_fill_handling(mock_service):

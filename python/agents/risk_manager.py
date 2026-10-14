@@ -713,11 +713,15 @@ class RiskManager(BaseAgent):
         min_size = float(derivatives_data.get("min_size") or 0.0)
         min_notional = float(derivatives_data.get("min_notional") or 0.0)
         
-        # Guard against unconfirmed dummy default min_size (>= 100.0 or <= 0) or unaligned values
-        # Fall back to size_increment as the true minimum order granularity.
-        if min_size <= 0.0 or min_size >= 100.0 or (size_increment > 0 and min_size < size_increment):
+        # Fall back to size_increment if min_size is non-positive or below increment.
+        # Handle unconfirmed Nado engine dummy default (where book_info.min_size is exactly 100.0 across all products)
+        # UNLESS explicitly marked as a confirmed exchange minimum size.
+        is_confirmed_min = bool(derivatives_data.get("confirmed_min_size") or derivatives_data.get("is_confirmed"))
+        is_dummy_default = (min_size == 100.0 and not is_confirmed_min and size_increment > 0 and size_increment != 100.0)
+
+        if min_size <= 0.0 or (size_increment > 0 and min_size < size_increment) or is_dummy_default:
             self.logger.info(
-                f"[{self.name}] ℹ️ Reported min_size ({min_size}) is unconfirmed engine dummy default or below increment. "
+                f"[{self.name}] ℹ️ Reported min_size ({min_size}) is non-positive, below increment, or unconfirmed dummy default (100.0). "
                 f"Falling back to size_increment ({size_increment}) as true minimum order size."
             )
             min_size = size_increment
