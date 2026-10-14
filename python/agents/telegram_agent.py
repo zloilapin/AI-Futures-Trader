@@ -70,7 +70,15 @@ class TelegramAgent(BaseAgent):
             except (TypeError, ValueError):
                 return default
 
-        entry_price = _safe_float(risk, "entry_price")
+        # Prioritize exact on-chain execution fill price if available
+        exec_res = final_trade_data.get("execution_result", {})
+        if isinstance(exec_res, dict) and exec_res.get("actual_fill_price"):
+            entry_price = _safe_float(exec_res, "actual_fill_price")
+        elif hasattr(exec_res, "actual_fill_price") and getattr(exec_res, "actual_fill_price", None):
+            entry_price = float(exec_res.actual_fill_price)
+        else:
+            entry_price = _safe_float(risk, "entry_price")
+
         tp_price = _safe_float(risk, "take_profit_price")
         tp_pct = _safe_float(risk, "take_profit_pct")
         sl_price = _safe_float(risk, "stop_loss_price")
@@ -78,6 +86,15 @@ class TelegramAgent(BaseAgent):
         notional_usd = _safe_float(risk, "notional_size_usd")
         pos_pct = _safe_float(risk, "position_size_pct")
         rr_ratio = _safe_float(risk, "risk_reward_ratio")
+        
+        # Dynamically ensure TP/SL % and RR align precisely with the real entry price
+        if entry_price > 0:
+            if tp_price > 0:
+                tp_pct = round(abs(tp_price - entry_price) / entry_price * 100, 2)
+            if sl_price > 0:
+                sl_pct = round(abs(sl_price - entry_price) / entry_price * 100, 2)
+            if tp_price > 0 and sl_price > 0 and abs(sl_price - entry_price) > 0:
+                rr_ratio = round(abs(tp_price - entry_price) / abs(sl_price - entry_price), 2)
         
         primary_conviction = ceo.get("primary_conviction", conviction)
         escalated = ceo.get("escalated", False)

@@ -28,6 +28,10 @@ def mock_service():
     service.wallet = MagicMock()
     service.wallet.get_address.return_value = "0x1111111111111111111111111111111111111111"
     service.default_subaccount_id = "0x" + "11" * 32
+    service.win_count = 0
+    service.loss_count = 0
+    service.recent_streak = []
+    service._manual_stats = True
     service._save_positions = MagicMock()
     service._save_state = MagicMock()
 

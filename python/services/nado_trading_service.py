@@ -56,6 +56,17 @@ class NadoTradingService(BaseTradingService):
         
         # NOTE: self.initialize(nado_client) MUST be awaited explicitly after instantiation.
 
+    @property
+    def daily_start_balance(self) -> Optional[float]:
+        return getattr(self, "_daily_start_balance", None)
+
+    @daily_start_balance.setter
+    def daily_start_balance(self, value: Optional[float]):
+        import time
+        self._daily_start_balance = float(value) if value is not None else None
+        self._daily_start_date = time.strftime("%Y-%m-%d", time.gmtime())
+        self._manual_daily_start = True
+
     async def initialize(self, nado_client=None):
         if not self.wallet.is_configured():
             logger.error("[NadoTradingService] ❌ Wallet not configured. Nado execution disabled.")
@@ -714,26 +725,28 @@ class NadoTradingService(BaseTradingService):
         from core.state_store import StateStore
         state_file = "data/memory/nado_state.json"
         state = StateStore.load(state_file)
-        if state.get("initial_balance") is not None:
+        if state.get("initial_balance") is not None and getattr(self, "_initial_balance", None) is None:
             self._initial_balance = float(state["initial_balance"])
             logger.debug(f"[NadoTradingService] 💾 Loaded initial balance: {self._initial_balance}")
-        if "daily_start_balance" in state and state["daily_start_balance"] is not None:
-            self._daily_start_balance = float(state["daily_start_balance"])
-        if "daily_start_date" in state and state["daily_start_date"] is not None:
-            self._daily_start_date = str(state["daily_start_date"])
-        if "win_count" in state:
-            self.win_count = int(state["win_count"])
-        if "loss_count" in state:
-            self.loss_count = int(state["loss_count"])
-        if "_daily_start_total_trades" in state and state["_daily_start_total_trades"] is not None:
-            self._daily_start_total_trades = int(state["_daily_start_total_trades"])
-        else:
-            self._daily_start_total_trades = self.win_count + self.loss_count
-        if "recent_streak" in state:
-            self.recent_streak = state["recent_streak"]
-        if "cooldown_until" in state:
+        if not getattr(self, "_manual_daily_start", False):
+            if "daily_start_balance" in state and state["daily_start_balance"] is not None and getattr(self, "_daily_start_balance", None) is None:
+                self._daily_start_balance = float(state["daily_start_balance"])
+            if "daily_start_date" in state and state["daily_start_date"] is not None and getattr(self, "_daily_start_date", None) is None:
+                self._daily_start_date = str(state["daily_start_date"])
+        if not getattr(self, "_manual_stats", False):
+            if "win_count" in state:
+                self.win_count = int(state["win_count"])
+            if "loss_count" in state:
+                self.loss_count = int(state["loss_count"])
+            if "_daily_start_total_trades" in state and state["_daily_start_total_trades"] is not None:
+                self._daily_start_total_trades = int(state["_daily_start_total_trades"])
+            else:
+                self._daily_start_total_trades = self.win_count + self.loss_count
+            if "recent_streak" in state:
+                self.recent_streak = state["recent_streak"]
+        if "cooldown_until" in state and getattr(self, "cooldown_until", 0.0) == 0.0:
             self.cooldown_until = float(state["cooldown_until"])
-        if "_last_cooldown_processed_len" in state:
+        if "_last_cooldown_processed_len" in state and getattr(self, "_last_cooldown_processed_len", 0) == 0:
             self._last_cooldown_processed_len = int(state["_last_cooldown_processed_len"])
 
     def _save_state(self):

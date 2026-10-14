@@ -338,10 +338,11 @@ async def test_nado_trading_service_reanchors_on_external_transfer():
     service = NadoTradingService()
     service.is_connected = True
     service.default_subaccount_id = "0x1234"
-    service._daily_start_balance = 92.42
+    service.daily_start_balance = 92.42
     service._daily_start_total_trades = 0
     service.win_count = 0
     service.loss_count = 0
+    service._manual_stats = True
     
     # Balance on exchange is $8.54 with 0 active positions and 0 trades today
     mock_summary = MagicMock()

@@ -411,3 +411,50 @@ def test_memory_manager_cross_process_and_restart_uniqueness(tmp_path):
     # All 20 cycles must be strictly preserved without collisions
     assert len(files) == 20
 
+
+def test_telegram_signal_uses_exact_execution_fill_price():
+    """
+    Verifies that TelegramAgent uses the real on-chain execution fill price
+    (e.g. 81.31) instead of estimated pre-trade price (e.g. 81.18),
+    and correctly recalculates percentage distances.
+    """
+    agent = TelegramAgent(logger=MagicMock(), llm_client=MagicMock())
+
+    trade_data = {
+        "symbol": "HYPE-USD",
+        "ceo_verdict": {
+            "decision": "SHORT",
+            "conviction": 65,
+            "reasoning": "Breakout short below local support"
+        },
+        "risk_verdict": {
+            "entry_price": 81.1843,  # Pre-trade estimate
+            "stop_loss_price": 82.1605,
+            "take_profit_price": 78.9066,
+            "risk_reward_ratio": 2.1,
+            "notional_size_usd": 65.05,
+            "position_size_pct": 14.0,
+            "stop_loss_pct": 1.2,
+            "take_profit_pct": 2.81
+        },
+        "execution_result": {
+            "status": "SUCCESS",
+            "actual_fill_price": 81.3123,  # Real on-chain fill!
+            "notional_usd": 65.05,
+            "executed_at": 1791967392.0
+        }
+    }
+
+    signal_text = agent.format_signal(trade_data)
+
+    # Must display the real fill price ($81.31), NOT the estimated $81.18
+    assert "81.31" in signal_text
+    assert "81.18" not in signal_text
+
+    # Take Profit should be dynamically recalculated: |78.9066 - 81.3123| / 81.3123 = 2.96%
+    assert "+2.96%" in signal_text
+
+    # Stop Loss should be dynamically recalculated: |82.1605 - 81.3123| / 81.3123 = 1.04%
+    assert "-1.04%" in signal_text
+
+

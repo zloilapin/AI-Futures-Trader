@@ -653,13 +653,39 @@ class TradingPipeline:
                         print(f"❌ Критическая ошибка при отправке ордера {symbol}: {e}")
                         trade_success = False
 
+                    actual_fill_price = float(risk_verdict.get("entry_price", current_price) or current_price)
+                    if trade_success and hasattr(self.services.trading_service, "active_positions"):
+                        active_pos = self.services.trading_service.active_positions.get(symbol)
+                        if not active_pos:
+                            base_s = symbol.split("-")[0].upper()
+                            active_pos = self.services.trading_service.active_positions.get(base_s)
+                        if active_pos and active_pos.get("entry_price"):
+                            actual_fill_price = float(active_pos["entry_price"])
+                            real_notional = float(active_pos.get("notional_usd") or active_pos.get("size_usd") or 0.0)
+                            real_contracts = float(active_pos.get("contracts") or 0.0)
+                            if isinstance(risk_verdict, dict):
+                                risk_verdict["entry_price"] = actual_fill_price
+                                if real_notional > 0:
+                                    risk_verdict["notional_size_usd"] = real_notional
+                                if real_contracts > 0:
+                                    risk_verdict["contracts"] = real_contracts
+                                tp_p = float(risk_verdict.get("take_profit_price") or 0.0)
+                                sl_p = float(risk_verdict.get("stop_loss_price") or 0.0)
+                                if actual_fill_price > 0:
+                                    if tp_p > 0:
+                                        risk_verdict["take_profit_pct"] = round(abs(tp_p - actual_fill_price) / actual_fill_price * 100, 2)
+                                    if sl_p > 0:
+                                        risk_verdict["stop_loss_pct"] = round(abs(sl_p - actual_fill_price) / actual_fill_price * 100, 2)
+                                    if tp_p > 0 and sl_p > 0 and abs(sl_p - actual_fill_price) > 0:
+                                        risk_verdict["risk_reward_ratio"] = round(abs(tp_p - actual_fill_price) / abs(sl_p - actual_fill_price), 2)
+
                     execution_status = "SUCCESS" if trade_success else "REJECTED_BY_EXCHANGE"
                     execution_result = ExecutionResult(
                         symbol=symbol,
                         status=execution_status,
                         executed_at=time.time(),
                         notional_usd=float(risk_verdict.get("notional_size_usd", 0) or 0),
-                        actual_fill_price=float(risk_verdict.get("entry_price", current_price) or current_price)
+                        actual_fill_price=actual_fill_price
                     )
                     if isinstance(risk_verdict, dict):
                         risk_verdict["execution_status"] = execution_status
@@ -718,7 +744,13 @@ class TradingPipeline:
                         final_trade_data = {
                             "symbol": symbol,
                             "ceo_verdict": final_trade_decision.to_dict(),
-                            "risk_verdict": risk_verdict
+                            "risk_verdict": risk_verdict,
+                            "execution_result": execution_result.to_dict() if hasattr(execution_result, "to_dict") else {
+                                "status": execution_result.status,
+                                "actual_fill_price": execution_result.actual_fill_price,
+                                "notional_usd": execution_result.notional_usd,
+                                "executed_at": execution_result.executed_at
+                            }
                         }
                         tg_response = await self.agents.telegram.analyze(final_trade_data)
                         tg_message = tg_response.get("message", f"Отчет по {symbol}")
