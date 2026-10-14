@@ -837,7 +837,7 @@ class NadoTradingService(BaseTradingService):
                     closure_report = self._finalize_partial_tp_closure(
                         symbol=symbol,
                         pos=pos,
-                        exit_price=float(pos.get("entry_price") or current_price),
+                        exit_price=None,
                         triggered_by="DUST_ZERO_CONFIRMED"
                     )
                     return [closure_report]
@@ -1695,7 +1695,7 @@ class NadoTradingService(BaseTradingService):
 
         return False
 
-    def _finalize_partial_tp_closure(self, symbol: str, pos: dict, exit_price: float, triggered_by: str) -> dict:
+    def _finalize_partial_tp_closure(self, symbol: str, pos: dict, exit_price: Optional[float], triggered_by: str) -> dict:
         """
         Cleans up position from active_positions, cancels active trigger orders,
         updates win/loss streaks and saves state after final tier or full on-chain exit.
@@ -1739,9 +1739,10 @@ class NadoTradingService(BaseTradingService):
 
         self._save_positions()
 
+        exit_str = f"{exit_price:.4f}" if exit_price is not None else "UNKNOWN (DUST_ZERO_CONFIRMED)"
         logger.info(
             f"[NadoTradingService] 🎯 Position {canonical_sym} completely finalized! "
-            f"Exit: {exit_price:.4f}, Total PnL: ${total_pnl:.2f}, Trigger: {triggered_by}"
+            f"Exit: {exit_str}, Total PnL: ${total_pnl:.2f}, Trigger: {triggered_by}"
         )
 
         return {
@@ -1889,7 +1890,10 @@ class NadoTradingService(BaseTradingService):
                         hist_res = await asyncio.to_thread(self.client.market.get_historical_orders_by_digest, [tier.order_digest])
                         if hist_res and getattr(hist_res, "orders", None):
                             for o in hist_res.orders:
-                                if abs(float(getattr(o, "base_filled", 0))) > 0:
+                                bf = float(getattr(o, "base_filled", 0))
+                                base_f = abs(bf)
+                                is_closing_dir = (direction == "LONG" and bf < 0) or (direction == "SHORT" and bf > 0)
+                                if is_closing_dir and base_f > 0:
                                     matching_order = o
                                     break
                     except Exception as e:
@@ -1906,6 +1910,7 @@ class NadoTradingService(BaseTradingService):
                         )
                         hist_res = await asyncio.to_thread(self.client.market.get_subaccount_historical_orders, params)
                         if hist_res and getattr(hist_res, "orders", None):
+                            candidate_orders = []
                             for o in hist_res.orders:
                                 bf = float(getattr(o, "base_filled", 0))
                                 base_f = abs(bf)
@@ -1917,10 +1922,23 @@ class NadoTradingService(BaseTradingService):
                                     if attempt_time > 0 and (o_time <= 0 or o_time < (attempt_time - 15.0) or o_time > (attempt_time + 120.0)):
                                         continue
                                     # Strict volume match: must match diff within 1 step or 0.5%, NOT 15%!
-                                    max_allowed_vol_diff = max(plan.size_increment, diff * 0.005)
+                                    max_allowed_vol_diff = max(float(plan.size_increment), diff * 0.005)
                                     if abs(base_f - diff) <= max_allowed_vol_diff:
-                                        matching_order = o
-                                        break
+                                        candidate_orders.append(o)
+
+                            if len(candidate_orders) == 1:
+                                matching_order = candidate_orders[0]
+                                logger.info(
+                                    f"[NadoTradingService] 🎯 Uniquely matched 1 historical fill order "
+                                    f"(digest: {getattr(matching_order, 'digest', '')}) for {canonical_sym} tier {tier.tier_index}."
+                                )
+                            elif len(candidate_orders) > 1:
+                                logger.warning(
+                                    f"[NadoTradingService] ⚠️ Ambiguous TP reconciliation for {canonical_sym} tier {tier.tier_index}: "
+                                    f"found {len(candidate_orders)} candidate orders matching volume {diff:.4f}. "
+                                    f"Refusing to arbitrarily attribute fill. Treating as external position reduction."
+                                )
+                                # Leave matching_order = None so it does not attribute fake profit or single out an order!
                     except Exception as e:
                         logger.warning(f"[NadoTradingService] ⚠️ Historical orders query failed during reconcile: {e}")
 
@@ -1946,8 +1964,11 @@ class NadoTradingService(BaseTradingService):
                     if fill_p is not None:
                         gross_slice_pnl = base_f * (fill_p - entry_p) if direction == "LONG" else base_f * (entry_p - fill_p)
                         slice_pnl = round(gross_slice_pnl - fee_usd, 4)
+                        tier.pnl_reconciled = True
+                        tier.requires_pnl_reconciliation = False
                     else:
                         slice_pnl = 0.0
+                        tier.pnl_reconciled = False
                         tier.requires_pnl_reconciliation = True
 
                     logger.info(
@@ -2671,43 +2692,67 @@ class NadoTradingService(BaseTradingService):
                         await asyncio.sleep(0.5)
 
             if new_digest:
-                # Audit check: Verify that the new trigger order actually exists on-chain
-                # and matches market, subaccount, direction, and volume before cancelling old SL
-                new_trigger_verified = True
+                # Audit check: Strict FAIL-CLOSED verification of new trigger order on exchange
+                new_trigger_verified = False
                 target_sender = sender or self.default_subaccount_id
                 
                 try:
                     active_triggers = await self._fetch_trigger_orders(product_id)
-                    if active_triggers is not None and isinstance(active_triggers, list):
-                        if len(active_triggers) > 0:
-                            found_order = None
-                            for trg in active_triggers:
-                                t_dig = getattr(getattr(trg, "order", None), "digest", getattr(trg, "digest", None))
-                                if t_dig == new_digest:
-                                    found_order = trg
-                                    break
+                    if active_triggers and isinstance(active_triggers, list):
+                        found_order = None
+                        for trg in active_triggers:
+                            t_dig = getattr(getattr(trg, "order", None), "digest", getattr(trg, "digest", None))
+                            if t_dig == new_digest:
+                                found_order = trg
+                                break
+                        
+                        if not found_order:
+                            logger.warning(
+                                f"[NadoTradingService] ⚠️ New SL trigger {new_digest} for {symbol} not found in active triggers!"
+                            )
+                        else:
+                            # Order found by exact digest! Now verify subaccount, direction, and volume
+                            trg_order = getattr(getattr(found_order, "order", None), "order", None) or getattr(found_order, "order", None) or found_order
                             
-                            if not found_order:
-                                new_trigger_verified = False
-                                logger.warning(
-                                    f"[NadoTradingService] ⚠️ New SL trigger {new_digest} for {symbol} not found in active triggers!"
-                                )
+                            sub_ok = True
+                            if target_sender:
+                                t_sub = str(getattr(trg_order, "subaccount", "") or getattr(found_order, "subaccount", "") or "")
+                                if t_sub and t_sub != str(target_sender):
+                                    logger.warning(f"[NadoTradingService] ⚠️ Trigger subaccount mismatch: {t_sub} != {target_sender}")
+                                    sub_ok = False
+                                    
+                            dir_ok = False
+                            vol_ok = False
+                            t_amt = getattr(trg_order, "amount", None)
+                            if t_amt is not None:
+                                t_amt_raw = float(t_amt)
+                                # Closing direction check: LONG must be negative (sell), SHORT positive (buy)
+                                is_closing = (direction == "LONG" and t_amt_raw < 0) or (direction == "SHORT" and t_amt_raw > 0)
+                                if is_closing:
+                                    dir_ok = True
+                                else:
+                                    logger.warning(f"[NadoTradingService] ⚠️ Trigger direction mismatch for {direction}: amount is {t_amt_raw}")
+                                    
+                                # Volume check: amount must match expected contracts within tolerance
+                                t_contracts = abs(t_amt_raw) / 1e18 if abs(t_amt_raw) > 1e10 else abs(t_amt_raw)
+                                allowed_vol_tol = max(0.001, amount_base * 0.01)
+                                if abs(t_contracts - amount_base) <= allowed_vol_tol:
+                                    vol_ok = True
+                                else:
+                                    logger.warning(
+                                        f"[NadoTradingService] ⚠️ Trigger volume mismatch for {symbol}: "
+                                        f"found {t_contracts:.4f} contracts vs expected {amount_base:.4f} (diff: {abs(t_contracts - amount_base):.4f})"
+                                    )
                             else:
-                                # Verify subaccount, direction, and amount
-                                trg_order = getattr(getattr(found_order, "order", None), "order", None)
-                                if trg_order:
-                                    if target_sender:
-                                        t_sub = str(getattr(trg_order, "subaccount", "") or "")
-                                        if t_sub and t_sub != str(target_sender):
-                                            logger.warning(f"[NadoTradingService] ⚠️ Trigger subaccount mismatch: {t_sub} != {target_sender}")
-                                            new_trigger_verified = False
-                                    t_amt = getattr(trg_order, "amount", None)
-                                    if t_amt is not None:
-                                        t_amt_f = float(t_amt)
-                                        is_closing = (direction == "LONG" and t_amt_f < 0) or (direction == "SHORT" and t_amt_f > 0)
-                                        if not is_closing:
-                                            logger.warning(f"[NadoTradingService] ⚠️ Trigger direction mismatch for {direction}: amount is {t_amt_f}")
-                                            new_trigger_verified = False
+                                logger.warning(f"[NadoTradingService] ⚠️ Trigger order {new_digest} missing amount attribute!")
+                                
+                            if sub_ok and dir_ok and vol_ok:
+                                new_trigger_verified = True
+                    else:
+                        logger.warning(
+                            f"[NadoTradingService] ⚠️ Trigger query returned empty/invalid list for product {product_id}. "
+                            f"Cannot verify new trigger {new_digest} on-chain (fail-closed)."
+                        )
                 except Exception as verify_err:
                     logger.warning(f"[NadoTradingService] ⚠️ Could not query active trigger orders to verify {new_digest}: {verify_err}")
 

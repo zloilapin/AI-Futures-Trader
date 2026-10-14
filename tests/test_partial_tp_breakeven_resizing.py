@@ -37,6 +37,27 @@ def mock_service():
             )
         )
     }
+
+    async def mock_fetch_triggers(product_id: int):
+        if hasattr(service, "_custom_triggers"):
+            return service._custom_triggers
+        place_mock = service.client.market.place_price_trigger_order
+        ret = getattr(place_mock, "return_value", None)
+        dig = getattr(getattr(ret, "data", None), "digest", None)
+        if not dig and hasattr(place_mock, "side_effect") and callable(place_mock.side_effect):
+            return []
+        if dig:
+            pos = service.active_positions.get("SOL-USD") or (next(iter(service.active_positions.values())) if service.active_positions else {})
+            amt_str = pos.get("trigger_amount_x18", "0")
+            trg = MagicMock()
+            trg.digest = dig
+            trg.order.digest = dig
+            trg.order.order.subaccount = service.default_subaccount_id
+            trg.order.order.amount = amt_str
+            return [trg]
+        return []
+
+    service._fetch_trigger_orders = mock_fetch_triggers
     return service
 
 

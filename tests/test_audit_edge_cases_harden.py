@@ -44,6 +44,27 @@ def mock_service():
             )
         )
     }
+
+    async def mock_fetch_triggers(product_id: int):
+        if hasattr(service, "_custom_triggers"):
+            return service._custom_triggers
+        place_mock = service.client.market.place_price_trigger_order
+        ret = getattr(place_mock, "return_value", None)
+        dig = getattr(getattr(ret, "data", None), "digest", None)
+        if not dig and hasattr(place_mock, "side_effect") and callable(place_mock.side_effect):
+            return []
+        if dig:
+            pos = service.active_positions.get("SOL-USD") or (next(iter(service.active_positions.values())) if service.active_positions else {})
+            amt_str = pos.get("trigger_amount_x18", "0")
+            trg = MagicMock()
+            trg.digest = dig
+            trg.order.digest = dig
+            trg.order.order.subaccount = service.default_subaccount_id
+            trg.order.order.amount = amt_str
+            return [trg]
+        return []
+
+    service._fetch_trigger_orders = mock_fetch_triggers
     return service
 
 
@@ -635,6 +656,12 @@ async def test_stop_loss_replacement_places_new_order_before_cancelling_old(mock
         call_order.append("place_new")
         res = MagicMock()
         res.data.digest = "0xnew_confirmed_sl"
+        trg = MagicMock()
+        trg.digest = "0xnew_confirmed_sl"
+        trg.order.digest = "0xnew_confirmed_sl"
+        trg.order.order.subaccount = mock_service.default_subaccount_id
+        trg.order.order.amount = kwargs.get("amount_x18", str(int(-0.8 * 1e18)))
+        mock_service._custom_triggers = [trg]
         return res
 
     async def mock_cancel(*args, **kwargs):
@@ -909,7 +936,7 @@ async def test_reconcile_submitting_tier_rejects_loose_volume_and_out_of_window(
     # Neither matched -> not attributed to TP! Tier reset to PENDING, 0 filled, no fake fill recorded
     assert tier.status == "PENDING"
     assert tier.filled_contracts == 0.0
-    assert tier.fill_price == 0.0
+    assert tier.fill_price is None
     assert tier.realized_pnl_usd == 0.0
     assert pos["accumulated_realized_pnl"] == 0.0
 
@@ -974,6 +1001,234 @@ async def test_reconcile_submitting_tier_no_fake_target_price_pnl(mock_service):
     assert getattr(tier, "requires_pnl_reconciliation", False) is True
     # Accumulated realized PnL in pos must NOT include fake target_price profit!
     assert pos["accumulated_realized_pnl"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_update_stop_loss_fail_closed_on_none_and_empty_triggers(mock_service):
+    """
+    Audit Requirement P1:
+    Strict fail-closed: If _fetch_trigger_orders returns None, [], or raises an exception,
+    the SL update must be rejected, and the old protective SL must NEVER be cancelled.
+    """
+    mock_service.active_positions["SOL-USD"] = {
+        "direction": "LONG",
+        "entry_price": 100.0,
+        "sl_price": 98.0,
+        "product_id": 8,
+        "sl_digest": "0xold_safe_sl",
+        "sl_protection_mode": "EXCHANGE_PROTECTED",
+        "contracts": 1.0,
+        "trigger_amount_x18": str(int(-1.0 * 1e18))
+    }
+    mock_res = MagicMock()
+    mock_res.data.digest = "0xnew_unverified_digest"
+    mock_service.client.market.place_price_trigger_order = MagicMock(return_value=mock_res)
+    mock_cancel = AsyncMock(return_value=True)
+    mock_service._cancel_trigger_digests = mock_cancel
+
+    # Case 1: _fetch_trigger_orders returns None
+    mock_service._fetch_trigger_orders = AsyncMock(return_value=None)
+    ok_none = await mock_service.update_stop_loss("SOL-USD", 99.0)
+    assert ok_none is False
+    mock_cancel.assert_not_called()
+    assert mock_service.active_positions["SOL-USD"]["sl_digest"] == "0xold_safe_sl"
+    assert mock_service.active_positions["SOL-USD"]["sl_protection_mode"] == "EXCHANGE_PROTECTED"
+
+    # Case 2: _fetch_trigger_orders returns empty list []
+    mock_service._fetch_trigger_orders = AsyncMock(return_value=[])
+    ok_empty = await mock_service.update_stop_loss("SOL-USD", 99.0)
+    assert ok_empty is False
+    mock_cancel.assert_not_called()
+    assert mock_service.active_positions["SOL-USD"]["sl_digest"] == "0xold_safe_sl"
+
+    # Case 3: _fetch_trigger_orders raises an exception
+    mock_service._fetch_trigger_orders = AsyncMock(side_effect=ConnectionError("Indexer timeout"))
+    ok_err = await mock_service.update_stop_loss("SOL-USD", 99.0)
+    assert ok_err is False
+    mock_cancel.assert_not_called()
+    assert mock_service.active_positions["SOL-USD"]["sl_digest"] == "0xold_safe_sl"
+
+
+@pytest.mark.asyncio
+async def test_update_stop_loss_rejects_volume_or_subaccount_mismatch(mock_service):
+    """
+    Audit Requirement P1:
+    Even if the trigger order digest matches, if its volume or subaccount does not match,
+    the update must be rejected and old SL retained.
+    """
+    mock_service.active_positions["SOL-USD"] = {
+        "direction": "LONG",
+        "entry_price": 100.0,
+        "sl_price": 98.0,
+        "product_id": 8,
+        "sl_digest": "0xold_safe_sl",
+        "sl_protection_mode": "EXCHANGE_PROTECTED",
+        "contracts": 1.0,
+        "trigger_amount_x18": str(int(-1.0 * 1e18))
+    }
+    mock_res = MagicMock()
+    mock_res.data.digest = "0xnew_digest"
+    mock_service.client.market.place_price_trigger_order = MagicMock(return_value=mock_res)
+    mock_cancel = AsyncMock(return_value=True)
+    mock_service._cancel_trigger_digests = mock_cancel
+
+    # Wrong volume: order has amount for 0.4 contracts instead of 1.0
+    bad_vol_order = MagicMock()
+    bad_vol_order.digest = "0xnew_digest"
+    bad_vol_order.order.digest = "0xnew_digest"
+    bad_vol_order.order.order.subaccount = mock_service.default_subaccount_id
+    bad_vol_order.order.order.amount = str(int(-0.4 * 1e18))  # only 0.4 contracts!
+    mock_service._fetch_trigger_orders = AsyncMock(return_value=[bad_vol_order])
+
+    ok_bad_vol = await mock_service.update_stop_loss("SOL-USD", 99.0)
+    assert ok_bad_vol is False
+    mock_cancel.assert_not_called()
+    assert mock_service.active_positions["SOL-USD"]["sl_digest"] == "0xold_safe_sl"
+
+    # Wrong subaccount:
+    bad_sub_order = MagicMock()
+    bad_sub_order.digest = "0xnew_digest"
+    bad_sub_order.order.digest = "0xnew_digest"
+    bad_sub_order.order.order.subaccount = "0xwrong_subaccount_id"
+    bad_sub_order.order.order.amount = str(int(-1.0 * 1e18))
+    mock_service._fetch_trigger_orders = AsyncMock(return_value=[bad_sub_order])
+
+    ok_bad_sub = await mock_service.update_stop_loss("SOL-USD", 99.0)
+    assert ok_bad_sub is False
+    mock_cancel.assert_not_called()
+    assert mock_service.active_positions["SOL-USD"]["sl_digest"] == "0xold_safe_sl"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_submitting_tier_rejects_ambiguous_multiple_matches(mock_service):
+    """
+    Audit Requirement P1:
+    If history has multiple matching orders with identical volume in the time window,
+    the code must NOT arbitrarily pick the first one. It must treat the reduction as external
+    and refuse to attribute TP profit to the tier.
+    """
+    pos = {
+        "direction": "LONG",
+        "entry_price": 100.0,
+        "contracts": 1.0,
+        "product_id": 8,
+        "accumulated_realized_pnl": 0.0
+    }
+    tier = TPTier(
+        tier_index=1,
+        fraction=0.5,
+        target_price=104.0,
+        close_contracts=0.5,
+        cumulative_fraction=0.5,
+        status="SUBMITTING",
+        last_attempt_time=1000.0,
+        order_digest="0xunknown_digest"
+    )
+    plan = MagicMock()
+    plan.size_increment = 0.01
+    plan.min_size = 0.01
+    plan.remaining_contracts = 1.0
+
+    mock_service.get_active_positions = AsyncMock(
+        return_value=[{"symbol": "SOL-USD", "product_id": 8, "amount": 0.5}]
+    )
+
+    # Two distinct orders matching the exact same diff (-0.5) in the time window!
+    order_a = MagicMock(
+        base_filled="-0.50",
+        quote_filled="52.0",
+        timestamp=1005000,
+        digest="0xorder_a"
+    )
+    order_b = MagicMock(
+        base_filled="-0.50",
+        quote_filled="52.1",
+        timestamp=1006000,
+        digest="0xorder_b"
+    )
+    mock_history = MagicMock(orders=[order_a, order_b])
+    mock_service.client.market.get_subaccount_historical_orders = MagicMock(return_value=mock_history)
+
+    await mock_service.reconcile_submitting_tier(
+        symbol="SOL-USD",
+        pos=pos,
+        plan=plan,
+        tier=tier
+    )
+
+    # Ambiguous -> NOT credited to TP! Tier reset to PENDING, 0 filled, no fake profit
+    assert tier.status == "PENDING"
+    assert tier.filled_contracts == 0.0
+    assert tier.fill_price is None
+    assert tier.realized_pnl_usd == 0.0
+    assert pos["accumulated_realized_pnl"] == 0.0
+
+
+def test_tptier_pnl_reconciliation_fields_persistence():
+    """
+    Audit Requirement P1/P2:
+    TPTier must declare requires_pnl_reconciliation, pnl_reconciled, and fill_price
+    so they are preserved across serialization to_dict() and deserialization from_dict().
+    """
+    tier = TPTier(
+        tier_index=2,
+        fraction=0.5,
+        target_price=105.0,
+        close_contracts=0.5,
+        cumulative_fraction=0.5,
+        status="FILLED",
+        fill_price=None,
+        realized_pnl_usd=0.0,
+        requires_pnl_reconciliation=True,
+        pnl_reconciled=False
+    )
+
+    data = tier.to_dict()
+    assert "requires_pnl_reconciliation" in data
+    assert data["requires_pnl_reconciliation"] is True
+    assert "pnl_reconciled" in data
+    assert data["pnl_reconciled"] is False
+    assert data["fill_price"] is None
+
+    restored = TPTier.from_dict(data)
+    assert restored.requires_pnl_reconciliation is True
+    assert restored.pnl_reconciled is False
+    assert restored.fill_price is None
+
+
+@pytest.mark.asyncio
+async def test_dust_zero_confirmed_does_not_fabricate_exit_price(mock_service):
+    """
+    Audit Requirement P2:
+    Confirming zero dust balance must finalize the position with exit_price=None,
+    rather than passing off entry_price or current_price as real execution price.
+    """
+    mock_service.active_positions["SOL-USD"] = {
+        "direction": "LONG",
+        "entry_price": 100.0,
+        "sl_price": 98.0,
+        "tp_price": 104.0,
+        "size_usd": 0.05,
+        "contracts": 0.0005,
+        "is_dust": True,
+        "dust_contracts": 0.0005,
+        "product_id": 8,
+        "accumulated_realized_pnl": 1.25
+    }
+    mock_service.get_active_positions = AsyncMock(return_value=[])
+    mock_service._last_positions_fetch_ok = True
+
+    reports = await mock_service.check_and_update_positions("SOL-USD", current_price=103.50)
+    assert len(reports) == 1
+    rep = reports[0]
+    assert rep["status"] == "CLOSED"
+    assert rep["reason"] == "DUST_ZERO_CONFIRMED"
+    # exit_price must NOT be 100.0 (entry) or 103.50 (current)!
+    assert rep["exit_price"] is None
+    # Realized PnL is retained honestly from partial slices
+    assert rep["pnl_usd"] == 1.25
+    assert "SOL-USD" not in mock_service.active_positions
+
 
 
 

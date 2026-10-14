@@ -21,12 +21,14 @@ class TPTier:
     action: Optional[str] = None  # e.g. "PROTECT_BREAKEVEN", "START_TRAILING", "CLOSE_ALL"
     order_digest: Optional[str] = None
     filled_contracts: float = 0.0
-    fill_price: float = 0.0
+    fill_price: Optional[float] = None
     realized_pnl_usd: float = 0.0
     executed_at: Optional[float] = None
     error_message: Optional[str] = None
     retry_count: int = 0
     last_attempt_time: Optional[float] = None
+    requires_pnl_reconciliation: bool = False
+    pnl_reconciled: bool = True
 
     @property
     def remaining_tier_contracts(self) -> float:
