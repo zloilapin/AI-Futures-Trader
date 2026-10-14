@@ -673,11 +673,12 @@ async def test_stop_loss_replacement_places_new_order_before_cancelling_old(mock
 
 
     assert fail_success is False
-    # cancel_old was called ONLY AFTER all 3 placement attempts failed!
-    assert call_order == ["place_new_fail", "place_new_fail", "place_new_fail", "cancel_old"]
-    # Pos transitioned to SOFTWARE_ONLY
-    assert mock_service.active_positions["SOL-USD"]["sl_digest"] is None
-    assert mock_service.active_positions["SOL-USD"]["sl_protection_mode"] == "SOFTWARE_ONLY"
+    # cancel_old must NEVER be called when placement of new SL fails!
+    assert call_order == ["place_new_fail", "place_new_fail", "place_new_fail"]
+    # Pos retains old on-chain SL and EXCHANGE_PROTECTED!
+    assert mock_service.active_positions["SOL-USD"]["sl_digest"] == "0xretained_old_sl"
+    assert mock_service.active_positions["SOL-USD"]["sl_protection_mode"] == "EXCHANGE_PROTECTED"
+    assert mock_service.active_positions["SOL-USD"]["sl_update_failed"] is True
 
 
 @pytest.mark.asyncio
@@ -790,6 +791,190 @@ async def test_check_and_update_positions_finalizes_dust_remainder(mock_service)
     assert reports[0]["status"] == "CLOSED"
     assert reports[0]["reason"] == "DUST_ZERO_CONFIRMED"
     assert "SOL-USD" not in mock_service.active_positions
+
+
+@pytest.mark.asyncio
+async def test_disconnected_get_active_positions_sets_fetch_ok_false(mock_service):
+    """
+    Audit Fix P2:
+    When service is disconnected, get_active_positions must set _last_positions_fetch_ok = False.
+    A disconnected empty list must NEVER be interpreted as confirmed zero positions!
+    """
+    mock_service.is_connected = False
+    mock_service._last_positions_fetch_ok = True
+
+    positions = await mock_service.get_active_positions()
+    assert positions == []
+    assert mock_service._last_positions_fetch_ok is False
+
+
+@pytest.mark.asyncio
+async def test_update_stop_loss_unverified_new_digest_retains_old_trigger(mock_service):
+    """
+    Audit Fix P1:
+    If place_price_trigger_order returns a new digest, but that digest is NOT verified
+    among active trigger orders on exchange, the old protective SL must NEVER be cancelled!
+    """
+    mock_service.active_positions["SOL-USD"] = {
+        "direction": "LONG",
+        "entry_price": 100.0,
+        "sl_price": 98.0,
+        "product_id": 8,
+        "sl_digest": "0xretained_old_sl",
+        "sl_protection_mode": "EXCHANGE_PROTECTED",
+        "sender": mock_service.default_subaccount_id
+    }
+
+    # Simulate place returns 0xghost_digest
+    res = MagicMock()
+    res.data.digest = "0xghost_digest"
+    mock_service.client.market.place_price_trigger_order = MagicMock(return_value=res)
+
+    # Active triggers query returns an active list that does NOT contain 0xghost_digest
+    active_other_trigger = MagicMock()
+    active_other_trigger.order.digest = "0xsome_other_order"
+    mock_service._fetch_trigger_orders = AsyncMock(return_value=[active_other_trigger])
+
+    # Cancel must NEVER be called
+    mock_cancel = AsyncMock(return_value=True)
+    mock_service._cancel_trigger_digests = mock_cancel
+
+    ok = await mock_service.update_stop_loss("SOL-USD", 99.50)
+    assert ok is False
+    mock_cancel.assert_not_called()
+
+    pos = mock_service.active_positions["SOL-USD"]
+    assert pos["sl_digest"] == "0xretained_old_sl"
+    assert pos["sl_protection_mode"] == "EXCHANGE_PROTECTED"
+    assert pos["sl_update_failed"] is True
+
+
+@pytest.mark.asyncio
+async def test_reconcile_submitting_tier_rejects_loose_volume_and_out_of_window(mock_service):
+    """
+    Audit Fix P1:
+    Reconciliation must NOT match orders with ±15% volume mismatch or outside strict time window.
+    """
+    pos = {
+        "direction": "LONG",
+        "entry_price": 100.0,
+        "contracts": 1.0,
+        "product_id": 8,
+        "accumulated_realized_pnl": 0.0
+    }
+    tier = TPTier(
+        tier_index=1,
+        fraction=0.5,
+        target_price=104.0,
+        close_contracts=0.5,
+        cumulative_fraction=0.5,
+        status="SUBMITTING",
+        last_attempt_time=1000.0,
+        order_digest="0xunknown_digest"
+    )
+    plan = MagicMock()
+    plan.size_increment = 0.01
+    plan.min_size = 0.01
+    plan.remaining_contracts = 1.0
+
+    # Mock get_active_positions to return remaining 0.5 contracts on-chain (diff = 0.5)
+    mock_service.get_active_positions = AsyncMock(
+        return_value=[{"symbol": "SOL-USD", "product_id": 8, "amount": 0.5}]
+    )
+
+    # Order 1: volume is -0.58 (16% difference from diff=0.5) -> must be rejected
+    order_loose = MagicMock(
+        base_filled="-0.58",
+        quote_filled="60.32",
+        timestamp=1005000,  # 1005s, within window
+        digest="0xorder_loose"
+    )
+    # Order 2: timestamp is 800s (200s before attempt) -> must be rejected
+    order_stale = MagicMock(
+        base_filled="-0.50",
+        quote_filled="52.0",
+        timestamp=800000,
+        digest="0xorder_stale"
+    )
+    mock_history = MagicMock(orders=[order_loose, order_stale])
+    mock_service.client.market.get_subaccount_historical_orders = MagicMock(return_value=mock_history)
+
+    await mock_service.reconcile_submitting_tier(
+        symbol="SOL-USD",
+        pos=pos,
+        plan=plan,
+        tier=tier
+    )
+
+    # Neither matched -> not attributed to TP! Tier reset to PENDING, 0 filled, no fake fill recorded
+    assert tier.status == "PENDING"
+    assert tier.filled_contracts == 0.0
+    assert tier.fill_price == 0.0
+    assert tier.realized_pnl_usd == 0.0
+    assert pos["accumulated_realized_pnl"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_reconcile_submitting_tier_no_fake_target_price_pnl(mock_service):
+    """
+    Audit Fix P1/P2:
+    If historical order has missing or zero quote_filled, reconciliation must NOT
+    substitute target_price or calculate fake PnL. It must mark requires_pnl_reconciliation = True.
+    """
+    pos = {
+        "direction": "LONG",
+        "entry_price": 100.0,
+        "contracts": 1.0,
+        "product_id": 8,
+        "accumulated_realized_pnl": 0.0
+    }
+    tier = TPTier(
+        tier_index=1,
+        fraction=0.5,
+        target_price=105.0,
+        close_contracts=0.5,
+        cumulative_fraction=0.5,
+        status="SUBMITTING",
+        last_attempt_time=1000.0,
+        order_digest="0xexact_digest"
+    )
+    plan = MagicMock()
+    plan.size_increment = 0.01
+    plan.min_size = 0.01
+    plan.remaining_contracts = 1.0
+
+    # Mock get_active_positions to return remaining 0.5 contracts on-chain (diff = 0.5)
+    mock_service.get_active_positions = AsyncMock(
+        return_value=[{"symbol": "SOL-USD", "product_id": 8, "amount": 0.5}]
+    )
+
+    # Exact digest match, but quote_filled is 0 (indexer latency / synthetic)
+    order_zero_quote = MagicMock(
+        base_filled="-0.50",
+        quote_filled="0.0",
+        timestamp=1005000,
+        digest="0xexact_digest",
+        fee=0
+    )
+    mock_history = MagicMock(orders=[order_zero_quote])
+    mock_service.client.market.get_historical_orders_by_digest = MagicMock(return_value=mock_history)
+    mock_service.client.market.get_subaccount_historical_orders = MagicMock(return_value=mock_history)
+    mock_service._sync_position_contracts = MagicMock()
+
+    await mock_service.reconcile_submitting_tier(
+        symbol="SOL-USD",
+        pos=pos,
+        plan=plan,
+        tier=tier
+    )
+
+    assert tier.status == "FILLED"
+    assert tier.fill_price is None
+    assert tier.realized_pnl_usd == 0.0
+    assert getattr(tier, "requires_pnl_reconciliation", False) is True
+    # Accumulated realized PnL in pos must NOT include fake target_price profit!
+    assert pos["accumulated_realized_pnl"] == 0.0
+
 
 
 

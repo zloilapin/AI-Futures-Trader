@@ -214,13 +214,14 @@ def test_nado_update_stop_loss_on_chain_retry_and_software_fallback():
 
                     # When on-chain placement fails, success is False (honest exchange semantics)
                     assert success is False
-                    # Old digest was cancelled
-                    mock_cancel.assert_called_once_with(1, ["0xold_digest"], sender="0x1234")
-                    # sl_price is updated to new level for Fast Price Monitor
-                    assert service.active_positions["BTC-USD"]["sl_price"] == 60100.0
-                    assert service.active_positions["BTC-USD"]["sl_digest"] is None
+                    # CRITICAL AUDIT RULE: Old digest MUST NOT be cancelled!
+                    mock_cancel.assert_not_called()
+                    # sl_price stays at current active price on exchange
+                    assert service.active_positions["BTC-USD"]["sl_price"] == 59000.0
+                    assert service.active_positions["BTC-USD"]["sl_digest"] == "0xold_digest"
                     assert service.active_positions["BTC-USD"]["unverified_triggers"] is True
-                    assert service.active_positions["BTC-USD"]["sl_protection_mode"] == "SOFTWARE_ONLY"
+                    assert service.active_positions["BTC-USD"]["sl_protection_mode"] == "EXCHANGE_PROTECTED"
+                    assert service.active_positions["BTC-USD"]["sl_update_failed"] is True
                     # MUST NOT execute emergency panic market closure
                     mock_force_close.assert_not_called()
 

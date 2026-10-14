@@ -184,15 +184,13 @@ async def test_update_stop_loss_fallback_to_software_when_notional_below_limit(m
     # When on-chain placement fails, success is False (honest exchange semantics)
     assert success is False
     pos = mock_service.active_positions["SOL-USD"]
-    # Old exchange SL cancelled to prevent phantom executions
-    mock_service._cancel_trigger_digests.assert_awaited_once_with(8, ["0xold_sl_to_cancel"], sender=None)
-    # sl_digest cleared
-    assert pos["sl_digest"] is None
-    assert pos["unverified_triggers"] is True
-    assert pos["sl_protection_mode"] == "SOFTWARE_ONLY"
-    # Software SL enforced at 100.10
-    assert pos["sl_price"] == pytest.approx(100.10)
-    assert pos["protection_state"] == "BREAK_EVEN"
+    # Audit fix: Old exchange SL is NEVER cancelled if new placement fails!
+    mock_service._cancel_trigger_digests.assert_not_called()
+    # sl_digest and active on-chain protection retained
+    assert pos["sl_digest"] == "0xold_sl_to_cancel"
+    assert pos["sl_protection_mode"] == "EXCHANGE_PROTECTED"
+    assert pos["sl_update_failed"] is True
+    assert pos["sl_price"] == pytest.approx(98.0)
 
 
 @pytest.mark.asyncio

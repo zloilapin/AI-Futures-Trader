@@ -204,7 +204,7 @@ class NadoTradingService(BaseTradingService):
     async def get_active_positions(self, bypass_cache: bool = False) -> List[Dict[str, Any]]:
         """Returns active open positions from Nado."""
         if not self.is_connected:
-            self._last_positions_fetch_ok = True
+            self._last_positions_fetch_ok = False
             return []
             
         import time
@@ -826,17 +826,21 @@ class NadoTradingService(BaseTradingService):
                     break
                     
             if not still_open:
-                # If position was DUST_REMAINDER, finalize cleanly
+                # If position was DUST_REMAINDER, finalize via unified pipeline
                 is_dust_pos = pos.get("is_dust") or (
                     pos.get("partial_tp_plan") and any(
                         t.get("status") == "DUST_REMAINDER" for t in pos["partial_tp_plan"].get("tiers", [])
                     )
                 )
                 if is_dust_pos:
-                    logger.info(f"[NadoTradingService] 🧹 DUST_REMAINDER position for {symbol} confirmed zero on-chain. Finalizing position.")
-                    del self.active_positions[symbol]
-                    self._save_positions()
-                    return [{"symbol": symbol, "status": "CLOSED", "reason": "DUST_ZERO_CONFIRMED"}]
+                    logger.info(f"[NadoTradingService] 🧹 DUST_REMAINDER position for {symbol} confirmed zero on-chain. Finalizing via safe closure pipeline.")
+                    closure_report = self._finalize_partial_tp_closure(
+                        symbol=symbol,
+                        pos=pos,
+                        exit_price=float(pos.get("entry_price") or current_price),
+                        triggered_by="DUST_ZERO_CONFIRMED"
+                    )
+                    return [closure_report]
 
                 # Position is gone, meaning Nado native Trigger Order (SL/TP) executed!
                 logger.info(f"[NadoTradingService] ⚡ Native Trigger executed for {symbol}! Position closed on-chain.")
@@ -1742,6 +1746,8 @@ class NadoTradingService(BaseTradingService):
 
         return {
             "symbol": canonical_sym,
+            "status": "CLOSED",
+            "reason": triggered_by,
             "direction": pos.get("direction", "LONG"),
             "triggered_by": triggered_by,
             "entry_price": entry_price,
@@ -1907,9 +1913,12 @@ class NadoTradingService(BaseTradingService):
                                 if is_closing_dir and base_f > 0:
                                     ts = getattr(o, "timestamp", None)
                                     o_time = float(ts) / 1000.0 if ts and len(str(ts)) > 10 else float(ts or 0)
-                                    if attempt_time > 0 and o_time > 0 and o_time < (attempt_time - 15.0):
+                                    # Strict time window: must be within [attempt_time - 15s, attempt_time + 120s]
+                                    if attempt_time > 0 and (o_time <= 0 or o_time < (attempt_time - 15.0) or o_time > (attempt_time + 120.0)):
                                         continue
-                                    if abs(base_f - diff) / max(diff, 1e-6) <= 0.15:
+                                    # Strict volume match: must match diff within 1 step or 0.5%, NOT 15%!
+                                    max_allowed_vol_diff = max(plan.size_increment, diff * 0.005)
+                                    if abs(base_f - diff) <= max_allowed_vol_diff:
                                         matching_order = o
                                         break
                     except Exception as e:
@@ -1919,7 +1928,9 @@ class NadoTradingService(BaseTradingService):
                     # Verified on-chain execution of our TP order!
                     quote_f = abs(float(getattr(matching_order, "quote_filled", 0)))
                     base_f = abs(float(getattr(matching_order, "base_filled", diff)))
-                    fill_p = quote_f / base_f if base_f > 0 and quote_f > 0 else float(tier.target_price or entry_p)
+                    
+                    has_verified_fill_price = (base_f > 0 and quote_f > 0)
+                    fill_p = quote_f / base_f if has_verified_fill_price else None
                     order_dig = getattr(matching_order, "digest", tier.order_digest)
 
                     raw_fee = getattr(matching_order, "fee", getattr(matching_order, "fee_x18", None))
@@ -1929,15 +1940,19 @@ class NadoTradingService(BaseTradingService):
                             fee_usd = float(raw_fee) / 1e18 if float(raw_fee) > 1e10 else float(raw_fee)
                         except (ValueError, TypeError):
                             fee_usd = 0.0
-                    if fee_usd <= 0:
+                    if fee_usd <= 0 and fill_p is not None:
                         fee_usd = base_f * (entry_p + fill_p) * 0.0005
 
-                    gross_slice_pnl = base_f * (fill_p - entry_p) if direction == "LONG" else base_f * (entry_p - fill_p)
-                    slice_pnl = round(gross_slice_pnl - fee_usd, 4)
+                    if fill_p is not None:
+                        gross_slice_pnl = base_f * (fill_p - entry_p) if direction == "LONG" else base_f * (entry_p - fill_p)
+                        slice_pnl = round(gross_slice_pnl - fee_usd, 4)
+                    else:
+                        slice_pnl = 0.0
+                        tier.requires_pnl_reconciliation = True
 
                     logger.info(
                         f"[NadoTradingService] ✅ SUBMITTING order for {canonical_sym} tier {tier.tier_index} verified on-chain! "
-                        f"Recovered fill: {base_f:.4f} contracts @ {fill_p:.4f} (PnL: +${slice_pnl:.2f}, Fee: ${fee_usd:.2f}, Digest: {order_dig})."
+                        f"Recovered fill: {base_f:.4f} contracts @ {fill_p if fill_p else 'PENDING'} (PnL: +${slice_pnl:.2f}, Fee: ${fee_usd:.2f}, Digest: {order_dig})."
                     )
                     tier.filled_contracts = round(tier.filled_contracts + base_f, 8)
                     tier.fill_price = fill_p
@@ -1945,12 +1960,14 @@ class NadoTradingService(BaseTradingService):
                     tier.realized_pnl_usd = round(tier.realized_pnl_usd + slice_pnl, 4)
                     tier.executed_at = time.time()
 
-                    current_acc = float(pos.get("accumulated_realized_pnl", 0.0))
-                    pos["accumulated_realized_pnl"] = round(current_acc + slice_pnl, 4)
+                    if slice_pnl != 0.0:
+                        current_acc = float(pos.get("accumulated_realized_pnl", 0.0))
+                        pos["accumulated_realized_pnl"] = round(current_acc + slice_pnl, 4)
 
                     self._sync_position_contracts(pos, plan, actual_on_chain, entry_p)
 
-                    if tier.remaining_tier_contracts < plan.min_size or tier.filled_contracts >= (tier.close_contracts * 0.999):
+                    min_sz = float(getattr(plan, "min_size", 0.0) or 0.0)
+                    if tier.remaining_tier_contracts <= max(min_sz, 1e-6) or tier.filled_contracts >= (tier.close_contracts * 0.999):
                         tier.status = "FILLED"
                     else:
                         tier.status = "PARTIALLY_FILLED"
@@ -2654,6 +2671,66 @@ class NadoTradingService(BaseTradingService):
                         await asyncio.sleep(0.5)
 
             if new_digest:
+                # Audit check: Verify that the new trigger order actually exists on-chain
+                # and matches market, subaccount, direction, and volume before cancelling old SL
+                new_trigger_verified = True
+                target_sender = sender or self.default_subaccount_id
+                
+                try:
+                    active_triggers = await self._fetch_trigger_orders(product_id)
+                    if active_triggers is not None and isinstance(active_triggers, list):
+                        if len(active_triggers) > 0:
+                            found_order = None
+                            for trg in active_triggers:
+                                t_dig = getattr(getattr(trg, "order", None), "digest", getattr(trg, "digest", None))
+                                if t_dig == new_digest:
+                                    found_order = trg
+                                    break
+                            
+                            if not found_order:
+                                new_trigger_verified = False
+                                logger.warning(
+                                    f"[NadoTradingService] ⚠️ New SL trigger {new_digest} for {symbol} not found in active triggers!"
+                                )
+                            else:
+                                # Verify subaccount, direction, and amount
+                                trg_order = getattr(getattr(found_order, "order", None), "order", None)
+                                if trg_order:
+                                    if target_sender:
+                                        t_sub = str(getattr(trg_order, "subaccount", "") or "")
+                                        if t_sub and t_sub != str(target_sender):
+                                            logger.warning(f"[NadoTradingService] ⚠️ Trigger subaccount mismatch: {t_sub} != {target_sender}")
+                                            new_trigger_verified = False
+                                    t_amt = getattr(trg_order, "amount", None)
+                                    if t_amt is not None:
+                                        t_amt_f = float(t_amt)
+                                        is_closing = (direction == "LONG" and t_amt_f < 0) or (direction == "SHORT" and t_amt_f > 0)
+                                        if not is_closing:
+                                            logger.warning(f"[NadoTradingService] ⚠️ Trigger direction mismatch for {direction}: amount is {t_amt_f}")
+                                            new_trigger_verified = False
+                except Exception as verify_err:
+                    logger.warning(f"[NadoTradingService] ⚠️ Could not query active trigger orders to verify {new_digest}: {verify_err}")
+
+                if not new_trigger_verified:
+                    pos["unverified_triggers"] = True
+                    pos["sl_update_failed"] = True
+                    if sl_digest:
+                        pos["sl_protection_mode"] = "EXCHANGE_PROTECTED"
+                    self._save_positions()
+                    try:
+                        from services.telegram_service import TelegramService
+                        msg = (
+                            f"🚨 *CRITICAL: SL VERIFICATION FAILED*\n\n"
+                            f"🪙 *Asset:* `{symbol}`\n"
+                            f"⚠️ Новый стоп-лосс получен (`{new_digest}`), но не прошёл проверку активных триггеров на бирже.\n"
+                            f"🔒 *Старый биржевой стоп НЕ отменён* и продолжает защищать позицию на уровне `${current_sl:,.4f}` (digest: `{sl_digest}`)."
+                        )
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(TelegramService().send_message(msg))
+                    except Exception:
+                        pass
+                    return False
+
                 # Cancel old SL trigger only after new SL trigger is confirmed on-chain
                 if sl_digest and sl_digest != new_digest:
                     await self._cancel_trigger_digests(product_id, [sl_digest], sender=sender)
@@ -2664,26 +2741,42 @@ class NadoTradingService(BaseTradingService):
                     pos["protection_state"] = new_protection_state
                 pos["unverified_triggers"] = False
                 pos["sl_protection_mode"] = "EXCHANGE_PROTECTED"
+                pos["sl_update_failed"] = False
                 self._save_positions()
-                logger.info(f"[NadoTradingService] ✅ Stop Loss updated on-chain for {symbol} -> {new_sl_price:.4f} (digest: {new_digest})")
+                logger.info(f"[NadoTradingService] ✅ Stop Loss updated and verified on-chain for {symbol} -> {new_sl_price:.4f} (digest: {new_digest})")
                 return True
             else:
+                # NEW PLACEMENT FAILED!
+                # AUDIT FIX: DO NOT cancel the old SL trigger!
+                # Keep old sl_digest and old current_sl active on exchange!
                 if sl_digest:
-                    # Clean up old trigger upon transitioning to Software Stop Loss
-                    await self._cancel_trigger_digests(product_id, [sl_digest], sender=sender)
-                    pos["sl_digest"] = None
-
-
-                pos["sl_price"] = new_sl_price
-                if new_protection_state:
-                    pos["protection_state"] = new_protection_state
+                    pos["sl_protection_mode"] = "EXCHANGE_PROTECTED"
+                    logger.critical(
+                        f"[NadoTradingService] 🚨 Failed to place NEW on-chain SL for {symbol} at {new_sl_price:.4f} after {max_trigger_retries} attempts ({last_err}). "
+                        f"RETAINING ACTIVE ON-CHAIN SL at {current_sl:.4f} (digest: {sl_digest}) to ensure capital protection!"
+                    )
+                else:
+                    pos["sl_price"] = new_sl_price
+                    pos["sl_protection_mode"] = "SOFTWARE_ONLY"
+                    logger.warning(
+                        f"[NadoTradingService] ⚠️ Failed to place on-chain SL for {symbol} at {new_sl_price:.4f} after {max_trigger_retries} attempts ({last_err}). "
+                        f"Enforcing Software Stop Loss at {new_sl_price:.4f}."
+                    )
                 pos["unverified_triggers"] = True
-                pos["sl_protection_mode"] = "SOFTWARE_ONLY"
+                pos["sl_update_failed"] = True
                 self._save_positions()
-                logger.warning(
-                    f"[NadoTradingService] ⚠️ Failed to place NEW on-chain SL for {symbol} after {max_trigger_retries} attempts ({last_err}). "
-                    f"Active Software Stop Loss remains ENFORCED at {new_sl_price:.4f} via Fast Price Monitor."
-                )
+                try:
+                    from services.telegram_service import TelegramService
+                    msg = (
+                        f"🚨 *CRITICAL: SL UPDATE FAILED*\n\n"
+                        f"🪙 *Asset:* `{symbol}`\n"
+                        f"⚠️ Не удалось обновить стоп-лосс до `${new_sl_price:,.4f}` на бирже Nado.\n"
+                        f"🔒 *Старый биржевой стоп НЕ отменён* и продолжает защищать позицию на уровне `${current_sl:,.4f}` (digest: `{sl_digest}`)."
+                    )
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(TelegramService().send_message(msg))
+                except Exception:
+                    pass
                 return False
 
     async def update_take_profit(self, symbol: str, new_tp_price: float) -> bool:
