@@ -14,6 +14,7 @@ def get_mock_service():
     service.product_map = {"BTC": 2, "BTC-USD": 2, "ETH": 4, "ETH-USD": 4, "ZEC": 8, "ZEC-USD": 8}
     service.active_positions = {}
     service.pending_reconciliations = {}
+    service.processed_fill_digests = set()
     service._position_locks = {}
     service._market_cache = {}
     service.win_count = 0
@@ -24,6 +25,7 @@ def get_mock_service():
     service._last_positions_fetch_ok = True
     service._save_positions = MagicMock()
     service._save_pending_reconciliations = MagicMock()
+    service._save_processed_fills = MagicMock()
     service._save_state = MagicMock()
     service.client = MagicMock()
     return service
@@ -660,7 +662,322 @@ async def test_reconcile_pending_trade_fills_resolves_and_updates_streak():
     assert resolved[0]["symbol"] == "SOL-USD"
     assert pytest.approx(resolved[0]["pnl_usd"]) == -5.0675
     assert "SOL-USD" not in service.pending_reconciliations
+    assert "0xsol_sl_digest" in service.processed_fill_digests
     # Streak now updated with verified loss!
     assert service.loss_count == 1
     assert service.win_count == 0
+
+
+@pytest.mark.asyncio
+async def test_reconcile_closing_fills_rejects_18_percent_volume_divergence():
+    """Verifies that a volume divergence of 18% (e.g. expected 1.0, found 1.18)
+    is strictly rejected (is_exact=False) under the <= 1% tolerance rule."""
+    service = get_mock_service()
+    import time
+
+    fill = MagicMock()
+    fill.base_filled = -1.18 * 1e18  # 1.18 contracts closed
+    fill.quote_filled = 118000.0 * 1e18  # $100,000/BTC
+    fill.fee_x18 = 59.0 * 1e18
+    fill.timestamp = int(time.time() * 1000)
+    fill.digest = "0xfill_divergent"
+
+    mock_hist = MagicMock()
+    mock_hist.orders = [fill]
+    service.client.market.get_subaccount_historical_orders.return_value = mock_hist
+
+    recon = await service._reconcile_closing_fills_from_history(
+        subaccount=service.default_subaccount_id,
+        product_id=2,
+        direction="LONG",
+        entry_price=95000.0,
+        expected_contracts=1.0,
+        close_timestamp=time.time()
+    )
+
+    # 1.18 vs 1.0 is 18% divergence -> MUST NOT be exact
+    assert recon["is_exact"] is False
+    assert recon["is_volume_exact"] is False
+    assert recon["net_pnl"] is None
+
+
+@pytest.mark.asyncio
+async def test_reconcile_closing_fills_rejects_missing_or_invalid_timestamp():
+    """Verifies that orders with missing or unparseable timestamps are skipped
+    and never accepted into an exact reconciliation."""
+    service = get_mock_service()
+    import time
+
+    fill_no_ts = MagicMock()
+    fill_no_ts.base_filled = -1.0 * 1e18
+    fill_no_ts.quote_filled = 100000.0 * 1e18
+    fill_no_ts.fee_x18 = 50.0 * 1e18
+    fill_no_ts.timestamp = None
+    fill_no_ts.digest = "0xfill_no_ts"
+
+    fill_bad_ts = MagicMock()
+    fill_bad_ts.base_filled = -1.0 * 1e18
+    fill_bad_ts.quote_filled = 100000.0 * 1e18
+    fill_bad_ts.fee_x18 = 50.0 * 1e18
+    fill_bad_ts.timestamp = "invalid_timestamp_string"
+    fill_bad_ts.digest = "0xfill_bad_ts"
+
+    mock_hist = MagicMock()
+    mock_hist.orders = [fill_no_ts, fill_bad_ts]
+    service.client.market.get_subaccount_historical_orders.return_value = mock_hist
+
+    recon = await service._reconcile_closing_fills_from_history(
+        subaccount=service.default_subaccount_id,
+        product_id=2,
+        direction="LONG",
+        entry_price=95000.0,
+        expected_contracts=1.0,
+        close_timestamp=time.time()
+    )
+
+    assert recon["is_exact"] is False
+    assert recon["total_base"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_reconcile_closing_fills_excludes_tp_and_open_digests():
+    """Verifies that TP tier fills and open order digests are excluded so they
+    cannot be accidentally aggregated into the remainder closure."""
+    service = get_mock_service()
+    import time
+
+    now_ms = int(time.time() * 1000)
+
+    # TP1 fill (0.5 contracts @ $105,000)
+    tp1_fill = MagicMock()
+    tp1_fill.base_filled = -0.5 * 1e18
+    tp1_fill.quote_filled = 52500.0 * 1e18
+    tp1_fill.fee_x18 = 26.25 * 1e18
+    tp1_fill.timestamp = now_ms - 20000
+    tp1_fill.digest = "0xtp1_tier_digest"
+
+    # Remainder market close fill (0.5 contracts @ $102,000)
+    remainder_fill = MagicMock()
+    remainder_fill.base_filled = -0.5 * 1e18
+    remainder_fill.quote_filled = 51000.0 * 1e18
+    remainder_fill.fee_x18 = 25.5 * 1e18
+    remainder_fill.timestamp = now_ms - 2000
+    remainder_fill.digest = "0xremainder_close_digest"
+
+    mock_hist = MagicMock()
+    mock_hist.orders = [tp1_fill, remainder_fill]
+    service.client.market.get_subaccount_historical_orders.return_value = mock_hist
+
+    # Exclude TP1 digest explicitly
+    recon = await service._reconcile_closing_fills_from_history(
+        subaccount=service.default_subaccount_id,
+        product_id=2,
+        direction="LONG",
+        entry_price=100000.0,
+        expected_contracts=0.5,
+        close_timestamp=time.time(),
+        excluded_digests={"0xtp1_tier_digest"}
+    )
+
+    assert recon["is_exact"] is True
+    assert recon["digests"] == ["0xremainder_close_digest"]
+    assert pytest.approx(recon["total_base"]) == 0.5
+    assert pytest.approx(recon["exit_price"]) == 102000.0
+
+
+@pytest.mark.asyncio
+async def test_reconcile_closing_fills_rejects_zero_expected_contracts():
+    """Verifies that if expected_contracts is 0, reconciliation fail-closes
+    with is_exact=False to avoid matching arbitrary orders."""
+    service = get_mock_service()
+
+    recon = await service._reconcile_closing_fills_from_history(
+        subaccount=service.default_subaccount_id,
+        product_id=2,
+        direction="LONG",
+        entry_price=100000.0,
+        expected_contracts=0.0
+    )
+
+    assert recon["is_exact"] is False
+    assert recon["total_base"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_reconcile_closing_fills_handles_none_fee_with_fee_x18_fallback():
+    """Verifies that if order.fee is present but None, the fallback correctly
+    reads order.fee_x18 instead of failing or defaulting to an estimate."""
+    service = get_mock_service()
+    import time
+
+    fill = MagicMock()
+    fill.base_filled = -1.0 * 1e18
+    fill.quote_filled = 100000.0 * 1e18
+    fill.fee = None  # Key bug scenario: attribute exists with value None!
+    fill.fee_x18 = 50.0 * 1e18
+    fill.timestamp = int(time.time() * 1000)
+    fill.digest = "0xfill_fee_none"
+
+    mock_hist = MagicMock()
+    mock_hist.orders = [fill]
+    service.client.market.get_subaccount_historical_orders.return_value = mock_hist
+
+    recon = await service._reconcile_closing_fills_from_history(
+        subaccount=service.default_subaccount_id,
+        product_id=2,
+        direction="LONG",
+        entry_price=90000.0,
+        expected_contracts=1.0,
+        close_timestamp=time.time()
+    )
+
+    assert recon["is_exact"] is True
+    assert recon["is_fee_exact"] is True
+    assert pytest.approx(recon["fee"]) == 50.0
+
+
+@pytest.mark.asyncio
+async def test_reconcile_closing_fills_estimated_fee_marks_unverified():
+    """Verifies that if fee and fee_x18 are both missing or zero, the fallback
+    estimator is used, marking is_fee_exact=False and is_exact=False."""
+    service = get_mock_service()
+    import time
+
+    fill = MagicMock()
+    fill.base_filled = -1.0 * 1e18
+    fill.quote_filled = 100000.0 * 1e18
+    fill.fee = 0
+    fill.fee_x18 = 0
+    fill.timestamp = int(time.time() * 1000)
+    fill.digest = "0xfill_no_fee"
+
+    mock_hist = MagicMock()
+    mock_hist.orders = [fill]
+    service.client.market.get_subaccount_historical_orders.return_value = mock_hist
+
+    recon = await service._reconcile_closing_fills_from_history(
+        subaccount=service.default_subaccount_id,
+        product_id=2,
+        direction="LONG",
+        entry_price=90000.0,
+        expected_contracts=1.0,
+        close_timestamp=time.time()
+    )
+
+    assert recon["is_exact"] is False
+    assert recon["is_fee_exact"] is False
+    # Estimated fee: 100,000 * 0.0005 = 50.0
+    assert pytest.approx(recon["fee"]) == 50.0
+
+
+@pytest.mark.asyncio
+async def test_reconcile_pending_finds_fill_executed_before_detection():
+    """Verifies that when a position closes on-chain before monitoring detects it
+    (e.g. 5 minutes earlier), the open_time-based search window still finds the fill."""
+    service = get_mock_service()
+    now = 2000.0
+
+    fill_sl = MagicMock()
+    fill_sl.base_filled = 2.0 * 1e18  # Closing SHORT (BUY)
+    fill_sl.quote_filled = 60000.0 * 1e18  # $30,000/ETH
+    fill_sl.fee_x18 = 30.0 * 1e18
+    fill_sl.timestamp = int((now - 300.0) * 1000)  # Executed 300s (5 min) prior!
+    fill_sl.digest = "0xearly_sl_digest"
+
+    mock_hist = MagicMock()
+    mock_hist.orders = [fill_sl]
+    service.client.market.get_subaccount_historical_orders.return_value = mock_hist
+
+    service.pending_reconciliations["ETH-USD"] = {
+        "symbol": "ETH-USD",
+        "base_symbol": "ETH",
+        "product_id": 4,
+        "subaccount": service.default_subaccount_id,
+        "direction": "SHORT",
+        "entry_price": 32000.0,
+        "contracts": 2.0,
+        "size_usd": 64000.0,
+        "accumulated_realized_pnl": 0.0,
+        "open_time": now - 1000.0,  # Opened 1000s ago
+        "detected_at": now,         # Detected just now
+        "status": "PNL_RECONCILIATION_PENDING"
+    }
+
+    resolved = await service.reconcile_pending_trade_fills()
+
+    assert len(resolved) == 1
+    assert resolved[0]["symbol"] == "ETH-USD"
+    # Gross: 2.0 * (32000 - 30000) = +4000. Net: 4000 - 30 = 3970
+    assert pytest.approx(resolved[0]["pnl_usd"]) == 3970.0
+    assert "0xearly_sl_digest" in service.processed_fill_digests
+    assert service.win_count == 1
+
+
+@pytest.mark.asyncio
+async def test_processed_fill_digests_prevents_reusing_fills():
+    """Verifies that an execution digest already in processed_fill_digests is skipped
+    and never matched for a subsequent trade."""
+    service = get_mock_service()
+    import time
+
+    used_fill = MagicMock()
+    used_fill.base_filled = -1.0 * 1e18
+    used_fill.quote_filled = 100000.0 * 1e18
+    used_fill.fee_x18 = 50.0 * 1e18
+    used_fill.timestamp = int(time.time() * 1000)
+    used_fill.digest = "0xalready_processed_digest"
+
+    service.processed_fill_digests.add("0xalready_processed_digest")
+
+    mock_hist = MagicMock()
+    mock_hist.orders = [used_fill]
+    service.client.market.get_subaccount_historical_orders.return_value = mock_hist
+
+    recon = await service._reconcile_closing_fills_from_history(
+        subaccount=service.default_subaccount_id,
+        product_id=2,
+        direction="LONG",
+        entry_price=90000.0,
+        expected_contracts=1.0,
+        close_timestamp=time.time()
+    )
+
+    # Must be skipped because digest was already processed
+    assert recon["is_exact"] is False
+    assert recon["total_base"] == 0.0
+    assert "0xalready_processed_digest" not in recon["digests"]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_pending_increments_attempts_and_triggers_alert():
+    """Verifies that unresolved pending reconciliations increment attempts on each cycle
+    and log an error alert when reaching 20 attempts without dropping the record."""
+    service = get_mock_service()
+
+    service.pending_reconciliations["BTC-USD"] = {
+        "symbol": "BTC-USD",
+        "product_id": 2,
+        "subaccount": service.default_subaccount_id,
+        "direction": "LONG",
+        "entry_price": 60000.0,
+        "contracts": 1.0,
+        "attempts": 19,
+        "status": "PNL_RECONCILIATION_PENDING"
+    }
+
+    # No fills found
+    mock_hist = MagicMock()
+    mock_hist.orders = []
+    service.client.market.get_subaccount_historical_orders.return_value = mock_hist
+
+    with patch("services.nado_trading_service.logger.error") as mock_err:
+        resolved = await service.reconcile_pending_trade_fills()
+
+    assert len(resolved) == 0
+    assert "BTC-USD" in service.pending_reconciliations
+    assert service.pending_reconciliations["BTC-USD"]["attempts"] == 20
+    # Alert triggered at attempt 20
+    mock_err.assert_called_once()
+    assert "CRITICAL PENDING AUDIT" in mock_err.call_args[0][0]
+
 
