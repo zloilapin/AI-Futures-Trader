@@ -14,7 +14,9 @@ def get_mock_service():
     service.product_map = {"BTC": 2, "BTC-USD": 2, "ETH": 4, "ETH-USD": 4, "ZEC": 8, "ZEC-USD": 8}
     service.active_positions = {}
     service.pending_reconciliations = {}
+    service.processed_fills_registry = {}
     service.processed_fill_digests = set()
+    service._reconcile_lock = None
     service._position_locks = {}
     service._market_cache = {}
     service.win_count = 0
@@ -979,5 +981,236 @@ async def test_reconcile_pending_increments_attempts_and_triggers_alert():
     # Alert triggered at attempt 20
     mock_err.assert_called_once()
     assert "CRITICAL PENDING AUDIT" in mock_err.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_closing_fills_rejects_stitching_across_disparate_times():
+    """Verifies that fills occurring at disparate times (e.g. 45 min apart) are NOT
+    stitched together into a single closing event, preventing fake VWAP/PnL calculation."""
+    service = get_mock_service()
+
+    t_now = 5000.0
+
+    # Old fill: 0.2 BTC closed 45 minutes prior (t = 2300)
+    fill_old = MagicMock()
+    fill_old.base_filled = -0.2 * 1e18
+    fill_old.quote_filled = 20000.0 * 1e18  # $100,000/BTC
+    fill_old.fee_x18 = 10.0 * 1e18
+    fill_old.timestamp = int(2300.0 * 1000)
+    fill_old.digest = "0xfill_old"
+
+    # New fill: 0.3 BTC closed just now (t = 5000)
+    fill_new = MagicMock()
+    fill_new.base_filled = -0.3 * 1e18
+    fill_new.quote_filled = 31500.0 * 1e18  # $105,000/BTC
+    fill_new.fee_x18 = 15.75 * 1e18
+    fill_new.timestamp = int(t_now * 1000)
+    fill_new.digest = "0xfill_new"
+
+    mock_hist = MagicMock()
+    mock_hist.orders = [fill_old, fill_new]
+    service.client.market.get_subaccount_historical_orders.return_value = mock_hist
+
+    # Expected contracts is 0.5 BTC (the sum of both!)
+    recon = await service._reconcile_closing_fills_from_history(
+        subaccount=service.default_subaccount_id,
+        product_id=2,
+        direction="LONG",
+        entry_price=95000.0,
+        expected_contracts=0.5,
+        min_timestamp=2000.0,
+        max_timestamp=5060.0
+    )
+
+    # Must NOT stitch 0.2 and 0.3 together across 45 minutes!
+    assert recon["is_exact"] is False
+    assert recon["net_pnl"] is None
+
+
+@pytest.mark.asyncio
+async def test_reconcile_closing_fills_rejects_ambiguous_duplicate_clusters():
+    """Verifies that if multiple distinct execution clusters in the window each match
+    the expected volume, reconciliation refuses to guess and leaves is_exact=False."""
+    service = get_mock_service()
+
+    # Event 1 at t=1000: 0.5 BTC
+    fill1 = MagicMock()
+    fill1.base_filled = -0.5 * 1e18
+    fill1.quote_filled = 50000.0 * 1e18
+    fill1.fee_x18 = 25.0 * 1e18
+    fill1.timestamp = int(1000.0 * 1000)
+    fill1.digest = "0xevent1"
+
+    # Event 2 at t=3000: 0.5 BTC
+    fill2 = MagicMock()
+    fill2.base_filled = -0.5 * 1e18
+    fill2.quote_filled = 51000.0 * 1e18
+    fill2.fee_x18 = 25.5 * 1e18
+    fill2.timestamp = int(3000.0 * 1000)
+    fill2.digest = "0xevent2"
+
+    mock_hist = MagicMock()
+    mock_hist.orders = [fill1, fill2]
+    service.client.market.get_subaccount_historical_orders.return_value = mock_hist
+
+    recon = await service._reconcile_closing_fills_from_history(
+        subaccount=service.default_subaccount_id,
+        product_id=2,
+        direction="LONG",
+        entry_price=95000.0,
+        expected_contracts=0.5,
+        min_timestamp=500.0,
+        max_timestamp=3500.0
+    )
+
+    # Ambiguity must be rejected fail-closed
+    assert recon["is_exact"] is False
+    assert recon["net_pnl"] is None
+
+
+@pytest.mark.asyncio
+async def test_reconcile_closing_fills_rejects_small_position_large_relative_error():
+    """Verifies that small positions (e.g. 0.00005 BTC) strictly reject 100% relative errors
+    (found 0.00010 BTC), eliminating the old loose absolute tolerance flaw."""
+    service = get_mock_service()
+    import time
+
+    fill = MagicMock()
+    fill.base_filled = -0.00010 * 1e18  # Found 0.00010 BTC
+    fill.quote_filled = 10.0 * 1e18
+    fill.fee_x18 = 0.005 * 1e18
+    fill.timestamp = int(time.time() * 1000)
+    fill.digest = "0xtiny_overshoot"
+
+    mock_hist = MagicMock()
+    mock_hist.orders = [fill]
+    service.client.market.get_subaccount_historical_orders.return_value = mock_hist
+
+    recon = await service._reconcile_closing_fills_from_history(
+        subaccount=service.default_subaccount_id,
+        product_id=2,
+        direction="LONG",
+        entry_price=100000.0,
+        expected_contracts=0.00005,  # Expected 0.00005 BTC
+        close_timestamp=time.time()
+    )
+
+    # Diff is 0.00005 (which was <= 1e-4), but divergence is 100% -> MUST be rejected!
+    assert recon["is_exact"] is False
+    assert recon["is_volume_exact"] is False
+
+
+@pytest.mark.asyncio
+async def test_reconcile_closing_fills_rejects_fill_without_unique_digest():
+    """Verifies that an execution without a unique non-empty digest cannot be verified as exact,
+    preventing untracked fills and replay vulnerability."""
+    service = get_mock_service()
+    import time
+
+    fill = MagicMock()
+    fill.base_filled = -1.0 * 1e18
+    fill.quote_filled = 100000.0 * 1e18
+    fill.fee_x18 = 50.0 * 1e18
+    fill.timestamp = int(time.time() * 1000)
+    fill.digest = None  # Missing digest!
+
+    mock_hist = MagicMock()
+    mock_hist.orders = [fill]
+    service.client.market.get_subaccount_historical_orders.return_value = mock_hist
+
+    recon = await service._reconcile_closing_fills_from_history(
+        subaccount=service.default_subaccount_id,
+        product_id=2,
+        direction="LONG",
+        entry_price=95000.0,
+        expected_contracts=1.0,
+        close_timestamp=time.time()
+    )
+
+    assert recon["is_exact"] is False
+    assert recon["has_missing_digest"] is True
+
+
+def test_processed_fills_registry_lru_ordered_retention():
+    """Verifies that processed_fills_registry strictly maintains chronological FIFO/LRU order,
+    pruning oldest records when exceeding 3000 items and guaranteeing newest records are preserved."""
+    service = get_mock_service()
+
+    # Insert 3100 records with sequential timestamps 1..3100
+    for i in range(1, 3101):
+        dig = f"0xdigest_{i:04d}"
+        service.processed_fills_registry[dig] = {
+            "digest": dig,
+            "timestamp": float(i),
+            "subaccount": "0x123",
+            "product_id": 2
+        }
+
+    assert len(service.processed_fills_registry) == 3100
+
+    # Save and prune
+    with patch("core.state_store.StateStore.save") as mock_save:
+        service._save_processed_fills()
+
+    # Preserved exactly 3000
+    assert len(service.processed_fills_registry) == 3000
+    assert len(service.processed_fill_digests) == 3000
+
+    # Oldest 100 (1..100) are pruned
+    assert "0xdigest_0001" not in service.processed_fill_digests
+    assert "0xdigest_0100" not in service.processed_fill_digests
+
+    # Newest (101..3100) are strictly preserved
+    assert "0xdigest_0101" in service.processed_fill_digests
+    assert "0xdigest_3100" in service.processed_fill_digests
+
+
+@pytest.mark.asyncio
+async def test_reconcile_pending_concurrency_lock_serializes():
+    """Verifies that concurrent invocations of reconcile_pending_trade_fills safely
+    serialize through _reconcile_lock without race conditions."""
+    service = get_mock_service()
+    service._reconcile_lock = asyncio.Lock()
+
+    service.pending_reconciliations["BTC-USD"] = {
+        "symbol": "BTC-USD",
+        "product_id": 2,
+        "subaccount": service.default_subaccount_id,
+        "direction": "LONG",
+        "entry_price": 60000.0,
+        "contracts": 1.0,
+        "attempts": 0,
+        "status": "PNL_RECONCILIATION_PENDING"
+    }
+
+    mock_recon_res = {
+        "is_exact": True,
+        "exit_price": 61000.0,
+        "total_base": 1.0,
+        "total_quote": 61000.0,
+        "fee": 30.5,
+        "net_pnl": 969.5,
+        "digests": ["0xconcurrent_fill"]
+    }
+
+    call_count = 0
+    async def mock_reconcile(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        await asyncio.sleep(0.01)
+        return mock_recon_res
+
+    with patch.object(service, "_reconcile_closing_fills_from_history", side_effect=mock_reconcile):
+        # Fire two concurrent tasks
+        res1, res2 = await asyncio.gather(
+            service.reconcile_pending_trade_fills(),
+            service.reconcile_pending_trade_fills()
+        )
+
+    # First task resolves the trade, second task sees empty pending list
+    total_resolved = len(res1) + len(res2)
+    assert total_resolved == 1
+    assert "BTC-USD" not in service.pending_reconciliations
+
 
 

@@ -40,7 +40,9 @@ class NadoTradingService(BaseTradingService):
         self._nado_time_offset = 0  # Store time offset transparently on the service instance
         self.active_positions = self._load_positions()
         self.pending_reconciliations = self._load_pending_reconciliations()
+        self.processed_fills_registry: Dict[str, dict] = {}
         self.processed_fill_digests: Set[str] = self._load_processed_fills()
+        self._reconcile_lock: Optional[asyncio.Lock] = None
         self.product_map: Dict[str, int] = {}
         self.default_subaccount_id = None
         
@@ -832,28 +834,68 @@ class NadoTradingService(BaseTradingService):
             return {}
 
     def _save_processed_fills(self):
-        """Persists processed fill digests to disk to prevent double attribution."""
+        """Persists processed fill records to disk with timestamps and metadata.
+        Guarantees strict FIFO/LRU retention (keeps newest 3000 records)."""
         try:
             from core.state_store import StateStore
             state_file = "data/memory/processed_fills.json"
-            digests_list = list(getattr(self, "processed_fill_digests", set()))
-            # Limit stored historical digests to last 2000 to prevent unbounded growth
-            if len(digests_list) > 2000:
-                digests_list = digests_list[-2000:]
-            StateStore.save(state_file, digests_list)
+            reg = getattr(self, "processed_fills_registry", {})
+            sorted_items = sorted(
+                reg.items(),
+                key=lambda kv: kv[1].get("timestamp", 0.0) if isinstance(kv[1], dict) else 0.0
+            )
+            if len(sorted_items) > 3000:
+                sorted_items = sorted_items[-3000:]
+            self.processed_fills_registry = dict(sorted_items)
+            self.processed_fill_digests = set(self.processed_fills_registry.keys())
+            StateStore.save(state_file, self.processed_fills_registry)
         except Exception as e:
             logger.error(f"[NadoTradingService] ⚠️ Failed to save processed fills: {e}")
 
     def _load_processed_fills(self) -> set:
-        """Loads processed fill digests from disk."""
+        """Loads processed fill records from disk and initializes registry."""
         try:
             from core.state_store import StateStore
             state_file = "data/memory/processed_fills.json"
             data = StateStore.load(state_file)
-            return set(data) if isinstance(data, list) else set()
+            reg = {}
+            if isinstance(data, dict):
+                reg = data
+            elif isinstance(data, list):
+                # Backward compatibility: legacy format was a list of string digests
+                now = time.time()
+                for d in data:
+                    d_str = str(d).strip().lower()
+                    if d_str:
+                        reg[d_str] = {"digest": d_str, "timestamp": now}
+            self.processed_fills_registry = reg
+            return set(reg.keys())
         except Exception as e:
             logger.error(f"[NadoTradingService] ⚠️ Failed to load processed fills: {e}")
+            self.processed_fills_registry = {}
             return set()
+
+    def _register_processed_fills(self, digests: List[str], subaccount: str = "", product_id: Optional[int] = None, symbol: str = ""):
+        """Registers verified fill digests into registry with metadata and persists to disk."""
+        if not digests:
+            return
+        now = time.time()
+        if not hasattr(self, "processed_fills_registry") or self.processed_fills_registry is None:
+            self.processed_fills_registry = {}
+        if not hasattr(self, "processed_fill_digests") or self.processed_fill_digests is None:
+            self.processed_fill_digests = set()
+        for d in digests:
+            d_norm = str(d).strip().lower()
+            if d_norm:
+                self.processed_fills_registry[d_norm] = {
+                    "digest": d_norm,
+                    "timestamp": now,
+                    "subaccount": str(subaccount) if subaccount else "",
+                    "product_id": product_id,
+                    "symbol": symbol
+                }
+                self.processed_fill_digests.add(d_norm)
+        self._save_processed_fills()
 
     async def check_and_update_positions(self, symbol: str, current_price: float) -> List[Dict[str, Any]]:
         """Checks if a position was closed natively by Nado (TP/SL trigger)."""
@@ -1160,13 +1202,19 @@ class NadoTradingService(BaseTradingService):
         max_timestamp: Optional[float] = None,
         excluded_digests: Optional[Set[str]] = None,
         target_digest: Optional[str] = None,
-        limit: int = 25
+        limit: int = 50
     ) -> Dict[str, Any]:
         """
-        Queries subaccount historical orders to aggregate all matching fills for a closing event.
-        Calculates VWAP exit price, total fees, and exact net PnL across multiple partial fills.
-        Enforces closing direction, strict volume tolerance (<= 1%), timestamp verification,
-        and digest exclusion to prevent fill re-use and double-counting of TP tiers.
+        Queries subaccount historical orders to aggregate matching fills for a closing event.
+        Calculates VWAP exit price, total fees, and exact net PnL across execution clusters.
+        Enforces:
+        1. Closing direction matching.
+        2. Temporal clustering (fills in a cluster must execute within 15s of each other, <= 30s span)
+           to strictly prevent stitching together unrelated partial closes across the position lifetime.
+        3. Strict relative volume tolerance (<= 1.0%), rejecting loose absolute tolerances for small positions.
+        4. Unique non-empty digest requirement on all matched fills to prevent unverified replay.
+        5. Fee verification: fallback estimated fees flag is_exact=False.
+        6. Ambiguity rejection: if multiple clusters match, refuses to guess and leaves trade pending.
         """
         default_res = {
             "is_exact": False,
@@ -1205,27 +1253,24 @@ class NadoTradingService(BaseTradingService):
             dir_upper = str(direction).upper()
             ref_time = close_timestamp if close_timestamp and close_timestamp > 0 else time.time()
 
-            # Compile exclusion set of digests
-            skip_digests = set(str(d).lower() for d in getattr(self, "processed_fill_digests", set()) if d)
+            # Compile exclusion set of digests (normalized to lower case)
+            skip_digests = set(str(d).strip().lower() for d in getattr(self, "processed_fill_digests", set()) if d)
             if excluded_digests:
-                skip_digests.update(str(d).lower() for d in excluded_digests if d)
+                skip_digests.update(str(d).strip().lower() for d in excluded_digests if d)
 
-            total_base = 0.0
-            total_quote = 0.0
-            total_fee = 0.0
-            has_estimated_fee = False
-            matched_digests = []
-
+            # 1. Collect and validate candidate closing fills
+            candidates = []
             for order in hist.orders:
                 raw_dig = getattr(order, "digest", "") or ""
-                dig_lower = str(raw_dig).lower()
+                dig_str = str(raw_dig).strip()
+                dig_lower = dig_str.lower()
+                has_valid_digest = bool(dig_str and dig_lower != "none")
 
-                # 1. Skip previously processed or explicitly excluded digests (e.g. TP tiers)
-                if dig_lower and dig_lower in skip_digests:
+                # Skip previously processed or explicitly excluded digests (e.g. TP tiers)
+                if has_valid_digest and dig_lower in skip_digests:
                     continue
 
-                # If specific target digest is required, match only that digest
-                if target_digest and dig_lower and dig_lower != target_digest.lower():
+                if target_digest and dig_lower != target_digest.lower():
                     continue
 
                 raw_bf = getattr(order, "base_filled", 0) or 0
@@ -1239,14 +1284,14 @@ class NadoTradingService(BaseTradingService):
                 if norm_base <= 0 or norm_quote <= 0:
                     continue
 
-                # 2. Strict direction check:
+                # Strict direction check:
                 # Closing LONG -> SELL (bf < 0)
                 # Closing SHORT -> BUY (bf > 0)
                 is_close_dir = (dir_upper == "LONG" and bf < 0) or (dir_upper == "SHORT" and bf > 0)
                 if not is_close_dir:
                     continue
 
-                # 3. Strict timestamp check: missing or unparseable timestamp CANNOT be exact
+                # Strict timestamp check: missing or unparseable timestamp CANNOT be exact
                 ts = getattr(order, "timestamp", None)
                 if ts is None or str(ts).strip() == "" or str(ts).strip().lower() == "none":
                     logger.warning("[NadoTradingService] ⚠️ Skipping historical order without timestamp in reconciliation.")
@@ -1272,78 +1317,158 @@ class NadoTradingService(BaseTradingService):
                         if order_ts_sec < (ref_time - 900.0):
                             continue
 
-                # 4. Strict Fee extraction (fixing getattr bug where order.fee is None)
+                # Strict fee extraction
                 raw_fee = getattr(order, "fee", None)
                 if raw_fee is None:
                     raw_fee = getattr(order, "fee_x18", None)
 
                 if raw_fee is not None and abs(float(raw_fee or 0)) > 0:
                     fill_fee = abs(self._normalize_indexer_amount(raw_fee))
+                    is_fee_exact = True
                 else:
-                    # Fee is missing from indexer payload — calculate fallback taker fee (0.05%)
-                    # and mark fee as estimated!
                     fill_fee = norm_quote * 0.0005
-                    has_estimated_fee = True
+                    is_fee_exact = False
 
-                # 5. Overshoot guard: if a single order is larger than 105% of expected volume,
-                # do not greedily swallow it if we haven't matched anything yet
-                if total_base == 0.0 and norm_base > (expected_contracts * 1.05):
-                    continue
+                candidates.append({
+                    "order": order,
+                    "digest": dig_str if has_valid_digest else "",
+                    "has_valid_digest": has_valid_digest,
+                    "base": norm_base,
+                    "quote": norm_quote,
+                    "fee": fill_fee,
+                    "is_fee_exact": is_fee_exact,
+                    "timestamp": order_ts_sec
+                })
 
-                total_base += norm_base
-                total_quote += norm_quote
-                total_fee += fill_fee
-                if raw_dig:
-                    matched_digests.append(str(raw_dig))
-
-                # Stop aggregating once expected volume is reached
-                if total_base >= expected_contracts * 0.995:
-                    break
-
-            if total_base <= 0 or total_quote <= 0:
+            if not candidates:
                 return default_res
 
-            vwap_exit = total_quote / total_base
+            # Step size lookup for instrument rounding
+            step_size = 0.0
+            try:
+                step_size = float(self._get_market_parameters(product_id).get("size_increment_base", 0.0))
+            except Exception:
+                step_size = 0.0
+
+            # 2. Form Temporal Clusters:
+            # Fills in the same closing event occur nearly simultaneously or in a rapid burst.
+            # Max gap between consecutive fills: 15s; max total cluster span: 30s.
+            candidates.sort(key=lambda c: c["timestamp"])
+            clusters = []
+            curr_cluster = []
+            for c in candidates:
+                if not curr_cluster:
+                    curr_cluster.append(c)
+                else:
+                    gap = c["timestamp"] - curr_cluster[-1]["timestamp"]
+                    span = c["timestamp"] - curr_cluster[0]["timestamp"]
+                    if gap <= 15.0 and span <= 30.0:
+                        curr_cluster.append(c)
+                    else:
+                        clusters.append(curr_cluster)
+                        curr_cluster = [c]
+            if curr_cluster:
+                clusters.append(curr_cluster)
+
+            # 3. Match Clusters Against Expected Volume
+            def eval_volume_match(vol: float) -> Tuple[bool, float]:
+                v_diff = abs(vol - expected_contracts)
+                v_div = v_diff / expected_contracts
+                # Relative divergence must be <= 1.0% (0.01).
+                # For tiny lot rounding, allow at most step_size provided v_div <= 0.02.
+                # Never accept 100% or large relative error on small positions!
+                is_vol = (v_div <= 0.01)
+                if not is_vol and step_size > 0 and v_diff <= step_size and v_div <= 0.02:
+                    is_vol = True
+                return is_vol, v_div
+
+            matching_clusters = []
+            for cl in clusters:
+                cl_base = sum(item["base"] for item in cl)
+                is_match, _ = eval_volume_match(cl_base)
+                if is_match:
+                    matching_clusters.append(cl)
+                else:
+                    # Check if a prefix of consecutive fills in the cluster matches
+                    cum_base = 0.0
+                    prefix = []
+                    for item in cl:
+                        cum_base += item["base"]
+                        prefix.append(item)
+                        p_match, _ = eval_volume_match(cum_base)
+                        if p_match:
+                            matching_clusters.append(list(prefix))
+                            break
+
+            # 4. Enforce Single Unambiguous Closing Event
+            if len(matching_clusters) == 0:
+                logger.debug(
+                    f"[NadoTradingService] No single execution cluster matched expected {expected_contracts:.4f} "
+                    f"contracts across {len(clusters)} candidate cluster(s). Refusing to stitch disparate events."
+                )
+                return default_res
+
+            if len(matching_clusters) > 1:
+                # If target_digest is specified, filter to the cluster containing it
+                if target_digest:
+                    filtered = [cl for cl in matching_clusters if any(item["digest"].lower() == target_digest.lower() for item in cl)]
+                    if len(filtered) == 1:
+                        matching_clusters = filtered
+
+                if len(matching_clusters) > 1:
+                    logger.warning(
+                        f"[NadoTradingService] ⚠️ Ambiguous reconciliation for subaccount {subaccount} product {product_id}: "
+                        f"found {len(matching_clusters)} distinct execution clusters matching {expected_contracts:.4f}. "
+                        f"Refusing to guess. Leaving in PNL_RECONCILIATION_PENDING."
+                    )
+                    return default_res
+
+            matched = matching_clusters[0]
+
+            # 5. Evaluate Exact Verification Criteria on Matched Cluster
+            total_base = sum(c["base"] for c in matched)
+            total_quote = sum(c["quote"] for c in matched)
+            total_fee = sum(c["fee"] for c in matched)
+            matched_digests = [c["digest"] for c in matched if c["digest"]]
+
+            has_missing_digest = any(not c["has_valid_digest"] for c in matched)
+            has_estimated_fee = any(not c["is_fee_exact"] for c in matched)
+            is_volume_exact, vol_divergence = eval_volume_match(total_base)
+
+            vwap_exit = total_quote / total_base if total_base > 0 else 0.0
             if vwap_exit <= 0:
                 return default_res
 
-            # 6. STRICT Volume tolerance check: max 1% divergence or absolute lot precision <= 1e-4
-            vol_diff = abs(total_base - expected_contracts)
-            vol_divergence = vol_diff / expected_contracts
+            # Strict Exact Rule:
+            # Requires strict volume match (<= 1%), all fills have unique digests, and all fees are confirmed from exchange!
+            is_exact = is_volume_exact and (not has_missing_digest) and (not has_estimated_fee)
 
-            is_volume_exact = (vol_divergence <= 0.01) or (vol_diff <= 1e-4)
+            gross_pnl = total_base * (vwap_exit - entry_price) if dir_upper == "LONG" else total_base * (entry_price - vwap_exit)
+            net_pnl = round(gross_pnl - total_fee, 4) if is_exact else None
+
+            if has_missing_digest:
+                logger.warning(
+                    f"[NadoTradingService] ⚠️ Reconciled fill cluster lacks unique digest(s). "
+                    f"Marking is_exact=False to prevent replay vulnerability."
+                )
+
             if not is_volume_exact:
                 logger.warning(
                     f"[NadoTradingService] ⚠️ Reconciled volume ({total_base:.4f}) deviates by "
                     f"{vol_divergence*100:.2f}% from expected ({expected_contracts:.4f}) (tolerance <= 1.0%). Marking unverified."
                 )
-                return {
-                    "is_exact": False,
-                    "is_volume_exact": False,
-                    "is_fee_exact": not has_estimated_fee,
-                    "exit_price": vwap_exit,
-                    "total_base": total_base,
-                    "total_quote": total_quote,
-                    "fee": total_fee,
-                    "net_pnl": None,
-                    "digests": matched_digests
-                }
-
-            # 7. Exact status: requires strict volume match AND confirmed fee from indexer
-            is_exact = is_volume_exact and (not has_estimated_fee)
-            gross_pnl = total_base * (vwap_exit - entry_price) if dir_upper == "LONG" else total_base * (entry_price - vwap_exit)
-            net_pnl = round(gross_pnl - total_fee, 4)
 
             logger.info(
-                f"[NadoTradingService] 🎯 Reconciled fill(s): {total_base:.4f} base @ VWAP {vwap_exit:.4f}, "
-                f"Fee: ${total_fee:.4f} (exact_fee={not has_estimated_fee}), Net PnL: ${net_pnl:.4f}, is_exact={is_exact} "
-                f"across {len(matched_digests)} fill(s)."
+                f"[NadoTradingService] 🎯 Reconciled execution event: {total_base:.4f} base @ VWAP {vwap_exit:.4f}, "
+                f"Fee: ${total_fee:.4f} (exact_fee={not has_estimated_fee}), Net PnL: {net_pnl}, is_exact={is_exact} "
+                f"across {len(matched_digests)} fill(s) (cluster span: {matched[-1]['timestamp'] - matched[0]['timestamp']:.1f}s)."
             )
 
             return {
                 "is_exact": is_exact,
                 "is_volume_exact": is_volume_exact,
                 "is_fee_exact": not has_estimated_fee,
+                "has_missing_digest": has_missing_digest,
                 "exit_price": vwap_exit,
                 "total_base": total_base,
                 "total_quote": total_quote,
@@ -1362,103 +1487,111 @@ class NadoTradingService(BaseTradingService):
         Tracks attempt counts and triggers alert for persistent pending trades.
         Once true fills are confirmed by the indexer, computes exact realized PnL,
         updates win/loss streaks and cooldown, and finalizes the trade record.
+        Serializes execution across concurrent tasks via self._reconcile_lock.
         """
         if not self.is_connected or not getattr(self, "pending_reconciliations", None):
             return []
 
-        resolved_reports = []
-        keys_to_remove = []
-        now = time.time()
+        if not hasattr(self, "_reconcile_lock") or self._reconcile_lock is None:
+            self._reconcile_lock = asyncio.Lock()
 
-        for symbol, pending in list(self.pending_reconciliations.items()):
-            subaccount = pending.get("subaccount") or self.default_subaccount_id
-            product_id = pending.get("product_id")
-            if not subaccount or product_id is None:
-                continue
+        async with self._reconcile_lock:
+            resolved_reports = []
+            keys_to_remove = []
+            now = time.time()
 
-            # Track attempts & age
-            attempts = pending.get("attempts", 0) + 1
-            pending["attempts"] = attempts
-            pending["last_attempt_at"] = now
-            detected_at = float(pending.get("detected_at") or pending.get("closed_at") or now)
+            for symbol, pending in list(self.pending_reconciliations.items()):
+                subaccount = pending.get("subaccount") or self.default_subaccount_id
+                product_id = pending.get("product_id")
+                if not subaccount or product_id is None:
+                    continue
 
-            # Alert if pending too long (> 2 hours or >= 20 attempts)
-            if attempts == 20 or (attempts > 20 and attempts % 20 == 0):
-                logger.error(
-                    f"[NadoTradingService] 🚨 CRITICAL PENDING AUDIT: Position {symbol} has been in "
-                    f"PNL_RECONCILIATION_PENDING for {attempts} cycles (age: {(now - detected_at)/60:.1f} min). "
-                    f"Manual exchange inspection recommended."
+                # Track attempts & age
+                attempts = pending.get("attempts", 0) + 1
+                pending["attempts"] = attempts
+                pending["last_attempt_at"] = now
+                detected_at = float(pending.get("detected_at") or pending.get("closed_at") or now)
+
+                # Alert if pending too long (> 2 hours or >= 20 attempts)
+                if attempts == 20 or (attempts > 20 and attempts % 20 == 0):
+                    logger.error(
+                        f"[NadoTradingService] 🚨 CRITICAL PENDING AUDIT: Position {symbol} has been in "
+                        f"PNL_RECONCILIATION_PENDING for {attempts} cycles (age: {(now - detected_at)/60:.1f} min). "
+                        f"Manual exchange inspection recommended."
+                    )
+
+                direction = pending.get("direction", "LONG")
+                entry_price = float(pending.get("entry_price", 0.0))
+                expected_contracts = float(pending.get("contracts", 0.0))
+                open_time = float(pending.get("open_time", 0.0))
+
+                # Robust search window: from position open_time (minus 5s clock skew) up to detected_at + 60s
+                min_ts = (open_time - 5.0) if open_time > 0 else (detected_at - 1800.0)
+                max_ts = detected_at + 60.0
+
+                # Exclude known digests (e.g. TP tiers or open order)
+                excluded = set(pending.get("excluded_digests", []))
+                excluded.update(getattr(self, "processed_fill_digests", set()))
+
+                recon = await self._reconcile_closing_fills_from_history(
+                    subaccount=subaccount,
+                    product_id=product_id,
+                    direction=direction,
+                    entry_price=entry_price,
+                    expected_contracts=expected_contracts,
+                    min_timestamp=min_ts,
+                    max_timestamp=max_ts,
+                    excluded_digests=excluded
                 )
 
-            direction = pending.get("direction", "LONG")
-            entry_price = float(pending.get("entry_price", 0.0))
-            expected_contracts = float(pending.get("contracts", 0.0))
-            open_time = float(pending.get("open_time", 0.0))
+                if recon.get("is_exact") and recon.get("net_pnl") is not None:
+                    acc_pnl = float(pending.get("accumulated_realized_pnl", 0.0))
+                    net_pnl = round(recon["net_pnl"] + acc_pnl, 4)
+                    exit_price = recon["exit_price"]
+                    fee = recon["fee"]
 
-            # Robust search window: from position open_time (minus 5s clock skew) up to detected_at + 60s
-            min_ts = (open_time - 5.0) if open_time > 0 else (detected_at - 1800.0)
-            max_ts = detected_at + 60.0
+                    # Register used digests in processed registry with metadata
+                    self._register_processed_fills(
+                        recon.get("digests", []),
+                        subaccount=subaccount,
+                        product_id=product_id,
+                        symbol=symbol
+                    )
 
-            # Exclude known digests (e.g. TP tiers or open order)
-            excluded = set(pending.get("excluded_digests", []))
-            excluded.update(getattr(self, "processed_fill_digests", set()))
+                    # Update streak and cooldown with verified PnL
+                    if net_pnl > 0.001:
+                        self._update_streak_and_cooldown("WIN")
+                    elif net_pnl < -0.001:
+                        self._update_streak_and_cooldown("LOSS")
+                    else:
+                        self._save_state()
 
-            recon = await self._reconcile_closing_fills_from_history(
-                subaccount=subaccount,
-                product_id=product_id,
-                direction=direction,
-                entry_price=entry_price,
-                expected_contracts=expected_contracts,
-                min_timestamp=min_ts,
-                max_timestamp=max_ts,
-                excluded_digests=excluded
-            )
+                    logger.info(
+                        f"[NadoTradingService] 🎯 RESOLVED pending reconciliation for {symbol}: "
+                        f"Exit: {exit_price:.4f}, Net PnL: ${net_pnl:.4f} (includes TP ${acc_pnl:.2f})"
+                    )
 
-            if recon.get("is_exact"):
-                acc_pnl = float(pending.get("accumulated_realized_pnl", 0.0))
-                net_pnl = round(recon["net_pnl"] + acc_pnl, 4)
-                exit_price = recon["exit_price"]
-                fee = recon["fee"]
+                    keys_to_remove.append(symbol)
+                    resolved_reports.append({
+                        "symbol": symbol,
+                        "direction": direction,
+                        "status": "CLOSED",
+                        "triggered_by": pending.get("reason", "INDEXER_RECONCILED"),
+                        "entry_price": entry_price,
+                        "exit_price": exit_price,
+                        "pnl_usd": net_pnl,
+                        "fee": fee,
+                        "roi_pct": (net_pnl / pending.get("size_usd", 1.0) * 100) if pending.get("size_usd", 0) > 0 else 0,
+                        "original_thesis": pending.get("original_thesis", "")
+                    })
 
-                # Register used digests in processed set
-                for d in recon.get("digests", []):
-                    self.processed_fill_digests.add(d)
-                self._save_processed_fills()
+            for k in keys_to_remove:
+                if k in self.pending_reconciliations:
+                    del self.pending_reconciliations[k]
+            if keys_to_remove or any(p.get("attempts", 0) > 0 for p in self.pending_reconciliations.values()):
+                self._save_pending_reconciliations()
 
-                # Update streak and cooldown with verified PnL
-                if net_pnl > 0.001:
-                    self._update_streak_and_cooldown("WIN")
-                elif net_pnl < -0.001:
-                    self._update_streak_and_cooldown("LOSS")
-                else:
-                    self._save_state()
-
-                logger.info(
-                    f"[NadoTradingService] 🎯 RESOLVED pending reconciliation for {symbol}: "
-                    f"Exit: {exit_price:.4f}, Net PnL: ${net_pnl:.4f} (includes TP ${acc_pnl:.2f})"
-                )
-
-                keys_to_remove.append(symbol)
-                resolved_reports.append({
-                    "symbol": symbol,
-                    "direction": direction,
-                    "status": "CLOSED",
-                    "triggered_by": pending.get("reason", "INDEXER_RECONCILED"),
-                    "entry_price": entry_price,
-                    "exit_price": exit_price,
-                    "pnl_usd": net_pnl,
-                    "fee": fee,
-                    "roi_pct": (net_pnl / pending.get("size_usd", 1.0) * 100) if pending.get("size_usd", 0) > 0 else 0,
-                    "original_thesis": pending.get("original_thesis", "")
-                })
-
-        for k in keys_to_remove:
-            if k in self.pending_reconciliations:
-                del self.pending_reconciliations[k]
-        if keys_to_remove or any(p.get("attempts", 0) > 0 for p in self.pending_reconciliations.values()):
-            self._save_pending_reconciliations()
-
-        return resolved_reports
+            return resolved_reports
 
     async def force_close_position(self, symbol: str, bypass_check: bool = False, max_retries: int = 3) -> tuple:
         """Manually closes a position on Nado by firing a close_position market order.
@@ -1566,9 +1699,12 @@ class NadoTradingService(BaseTradingService):
                             actual_fee = recon["fee"]
                             actual_pnl = recon["net_pnl"]
                             is_exact_pnl = True
-                            for d in recon.get("digests", []):
-                                self.processed_fill_digests.add(d)
-                            self._save_processed_fills()
+                            self._register_processed_fills(
+                                recon.get("digests", []),
+                                subaccount=subaccount,
+                                product_id=product_id,
+                                symbol=canonical_sym
+                            )
                     except Exception as hist_err:
                         logger.warning(f"[NadoTradingService] ⚠️ Indexer fill reconciliation skipped ({hist_err}), using pre-close snapshot.")
 
@@ -1721,9 +1857,12 @@ class NadoTradingService(BaseTradingService):
                         if recon.get("is_exact"):
                             reconciled_pnl = round(recon["net_pnl"] + acc_pnl, 4)
                             logger.info(f"[NadoTradingService] 🎯 Reconciled actual PnL for 2002-closed position {symbol}: ${reconciled_pnl:.4f} (includes TP ${acc_pnl:.2f})")
-                            for d in recon.get("digests", []):
-                                self.processed_fill_digests.add(d)
-                            self._save_processed_fills()
+                            self._register_processed_fills(
+                                recon.get("digests", []),
+                                subaccount=subaccount,
+                                product_id=product_id,
+                                symbol=canonical_sym
+                            )
                             if reconciled_pnl > 0.001:
                                 self._update_streak_and_cooldown("WIN")
                             elif reconciled_pnl < -0.001:
