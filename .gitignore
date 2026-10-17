@@ -16,6 +16,7 @@ python/data/memory/active_positions.json
 python/data/memory/nado_state.json
 python/data/memory/diagnostics.json
 python/data/memory/lessons.json
+python/data/memory/pending_reconciliations.json
 *.log
 bot_debug_log.txt
 dump_trades.py

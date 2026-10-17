@@ -11,8 +11,9 @@ def get_mock_service():
     service.logger = MagicMock()
     service.is_connected = True
     service.default_subaccount_id = "0x" + "12" * 32
-    service.product_map = {"BTC": 2, "BTC-USD": 2, "ETH": 4, "ETH-USD": 4}
+    service.product_map = {"BTC": 2, "BTC-USD": 2, "ETH": 4, "ETH-USD": 4, "ZEC": 8, "ZEC-USD": 8}
     service.active_positions = {}
+    service.pending_reconciliations = {}
     service._position_locks = {}
     service._market_cache = {}
     service.win_count = 0
@@ -20,7 +21,9 @@ def get_mock_service():
     service.recent_streak = []
     service.cooldown_until = 0.0
     service._last_cooldown_processed_len = 0
+    service._last_positions_fetch_ok = True
     service._save_positions = MagicMock()
+    service._save_pending_reconciliations = MagicMock()
     service._save_state = MagicMock()
     service.client = MagicMock()
     return service
@@ -453,14 +456,211 @@ async def test_reconcile_partial_tp_remainder_calculates_stop_loss_pnl():
     plan_dict["remaining_contracts"] = 0.5
     pos["partial_tp_plan"] = plan_dict
 
-    # Now on-chain balance is confirmed ZERO (e.g. stopped out at 1900.0)
-    reconciled = service.reconcile_partial_tp_with_chain("ETH-USD", on_chain_contracts=0.0)
+    # Now on-chain balance is confirmed ZERO (simulated with is_verified_pnl=True)
+    reconciled = service.reconcile_partial_tp_with_chain("ETH-USD", on_chain_contracts=0.0, is_verified_pnl=True)
 
     assert reconciled is True
     assert "ETH-USD" not in service.active_positions
     # Remainder loss: 0.5 * (1900 - 2000) = -$50.0. Remainder fee: 0.5 * 1900 * 0.0005 = $0.475.
     # Total PnL: +$50.0 (TP1) - $50.0 (remainder loss) - $0.475 (fee) = -$0.475
     # The trade must be recorded as a LOSS (net < 0), not as a fake +$50 WIN!
+    assert service.loss_count == 1
+    assert service.win_count == 0
+
+
+@pytest.mark.asyncio
+async def test_force_close_error_2002_retains_position_if_fetch_fails():
+    """Safety test: if close_position raises 2002 but get_active_positions fails (API/indexer error),
+    fail-closed guarantee RETAINS position in active_positions and sets requires_reconciliation=True."""
+    service = get_mock_service()
+    service.active_positions["BTC-USD"] = {
+        "direction": "LONG",
+        "entry_price": 65000.0,
+        "size_usd": 130.0,
+        "product_id": 2,
+        "contracts": 0.002,
+        "sender": service.default_subaccount_id
+    }
+
+    mock_sub = MagicMock()
+    mock_sub.subaccount = service.default_subaccount_id
+    mock_subs = MagicMock()
+    mock_subs.subaccounts = [mock_sub]
+    service.client.subaccount.get_subaccounts.return_value = mock_subs
+
+    service.client.market.close_position.side_effect = Exception("2002: amount is zero")
+    # Simulate API/network failure when checking fresh positions
+    service.get_active_positions = AsyncMock(side_effect=Exception("Connection reset by peer"))
+
+    success, pnl = await service.force_close_position("BTC-USD", bypass_check=True)
+
+    assert success is False
+    assert pnl == 0.0
+    assert "BTC-USD" in service.active_positions
+    assert service.active_positions["BTC-USD"].get("requires_reconciliation") is True
+
+
+@pytest.mark.asyncio
+async def test_reconcile_closing_fills_aggregates_multiple_fills():
+    """Verifies that _reconcile_closing_fills_from_history aggregates multiple partial fills,
+    computes VWAP exit price, sums taker fees, and determines exact net PnL."""
+    service = get_mock_service()
+    import time
+
+    # Mock order objects
+    fill1 = MagicMock()
+    fill1.base_filled = -0.4 * 1e18  # Closing LONG (SELL)
+    fill1.quote_filled = 40000.0 * 1e18  # $100,000/BTC
+    fill1.fee_x18 = 20.0 * 1e18
+    fill1.timestamp = int(time.time() * 1000)
+    fill1.digest = "0xfill1"
+
+    fill2 = MagicMock()
+    fill2.base_filled = -0.6 * 1e18  # Closing LONG (SELL)
+    fill2.quote_filled = 61200.0 * 1e18  # $102,000/BTC
+    fill2.fee_x18 = 30.6 * 1e18
+    fill2.timestamp = int(time.time() * 1000)
+    fill2.digest = "0xfill2"
+
+    mock_hist = MagicMock()
+    mock_hist.orders = [fill1, fill2]
+    service.client.market.get_subaccount_historical_orders.return_value = mock_hist
+
+    recon = await service._reconcile_closing_fills_from_history(
+        subaccount=service.default_subaccount_id,
+        product_id=2,
+        direction="LONG",
+        entry_price=100000.0,
+        expected_contracts=1.0,
+        close_timestamp=time.time()
+    )
+
+    assert recon["is_exact"] is True
+    # Total base = 1.0, Total quote = 101,200 -> VWAP = 101,200.0
+    assert pytest.approx(recon["exit_price"]) == 101200.0
+    assert pytest.approx(recon["total_base"]) == 1.0
+    assert pytest.approx(recon["fee"]) == 50.6
+    # Gross: 1.0 * (101200 - 100000) = 1200.0. Net: 1200.0 - 50.6 = 1149.4
+    assert pytest.approx(recon["net_pnl"]) == 1149.4
+    assert recon["digests"] == ["0xfill1", "0xfill2"]
+
+
+@pytest.mark.asyncio
+async def test_force_close_preserves_accumulated_realized_pnl_from_pos_data():
+    """Verifies that force_close_position correctly includes accumulated_realized_pnl from
+    local authoritative pos_data even if exchange snapshot target_pos omits the field."""
+    service = get_mock_service()
+    service.active_positions["BTC-USD"] = {
+        "direction": "LONG",
+        "entry_price": 60000.0,
+        "size_usd": 120.0,
+        "product_id": 2,
+        "contracts": 0.002,
+        "accumulated_realized_pnl": 25.50,  # $25.50 banked from partial TP1
+        "sender": service.default_subaccount_id
+    }
+
+    mock_sub = MagicMock()
+    mock_sub.subaccount = service.default_subaccount_id
+    mock_subs = MagicMock()
+    mock_subs.subaccounts = [mock_sub]
+    service.client.subaccount.get_subaccounts.return_value = mock_subs
+
+    service.client.market.close_position.return_value = "0xtx_close"
+    # Exchange query returns snapshot WITHOUT accumulated_realized_pnl
+    service.get_active_positions = AsyncMock(return_value=[{
+        "symbol": "BTC-USD",
+        "pnl": -5.0  # Remainder loss
+    }])
+
+    with patch.object(service, "_reconcile_closing_fills_from_history", return_value={"is_exact": False}):
+        success, final_pnl = await service.force_close_position("BTC-USD", bypass_check=True)
+
+    assert success is True
+    # Final PnL must be remainder (-$5.0) + accumulated (+$25.50) = +$20.50
+    assert pytest.approx(final_pnl) == 20.50
+
+
+@pytest.mark.asyncio
+async def test_unverified_remainder_closure_marks_pending_without_streak_corruption():
+    """Verifies that when on-chain contracts hit 0 without confirmed fills,
+    the closure is preserved in pending_reconciliations with status PNL_RECONCILIATION_PENDING
+    and does NOT update win_count or loss_count."""
+    service = get_mock_service()
+    service.active_positions["SOL-USD"] = {
+        "direction": "LONG",
+        "entry_price": 150.0,
+        "sl_price": 140.0,
+        "tp_price": 170.0,
+        "size_usd": 300.0,
+        "contracts": 2.0,
+        "product_id": 8,
+        "accumulated_realized_pnl": 10.0
+    }
+    service.product_map["SOL"] = 8
+    service.product_map["SOL-USD"] = 8
+
+    service.initialize_partial_tp_plan("SOL-USD")
+    pos = service.active_positions["SOL-USD"]
+    plan_dict = pos["partial_tp_plan"]
+    plan_dict["remaining_contracts"] = 1.0
+    pos["partial_tp_plan"] = plan_dict
+
+    # On-chain returns 0 without verified indexer fills (is_verified_pnl=None -> defaults False for open remainder)
+    reconciled = service.reconcile_partial_tp_with_chain("SOL-USD", on_chain_contracts=0.0)
+
+    assert reconciled is True
+    assert "SOL-USD" not in service.active_positions
+    # Crucial check: streak must NOT be modified yet!
+    assert service.loss_count == 0
+    assert service.win_count == 0
+    # Must be tracked in pending_reconciliations
+    assert "SOL-USD" in service.pending_reconciliations
+    pending_entry = service.pending_reconciliations["SOL-USD"]
+    assert pending_entry["status"] == "PNL_RECONCILIATION_PENDING"
+    assert pending_entry["contracts"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_reconcile_pending_trade_fills_resolves_and_updates_streak():
+    """Verifies that reconcile_pending_trade_fills polls history, matches the exact fill,
+    updates the win/loss streak and cooldown, and removes the trade from pending_reconciliations."""
+    service = get_mock_service()
+    service.pending_reconciliations["SOL-USD"] = {
+        "symbol": "SOL-USD",
+        "base_symbol": "SOL",
+        "product_id": 8,
+        "subaccount": service.default_subaccount_id,
+        "direction": "LONG",
+        "entry_price": 150.0,
+        "contracts": 1.0,
+        "size_usd": 150.0,
+        "accumulated_realized_pnl": 10.0,
+        "closed_at": 1000.0,
+        "status": "PNL_RECONCILIATION_PENDING",
+        "reason": "ON_CHAIN_RECONCILED_SL"
+    }
+
+    # Mock indexer resolving the remainder fill at $135 (loss of $15 gross - $0.0675 fee = -$15.0675)
+    # Total PnL: +$10.0 (TP1) - $15.0675 = -$5.0675 -> LOSS
+    mock_recon_res = {
+        "is_exact": True,
+        "exit_price": 135.0,
+        "total_base": 1.0,
+        "total_quote": 135.0,
+        "fee": 0.0675,
+        "net_pnl": -15.0675,
+        "digests": ["0xsol_sl_digest"]
+    }
+
+    with patch.object(service, "_reconcile_closing_fills_from_history", return_value=mock_recon_res):
+        resolved = await service.reconcile_pending_trade_fills()
+
+    assert len(resolved) == 1
+    assert resolved[0]["symbol"] == "SOL-USD"
+    assert pytest.approx(resolved[0]["pnl_usd"]) == -5.0675
+    assert "SOL-USD" not in service.pending_reconciliations
+    # Streak now updated with verified loss!
     assert service.loss_count == 1
     assert service.win_count == 0
 
