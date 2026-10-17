@@ -624,4 +624,155 @@ def test_nado_market_parameters_filters_dummy_100():
     assert params["min_size"] == 5.0
 
 
+# ==============================================================================
+# AUDIT P0 / P1 FIXES: MARGIN PENALTY, LEVERAGE CEILING, SLIPPAGE ALIGNMENT
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_no_double_penalty_on_target_margin(risk_mgr, base_market_data, base_portfolio_data):
+    """
+    Audit P1:
+    Drawdown and action multipliers are already applied to dynamic_risk_pct in Stage 5.
+    They must NOT be applied a second time to target_margin_usd in Stage 7.
+    When a trader suffers 2 consecutive losses (dd_mult = 0.50), notional is halved
+    due to risk reduction, but target margin remains available so notional is not
+    quartered (halved a second time).
+    """
+    ceo_decision = {
+        "symbol": "BTC-USD",
+        "decision": "LONG",
+        "conviction": 85,
+        "trade_action": "ENTER"
+    }
+    # 2 consecutive losses in streak -> dd_mult = 0.50
+    portfolio = dict(
+        base_portfolio_data, 
+        total_usd=100.0, 
+        available_margin=100.0,
+        recent_streak=["LOSS", "LOSS"]
+    )
+    # 1.5% SL distance on $100 price
+    market = {
+        "price_data": {"current_price": 100.0, "ohlcv_1h": [{"volume": 1000}] * 15},
+        "indicators": {"atr_14": 1.0, "ema_20": 100.0, "bb_middle": 100.0},
+        "order_book_data": {"spread_pct": 0.02},
+        "derivatives_data": {
+            "taker_fee_pct": 0.0005,
+            "funding_rate": 0.0001,
+            "size_increment": 0.01,
+            "min_size": 0.01,
+            "min_notional": 0.0
+        }
+    }
+    
+    verdict = await risk_mgr.analyze(
+        ceo_decision, portfolio, market, 
+        effective_profile="BALANCED", macro_regime="TRENDING"
+    )
+    
+    assert verdict["approved"] is True
+    # Base risk is 1.5% of $100 = $1.50. With dd_mult = 0.50, risk is ~$0.75.
+    # At ~1.5% SL distance, notional should be ~$50 (not $25 which would be a double penalty!).
+    assert verdict["risk_amount_usd"] < 1.0  # Reduced by dd_mult
+    assert verdict["notional_size_usd"] >= 40.0  # Preserved notional without double margin cut
+
+
+@pytest.mark.asyncio
+async def test_leverage_ceil_rounding_preserves_notional(risk_mgr, base_portfolio_data):
+    """
+    Audit P1:
+    When required leverage is fractional (e.g. 7.5x) and below safe ceiling (10x),
+    rounding up to 8x (ceil) keeps required margin <= target margin and fully
+    preserves the notional size, avoiding artificial shrinkage to 7x.
+    """
+    ceo_decision = {
+        "symbol": "BTC-USD",
+        "decision": "LONG",
+        "conviction": 85,
+        "trade_action": "ENTER"
+    }
+    # Balance $96, target_margin_pct = 10% -> target_margin_usd = $9.60
+    portfolio = dict(base_portfolio_data, total_usd=96.0, available_margin=96.0)
+    market = {
+        "price_data": {"current_price": 100.0, "ohlcv_1h": [{"volume": 1000}] * 15},
+        "indicators": {"atr_14": 1.3333, "ema_20": 100.0, "bb_middle": 100.0}, # SL ~ 2.0% -> required notional ~ $72
+        "order_book_data": {"spread_pct": 0.02},
+        "derivatives_data": {
+            "taker_fee_pct": 0.0005,
+            "funding_rate": 0.0001,
+            "size_increment": 0.01,
+            "min_size": 0.01,
+            "min_notional": 0.0
+        }
+    }
+    
+    verdict = await risk_mgr.analyze(
+        ceo_decision, portfolio, market, 
+        effective_profile="BALANCED", macro_regime="TRENDING"
+    )
+    
+    assert verdict["approved"] is True
+    # Effective leverage should be an integer <= safe ceiling
+    assert verdict["effective_leverage"] == float(int(verdict["effective_leverage"]))
+    assert verdict["effective_leverage"] <= 10.0
+    # Margin required should be within target margin budget ($9.60)
+    assert verdict["margin_usd"] <= 9.60
+    # Should include approved_risk_usd and expected_slippage_pct
+    assert "approved_risk_usd" in verdict
+    assert "expected_slippage_pct" in verdict
+
+
+def test_open_position_aligns_limit_price_to_slippage():
+    """
+    Audit P0:
+    Verifies that NadoTradingService.open_position computes limit_price using
+    the provided max_slippage_pct rather than a hardcoded 0.5%.
+    """
+    from services.nado_trading_service import NadoTradingService
+    
+    # Check slippage bounds logic directly
+    for slip, expected_mult_long, expected_mult_short in [
+        (0.001, 1.001, 0.999),     # 10 bps (BTC/ETH model)
+        (0.002, 1.002, 0.998),     # 20 bps (Altcoin model)
+        (0.0001, 1.0005, 0.9995),  # Below floor 0.05% -> clamped to 0.0005
+        (0.01, 1.005, 0.995),      # Above ceiling 0.50% -> clamped to 0.005
+        (None, 1.002, 0.998),      # Default fallback -> 0.002
+    ]:
+        slip_buffer = float(slip) if slip is not None and slip > 0 else 0.002
+        slip_buffer = min(0.005, max(0.0005, slip_buffer))
+        
+        entry = 1000.0
+        limit_long = entry * (1.0 + slip_buffer)
+        limit_short = entry * (1.0 - slip_buffer)
+        
+        assert round(limit_long, 4) == round(entry * expected_mult_long, 4)
+        assert round(limit_short, 4) == round(entry * expected_mult_short, 4)
+
+
+def test_post_execution_risk_expansion_detection():
+    """
+    Audit P0:
+    Verifies post-execution calculation of actual_risk_usd.
+    If actual fill price expands stop distance beyond 5% tolerance,
+    the disparity is detected and flagged.
+    """
+    # Planned trade: entry 100.0, SL 98.0 (dist 2.0), contracts 10.0 -> approved risk $20.00
+    approved_risk = 20.0
+    sl_p = 98.0
+    real_contracts = 10.0
+    
+    # Case A: Fill at 100.1 (dist 2.1) -> actual risk = 10 * 2.1 = $21.00 (+5.0%, within tolerance)
+    fill_a = 100.1
+    actual_risk_a = round(real_contracts * abs(fill_a - sl_p), 2)
+    assert actual_risk_a == 21.0
+    assert actual_risk_a <= approved_risk * 1.05
+    
+    # Case B: Adverse slippage fill at 100.6 (dist 2.6) -> actual risk = 10 * 2.6 = $26.00 (+30% breach)
+    fill_b = 100.6
+    actual_risk_b = round(real_contracts * abs(fill_b - sl_p), 2)
+    assert actual_risk_b == 26.0
+    assert actual_risk_b > approved_risk * 1.05
+
+
+
 

@@ -646,7 +646,8 @@ class TradingPipeline:
                             leverage=risk_verdict.get("leverage", 10),
                             original_thesis=final_trade_decision.reasoning_en,
                             contracts=risk_verdict.get("contracts", 0.0),
-                            atr_value=atr_14_val
+                            atr_value=atr_14_val,
+                            max_slippage_pct=risk_verdict.get("expected_slippage_pct")
                         )
                     except Exception as e:
                         self.services.logger.error(f"[Stage 5] Unexpected error placing order on exchange for {symbol}: {e}", exc_info=True)
@@ -671,6 +672,7 @@ class TradingPipeline:
                                     risk_verdict["contracts"] = real_contracts
                                 tp_p = float(risk_verdict.get("take_profit_price") or 0.0)
                                 sl_p = float(risk_verdict.get("stop_loss_price") or 0.0)
+                                approved_risk = float(risk_verdict.get("approved_risk_usd") or risk_verdict.get("risk_amount_usd") or 0.0)
                                 if actual_fill_price > 0:
                                     if tp_p > 0:
                                         risk_verdict["take_profit_pct"] = round(abs(tp_p - actual_fill_price) / actual_fill_price * 100, 2)
@@ -678,6 +680,24 @@ class TradingPipeline:
                                         risk_verdict["stop_loss_pct"] = round(abs(sl_p - actual_fill_price) / actual_fill_price * 100, 2)
                                     if tp_p > 0 and sl_p > 0 and abs(sl_p - actual_fill_price) > 0:
                                         risk_verdict["risk_reward_ratio"] = round(abs(tp_p - actual_fill_price) / abs(sl_p - actual_fill_price), 2)
+                                    
+                                    # Post-Execution Actual Risk Verification
+                                    if sl_p > 0 and real_contracts > 0:
+                                        actual_risk_usd = round(real_contracts * abs(actual_fill_price - sl_p), 2)
+                                        risk_verdict["approved_risk_usd"] = approved_risk
+                                        risk_verdict["actual_risk_usd"] = actual_risk_usd
+                                        if approved_risk > 0 and actual_risk_usd > (approved_risk * 1.05):
+                                            risk_diff_pct = ((actual_risk_usd / approved_risk) - 1.0) * 100
+                                            self.services.logger.warning(
+                                                f"[Stage 5] ⚠️ EXECUTION RISK EXPANSION: Actual dollar risk (${actual_risk_usd:.2f}) "
+                                                f"exceeds approved risk budget (${approved_risk:.2f}) by {risk_diff_pct:.1f}% "
+                                                f"due to fill disparity (fill={actual_fill_price:.4f} vs ref={current_price:.4f})."
+                                            )
+                                        else:
+                                            self.services.logger.info(
+                                                f"[Stage 5] 🛡️ Post-Execution Risk Verified: Actual risk ${actual_risk_usd:.2f} "
+                                                f"within approved budget ${approved_risk:.2f}."
+                                            )
 
                     execution_status = "SUCCESS" if trade_success else "REJECTED_BY_EXCHANGE"
                     execution_result = ExecutionResult(

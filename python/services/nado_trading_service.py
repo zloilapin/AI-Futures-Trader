@@ -341,7 +341,20 @@ class NadoTradingService(BaseTradingService):
             
         return active_list
 
-    async def open_position(self, symbol: str, direction: str, entry_price: float, notional_usd: float, tp_price: float, sl_price: float, leverage: int, original_thesis: str = "", contracts: float = 0.0, atr_value: float = 0.0) -> bool:
+    async def open_position(
+        self, 
+        symbol: str, 
+        direction: str, 
+        entry_price: float, 
+        notional_usd: float, 
+        tp_price: float, 
+        sl_price: float, 
+        leverage: int, 
+        original_thesis: str = "", 
+        contracts: float = 0.0, 
+        atr_value: float = 0.0,
+        max_slippage_pct: Optional[float] = None
+    ) -> bool:
         """Submits an EIP-712 signed order to Nado Gateway."""
         if not self.is_connected:
             logger.error(f"[NadoTradingService] Cannot open {direction} on {symbol} - SDK not connected.")
@@ -391,10 +404,16 @@ class NadoTradingService(BaseTradingService):
             amount_x18 = int(amount_base * 10**18)
             # Explicitly guard against non-directional execution (HOLD, WAIT, etc.)
             dir_clean = str(direction).strip().upper()
+            
+            # Align execution limit price tolerance with risk manager's modelled slippage.
+            # Default to 0.002 (20 bps), strictly bounded between 0.05% and 0.50% (50 bps).
+            slip_buffer = float(max_slippage_pct) if max_slippage_pct is not None and max_slippage_pct > 0 else 0.002
+            slip_buffer = min(0.005, max(0.0005, slip_buffer))
+            
             if dir_clean == "LONG":
-                limit_price = entry_price * 1.005
+                limit_price = entry_price * (1.0 + slip_buffer)
             elif dir_clean == "SHORT":
-                limit_price = entry_price * 0.995
+                limit_price = entry_price * (1.0 - slip_buffer)
                 amount_x18 = -amount_x18
             else:
                 logger.error(f"[NadoTradingService] ❌ Refusing execution: invalid direction '{direction}'. Only LONG or SHORT allowed!")

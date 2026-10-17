@@ -1,5 +1,6 @@
 import os
 import json
+import math
 from typing import Dict, Any, Optional
 
 from agents.base_agent import BaseAgent
@@ -630,7 +631,9 @@ class RiskManager(BaseAgent):
         # ═══ Stage 7: Target Margin & Required Leverage ═══
         target_margin_pct = profile_rules.get("target_margin_pct", 0.10)
         usable_margin = min(available_margin * 0.8, total_balance * max_margin_pct)
-        target_margin_usd = min(total_balance * target_margin_pct, usable_margin) * dd_mult * action_mult
+        # Note: Capital allocation budget. Drawdown and action penalties are already fully
+        # accounted for in dynamic_risk_pct (Stage 5) to avoid double-penalizing position size.
+        target_margin_usd = min(total_balance * target_margin_pct, usable_margin)
         
         if target_margin_usd > 0:
             required_leverage = notional_usd / target_margin_usd
@@ -665,8 +668,16 @@ class RiskManager(BaseAgent):
 
         liq_safe_ceiling = max(1.0, float(int(max_liq_leverage)))
         safe_ceiling_leverage = min(max_leverage, vol_max_leverage, liq_safe_ceiling)
-        final_leverage = min(required_leverage, safe_ceiling_leverage)
-        final_leverage = max(1.0, float(int(final_leverage)))
+        
+        # Determine integer leverage:
+        # If required_leverage is within safe_ceiling_leverage, ceil(required_leverage) ensures
+        # required margin (notional / leverage) <= target_margin_usd without unnecessarily shrinking notional.
+        # If required_leverage exceeds safe ceiling, cap at int(safe_ceiling_leverage).
+        candidate_leverage = math.ceil(required_leverage) if required_leverage > 0 else 1.0
+        if candidate_leverage <= safe_ceiling_leverage:
+            final_leverage = max(1.0, float(candidate_leverage))
+        else:
+            final_leverage = max(1.0, float(int(safe_ceiling_leverage)))
         
         # Enforce Target Margin strictly (Variant A: margin is the anchor)
         max_safe_notional = target_margin_usd * final_leverage
@@ -703,7 +714,13 @@ class RiskManager(BaseAgent):
         )
 
         # ═══ Stage 8: Rounding, Increments & Exchange Sanity ═══
-        size_increment = float(derivatives_data.get("size_increment") or 0.001)
+        size_increment = float(derivatives_data.get("size_increment") or 0.0)
+        if size_increment <= 0:
+            self.logger.warning(
+                f"[{self.name}] ⚠️ Missing or non-positive size_increment in derivatives_data for {symbol}. "
+                f"Defaulting to safe fallback 0.001."
+            )
+            size_increment = 0.001
         if size_increment > 0:
             contracts = (contracts // size_increment) * size_increment
         notional_usd = round(contracts * execution_entry, 2)
@@ -766,6 +783,7 @@ class RiskManager(BaseAgent):
             "trade_action": trade_action,
             "reasoning": final_reasoning,
             "risk_amount_usd": risk_amount_usd,
+            "approved_risk_usd": risk_amount_usd,
             "notional_size_usd": notional_usd,
             "margin_usd": margin_usd,
             "leverage": effective_leverage,
@@ -773,6 +791,7 @@ class RiskManager(BaseAgent):
             "contracts": contracts,
             "margin_pct": margin_pct,
             "entry_price": execution_entry,
+            "expected_slippage_pct": expected_slippage_pct,
             "take_profit_price": tp_price,
             "take_profit_pct": round(abs(tp_price - execution_entry) / execution_entry * 100, 2) if execution_entry > 0 else 0,
             "stop_loss_price": sl_price,
