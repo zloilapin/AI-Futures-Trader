@@ -908,79 +908,338 @@ async def test_strict_metadata_unavailable_veto(risk_mgr, base_portfolio_data):
 
 
 @pytest.mark.asyncio
-async def test_pipeline_risk_breach_triggers_emergency_protection():
+async def test_pipeline_risk_breach_behavioral_close_confirmed():
     """
-    Audit P0 Behavioral:
-    Tests that when an actual fill price causes total_actual_loss_usd to breach
-    the approved risk budget + tolerance in pipeline.py:
-    1. emergency_protect_risk_breach is invoked on the trading service.
-    2. execution_status is set to ABORTED_RISK_BREACH (when closed) or
-       RISK_BREACH_UNRESOLVED (when unconfirmed).
-    3. The trade is marked failed/aborted rather than treated as SUCCESS.
+    Audit P0 Behavioral (Scenario A):
+    Runs a REAL pipeline cycle through TradingPipeline.run_cycle().
+    When an adverse fill on exchange causes actual loss to breach the approved risk budget,
+    the pipeline detects the breach, invokes emergency_protect_risk_breach,
+    marks execution_status as ABORTED_RISK_BREACH, does NOT broadcast a phantom trade card,
+    and sends an alert to the operator.
     """
+    import time
     from core.pipeline import TradingPipeline
-    from core.models import FinalTradeDecision, ExecutionResult
+    from core.models import FinalTradeDecision
     from unittest.mock import MagicMock, AsyncMock
 
     mock_services = MagicMock()
     mock_agents = MagicMock()
 
     pipeline = TradingPipeline(agents=mock_agents, services=mock_services, exchange_name="Nado")
+    pipeline.data_guard.validate = MagicMock(return_value=(True, "OK"))
 
-    # Approved trade: $20 approved risk (10 contracts, entry 100.0, SL 98.0)
-    risk_verdict = {
+    mock_services.fetcher.fetch_all_market_data = AsyncMock(return_value={
+        "price_data": {"current_price": 2000.0, "timestamp": time.time()},
+        "order_book_data": {"best_bid": 1999.0, "best_ask": 2001.0, "spread_pct": 0.1},
+        "indicators": {"atr_14": 20.0, "ema_20": 1980.0},
+        "derivatives_data": {"open_interest": 100.0, "funding_rate": 0.0001, "taker_fee_pct": 0.0005}
+    })
+    mock_agents.regime.analyze = AsyncMock(return_value={"regime": "BULL_TREND", "recommended_profile": "BALANCED"})
+    mock_agents.reflector.get_lessons = MagicMock(return_value=[])
+    mock_agents.universe.analyze = AsyncMock(return_value={"selected_pairs": ["ETH-USD"]})
+    mock_services.fetcher.fetch_active_perps = AsyncMock(return_value=[{"symbol": "ETH-USD", "volumeQuote": 1000}])
+    mock_services.trading_service.get_market_limits = AsyncMock(return_value={"size_increment": 0.001, "price_increment": 0.01})
+    mock_agents.scanner.analyze = AsyncMock(return_value={"proceed": True, "reasoning": "Valid"})
+
+    for agent in [mock_agents.candle, mock_agents.orderbook, mock_agents.oi_funding, mock_agents.news, mock_agents.indicator]:
+        agent.analyze = AsyncMock(return_value={"signal": "BULLISH", "confidence": 85})
+        agent.name = "TestAnalyst"
+
+    mock_agents.bull.analyze = AsyncMock(return_value={"summary": "Bull thesis"})
+    mock_agents.bear.analyze = AsyncMock(return_value={"summary": "Bear thesis"})
+    mock_agents.ceo.analyze = AsyncMock(return_value={
+        "decision": "LONG",
+        "conviction": 85,
+        "directional_confidence": 85,
+        "entry_quality": 85,
+        "trade_action": "ENTER",
+        "reasoning_en": "Strong setup"
+    })
+    mock_agents.memory.get_recent_context = MagicMock(return_value=[])
+
+    # Approved risk is $50.00 (entry 2000.0, SL 1950.0 -> dist 50.0, 1.0 contract)
+    mock_agents.risk.analyze = AsyncMock(return_value={
         "approved": True,
-        "entry_price": 100.0,
-        "risk_amount_usd": 20.0,
-        "approved_risk_usd": 20.0,
-        "notional_size_usd": 1000.0,
-        "contracts": 10.0,
-        "take_profit_price": 105.0,
-        "stop_loss_price": 98.0,
+        "entry_price": 2000.0,
+        "notional_size_usd": 2000.0,
+        "position_size_pct": 20.0,
+        "take_profit_price": 2100.0,
+        "take_profit_pct": 5.0,
+        "stop_loss_price": 1950.0,
+        "stop_loss_pct": 2.5,
         "leverage": 10,
-        "expected_slippage_pct": 0.001
-    }
+        "contracts": 1.0,
+        "risk_amount_usd": 50.0,
+        "approved_risk_usd": 50.0,
+        "expected_slippage_pct": 0.001,
+        "reasoning": "Risk approved"
+    })
 
-    # Simulate an adverse fill on exchange: fill at 100.6 (dist to SL = 2.6 -> price loss $26.00 + fee ~$1.00 = $27.00)
-    # Approved risk was $20.00. Max tolerated is 20.0 * 1.10 + 0.05 = $22.05.
-    mock_services.trading_service.open_position = AsyncMock(return_value=True)
-    mock_services.trading_service.active_positions = {
-        "BTC-USD": {
-            "entry_price": 100.6,
-            "contracts": 10.0,
-            "notional_usd": 1006.0
+    # Adverse fill: filled at 2030.0! (Dist to SL is 2030 - 1950 = $80.00, fee ~$4 -> total loss ~$84 > max tolerated $55.05)
+    async def simulate_fill_with_slippage(**kwargs):
+        mock_services.trading_service.active_positions["ETH-USD"] = {
+            "symbol": "ETH-USD",
+            "direction": "LONG",
+            "entry_price": 2030.0,
+            "contracts": 1.0,
+            "notional_usd": 2030.0,
+            "protection_state": "SUBMITTING_PROTECTION"
         }
+        return True
+
+    mock_services.trading_service.active_positions = {}
+    mock_services.trading_service.cooldown_until = 0.0
+    mock_services.trading_service.get_portfolio_summary = AsyncMock(return_value={"total_usd": 100.0, "available_margin": 100.0, "free_margin": 100.0})
+    mock_services.trading_service.get_active_positions = AsyncMock(return_value=[])
+    mock_services.trading_service.sync_with_exchange = AsyncMock()
+    mock_services.trading_service.check_and_update_positions = AsyncMock(return_value=[])
+    mock_services.trading_service.open_position = AsyncMock(side_effect=simulate_fill_with_slippage)
+    mock_services.trading_service.emergency_protect_risk_breach = AsyncMock(return_value=(True, -2.50))
+    mock_services.trading_service.last_execution_status = None
+    mock_services.tg_sender.send_message = AsyncMock()
+    mock_services.tg_sender.broadcast_to_channel = AsyncMock()
+
+    # EXECUTE THE REAL PIPELINE CYCLE
+    await pipeline.run_cycle(cycle_number=1, force_scan=False)
+
+    # 1. Emergency close must have been invoked through pipeline
+    assert mock_services.trading_service.emergency_protect_risk_breach.called is True
+    call_args = mock_services.trading_service.emergency_protect_risk_breach.call_args[1]
+    assert call_args["symbol"] == "ETH-USD"
+    assert call_args["approved_risk"] == 50.0
+    assert call_args["actual_risk"] > 55.05
+
+    # 2. Phantom trade card must NEVER be broadcast to channel
+    assert not mock_services.tg_sender.broadcast_to_channel.called
+
+    # 3. Operator received alert about ABORTED RISK BREACH
+    assert mock_services.tg_sender.send_message.called
+    sent_text = mock_services.tg_sender.send_message.call_args[0][0]
+    assert "ABORTED RISK BREACH" in sent_text
+
+
+@pytest.mark.asyncio
+async def test_pipeline_risk_breach_behavioral_close_unconfirmed_blocks_subsequent_trades(risk_mgr, base_portfolio_data):
+    """
+    Audit P0 Behavioral (Scenario B):
+    When emergency close fails or is unconfirmed:
+    1. Pipeline sets execution_status to RISK_BREACH_UNRESOLVED.
+    2. Critical emergency alert is sent to operator.
+    3. The position remains retained in active_positions with protection_state = 'RISK_BREACH_UNRESOLVED'.
+    4. Real RiskManager.analyze() in subsequent cycles strictly VETOES any new trade attempts.
+    """
+    import time
+    from core.pipeline import TradingPipeline
+    from unittest.mock import MagicMock, AsyncMock
+
+    mock_services = MagicMock()
+    mock_agents = MagicMock()
+
+    pipeline = TradingPipeline(agents=mock_agents, services=mock_services, exchange_name="Nado")
+    pipeline.data_guard.validate = MagicMock(return_value=(True, "OK"))
+
+    mock_services.fetcher.fetch_all_market_data = AsyncMock(return_value={
+        "price_data": {"current_price": 2000.0, "timestamp": time.time()},
+        "indicators": {"atr_14": 20.0, "ema_20": 1980.0},
+        "derivatives_data": {"open_interest": 100.0, "funding_rate": 0.0001, "taker_fee_pct": 0.0005}
+    })
+    mock_agents.regime.analyze = AsyncMock(return_value={"regime": "BULL_TREND", "recommended_profile": "BALANCED"})
+    mock_agents.reflector.get_lessons = MagicMock(return_value=[])
+    mock_agents.universe.analyze = AsyncMock(return_value={"selected_pairs": ["ETH-USD"]})
+    mock_services.fetcher.fetch_active_perps = AsyncMock(return_value=[{"symbol": "ETH-USD", "volumeQuote": 1000}])
+    mock_services.trading_service.get_market_limits = AsyncMock(return_value={"size_increment": 0.001, "price_increment": 0.01})
+    mock_agents.scanner.analyze = AsyncMock(return_value={"proceed": True, "reasoning": "Valid"})
+
+    for agent in [mock_agents.candle, mock_agents.orderbook, mock_agents.oi_funding, mock_agents.news, mock_agents.indicator]:
+        agent.analyze = AsyncMock(return_value={"signal": "BULLISH", "confidence": 85})
+        agent.name = "TestAnalyst"
+
+    mock_agents.bull.analyze = AsyncMock(return_value={"summary": "Bull"})
+    mock_agents.bear.analyze = AsyncMock(return_value={"summary": "Bear"})
+    mock_agents.ceo.analyze = AsyncMock(return_value={
+        "decision": "LONG", "conviction": 85, "directional_confidence": 85, "entry_quality": 85,
+        "trade_action": "ENTER", "reasoning_en": "Setup"
+    })
+    mock_agents.memory.get_recent_context = MagicMock(return_value=[])
+
+    mock_agents.risk.analyze = AsyncMock(return_value={
+        "approved": True, "entry_price": 2000.0, "notional_size_usd": 2000.0, "position_size_pct": 20.0,
+        "take_profit_price": 2100.0, "stop_loss_price": 1950.0, "leverage": 10, "contracts": 1.0,
+        "risk_amount_usd": 50.0, "approved_risk_usd": 50.0, "reasoning": "Approved"
+    })
+
+    # Adverse fill simulated on open_position call
+    async def simulate_fill_with_slippage_unconfirmed(**kwargs):
+        mock_services.trading_service.active_positions["ETH-USD"] = {
+            "symbol": "ETH-USD", "direction": "LONG", "entry_price": 2040.0,
+            "contracts": 1.0, "notional_usd": 2040.0, "protection_state": "SUBMITTING_PROTECTION"
+        }
+        return True
+
+    mock_services.trading_service.active_positions = {}
+    mock_services.trading_service.cooldown_until = 0.0
+    mock_services.trading_service.get_portfolio_summary = AsyncMock(return_value={"total_usd": 100.0, "available_margin": 100.0, "free_margin": 100.0})
+    mock_services.trading_service.get_active_positions = AsyncMock(return_value=[])
+    mock_services.trading_service.sync_with_exchange = AsyncMock()
+    mock_services.trading_service.check_and_update_positions = AsyncMock(return_value=[])
+    mock_services.trading_service.open_position = AsyncMock(side_effect=simulate_fill_with_slippage_unconfirmed)
+    # Emergency close FAILS / unconfirmed on exchange!
+    mock_services.trading_service.emergency_protect_risk_breach = AsyncMock(return_value=(False, 0.0))
+    mock_services.trading_service.last_execution_status = None
+    mock_services.tg_sender.send_message = AsyncMock()
+    mock_services.tg_sender.broadcast_to_channel = AsyncMock()
+
+    await pipeline.run_cycle(cycle_number=1, force_scan=False)
+
+    # 1. No channel broadcast
+    assert not mock_services.tg_sender.broadcast_to_channel.called
+    # 2. Critical notification sent
+    assert mock_services.tg_sender.send_message.called
+    sent_text = mock_services.tg_sender.send_message.call_args[0][0]
+    assert "RISK BREACH UNRESOLVED" in sent_text
+    assert "Все новые сделки заблокированы" in sent_text
+
+    # 3. Simulate subsequent trade attempt evaluated by the real RiskManager
+    portfolio_with_unresolved = dict(base_portfolio_data, total_usd=100.0, available_margin=100.0)
+    portfolio_with_unresolved["active_positions"] = {
+        "ETH-USD": {"symbol": "ETH-USD", "protection_state": "RISK_BREACH_UNRESOLVED"}
     }
-    # Mock emergency close succeeding
-    mock_services.trading_service.emergency_protect_risk_breach = AsyncMock(return_value=(True, -0.50))
+    next_trade = {"symbol": "SOL-USD", "decision": "LONG", "conviction": 85, "trade_action": "ENTER"}
+    market_data = {
+        "price_data": {"current_price": 100.0},
+        "indicators": {"atr_14": 5.0},
+        "derivatives_data": {"size_increment": 0.01, "price_increment": 0.01, "strict_metadata": True}
+    }
 
-    # Evaluate the pipeline post-execution block
-    sl_p = float(risk_verdict["stop_loss_price"])
-    real_contracts = float(mock_services.trading_service.active_positions["BTC-USD"]["contracts"])
-    actual_fill_price = float(mock_services.trading_service.active_positions["BTC-USD"]["entry_price"])
-    approved_risk = float(risk_verdict["approved_risk_usd"])
+    subsequent_verdict = await risk_mgr.analyze(next_trade, portfolio_with_unresolved, market_data)
+    # MUST BE VETOED BY GATE 2.0
+    assert subsequent_verdict["approved"] is False
+    assert subsequent_verdict["veto_category"] == "RISK_BREACH_UNRESOLVED"
+    assert "Critical risk incident unresolved" in subsequent_verdict["reasoning"]
 
-    price_risk = real_contracts * abs(actual_fill_price - sl_p)
-    fee_loss = real_contracts * (actual_fill_price + sl_p) * 0.0005
-    total_actual_loss_usd = round(price_risk + fee_loss, 2)
-    max_tolerated_risk = (approved_risk * 1.10) + 0.05
 
-    assert total_actual_loss_usd > max_tolerated_risk  # $26.99 > $22.05
+@pytest.mark.asyncio
+async def test_nado_open_position_protection_states_honest_classification():
+    """
+    Audit P0-1:
+    Verifies that open_position assigns honest protection states:
+    1. NATIVE_SL_CONFIRMED when exchange native SL is placed.
+    2. SOFTWARE_SL_CONFIRMED when native SL fails or is skipped (e.g. < $100 limit) but sl_price > 0.
+    3. PROTECTION_DEGRADED when sl_price <= 0.
+    """
+    from services.nado_trading_service import NadoTradingService
+    from unittest.mock import MagicMock, AsyncMock, patch
 
-    # Trigger emergency close
-    close_success, pnl = await mock_services.trading_service.emergency_protect_risk_breach(
-        symbol="BTC-USD",
-        approved_risk=approved_risk,
-        actual_risk=total_actual_loss_usd
-    )
+    service = NadoTradingService()
+    service.active_positions.clear()
+    service.is_connected = True
+    service.default_subaccount_id = "0xsubaccount"
+    service.product_map = {"BTC": 2, "BTC-USD": 2}
+    service._market_cache = {2: MagicMock()}
+    service._get_market_parameters = MagicMock(return_value={
+        "size_increment_x18": int(0.001 * 1e18),
+        "price_increment_x18": int(1.0 * 1e18),
+        "min_size": 0.001
+    })
 
-    assert close_success is True
-    assert pnl == -0.50
-    mock_services.trading_service.emergency_protect_risk_breach.assert_awaited_once_with(
-        symbol="BTC-USD",
-        approved_risk=approved_risk,
-        actual_risk=total_actual_loss_usd
-    )
+    # Case 1: Native SL confirmed
+    mock_client = MagicMock()
+    mock_order_res = MagicMock()
+    mock_order_res.data.digest = "0xopen_digest"
+    mock_client.market.place_order.return_value = mock_order_res
+
+    mock_fill_order = MagicMock()
+    mock_fill_order.base_filled = str(int(0.1 * 1e18))
+    mock_fill_order.quote_filled = str(int(6000.0 * 1e18))
+    mock_client.market.get_historical_orders_by_digest.return_value = MagicMock(orders=[mock_fill_order])
+
+    mock_sl_res = MagicMock()
+    mock_sl_res.data.digest = "0xsl_digest"
+    mock_tp_res = MagicMock()
+    mock_tp_res.data.digest = "0xtp_digest"
+    mock_client.market.place_price_trigger_order.side_effect = [mock_sl_res, mock_tp_res]
+    service.client = mock_client
+
+    with patch.object(service, "_save_positions"):
+        ok = await service.open_position("BTC-USD", "LONG", 60000.0, 6000.0, 62000.0, 59000.0, 10, contracts=0.1)
+        assert ok is True
+        assert service.active_positions["BTC-USD"]["protection_state"] == "NATIVE_SL_CONFIRMED"
+        assert service.active_positions["BTC-USD"]["native_sl_placed"] is True
+        assert service.active_positions["BTC-USD"]["native_tp_placed"] is True
+        assert service.last_execution_status == "FILLED_AND_PROTECTED"
+
+    # Case 2: Native SL fails (e.g. exchange size limitation) -> SOFTWARE_SL_CONFIRMED
+    service.active_positions.clear()
+    mock_client.market.place_price_trigger_order.side_effect = [Exception("2094 too small"), mock_tp_res]
+    with patch.object(service, "_save_positions"):
+        ok = await service.open_position("BTC-USD", "LONG", 60000.0, 6000.0, 62000.0, 59000.0, 10, contracts=0.1)
+        assert ok is True
+        assert service.active_positions["BTC-USD"]["protection_state"] == "SOFTWARE_SL_CONFIRMED"
+        assert service.active_positions["BTC-USD"]["native_sl_placed"] is False
+        assert service.active_positions["BTC-USD"]["native_tp_placed"] is True
+        assert service.last_execution_status == "FILLED_AND_PROTECTED"
+
+    # Case 3: No SL provided (sl_price = 0) -> PROTECTION_DEGRADED
+    service.active_positions.clear()
+    mock_client.market.place_price_trigger_order.side_effect = [mock_tp_res]
+    with patch.object(service, "_save_positions"):
+        ok = await service.open_position("BTC-USD", "LONG", 60000.0, 6000.0, 62000.0, 0.0, 10, contracts=0.1)
+        assert ok is True
+        assert service.active_positions["BTC-USD"]["protection_state"] == "PROTECTION_DEGRADED"
+        assert service.last_execution_status == "PROTECTION_DEGRADED"
+
+
+@pytest.mark.asyncio
+async def test_emergency_protect_risk_breach_distinguishes_closed_still_open_and_unknown():
+    """
+    Audit P1-3:
+    Verifies that emergency_protect_risk_breach does not falsely claim CLOSED
+    if force_close fails and indexer returns empty (indexer lag -> UNKNOWN -> retains RISK_BREACH_UNRESOLVED).
+    Only when a closing fill is confirmed does it transition to closed.
+    """
+    import time
+    from services.nado_trading_service import NadoTradingService
+    from unittest.mock import MagicMock, AsyncMock, patch
+
+    service = NadoTradingService()
+    service.is_connected = True
+    service.default_subaccount_id = "0xsub"
+    service.product_map = {"ETH": 4, "ETH-USD": 4}
+    service.client = MagicMock()
+
+    service.active_positions["ETH-USD"] = {
+        "symbol": "ETH-USD",
+        "direction": "LONG",
+        "entry_price": 2000.0,
+        "contracts": 1.0,
+        "protection_state": "SUBMITTING_PROTECTION"
+    }
+
+    # Scenario 1: force_close fails, active_on_chain is empty (indexer lag), NO closing fill -> UNKNOWN
+    service.force_close_position = AsyncMock(return_value=(False, 0.0))
+    service.get_active_positions = AsyncMock(return_value=[])
+    # Historical orders shows NO recent fill
+    service.client.market.get_subaccount_historical_orders.return_value = MagicMock(orders=[])
+
+    with patch.object(service, "_save_positions"):
+        success, pnl = await service.emergency_protect_risk_breach("ETH-USD", 10.0, 15.0)
+        assert success is False
+        # Must NOT be deleted! Retained as RISK_BREACH_UNRESOLVED
+        assert "ETH-USD" in service.active_positions
+        assert service.active_positions["ETH-USD"]["protection_state"] == "RISK_BREACH_UNRESOLVED"
+
+    # Scenario 2: Historical orders CONFIRMS closing fill -> CLOSED_CONFIRMED
+    fill_order = MagicMock()
+    fill_order.base_filled = -1.0 * 1e18
+    fill_order.timestamp = int(time.time() * 1000)
+    service.client.market.get_subaccount_historical_orders.return_value = MagicMock(orders=[fill_order])
+
+    with patch.object(service, "_save_positions"):
+        success, pnl = await service.emergency_protect_risk_breach("ETH-USD", 10.0, 15.0)
+        assert success is True
+        # Cleaned up on positive proof
+        assert "ETH-USD" not in service.active_positions
+
 
 
 

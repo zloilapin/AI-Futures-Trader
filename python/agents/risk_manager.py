@@ -329,10 +329,21 @@ class RiskManager(BaseAgent):
             self.logger.warning(f"[{self.name}] 🚨 MAX_DAILY_DRAWDOWN VETO: {msg}")
             return self._build_veto_result("MAX_DAILY_DRAWDOWN", msg, trade_action)
 
-        # Gate 2.2: Maximum Concurrent Positions Veto Gate
+        # Gate 2.0: Unresolved Risk Breach Incident Veto
+        # If any active position is marked RISK_BREACH_UNRESOLVED, freeze all new entries immediately!
         active_positions = portfolio_data.get("active_positions", {})
         if not isinstance(active_positions, (dict, list)):
             active_positions = {}
+        pos_items = active_positions.values() if isinstance(active_positions, dict) else active_positions
+        for pos in pos_items:
+            if isinstance(pos, dict) and pos.get("protection_state") == "RISK_BREACH_UNRESOLVED":
+                sym_breach = pos.get("symbol", "UNKNOWN")
+                msg = f"Critical risk incident unresolved on {sym_breach}! New trades strictly blocked until capital is safe."
+                log_fn = getattr(self.logger, "critical", self.logger.error)
+                log_fn(f"[{self.name}] 🚨 RISK_BREACH_UNRESOLVED VETO: {msg}")
+                return self._build_veto_result("RISK_BREACH_UNRESOLVED", msg, trade_action)
+
+        # Gate 2.2: Maximum Concurrent Positions Veto Gate
         max_positions = profile_rules.get("max_concurrent_positions", getattr(config, "MAX_CONCURRENT_POSITIONS", 3))
         num_active = len(active_positions)
         if num_active >= max_positions:
@@ -715,6 +726,7 @@ class RiskManager(BaseAgent):
 
         # ═══ Stage 8: Rounding, Increments & Exchange Sanity ═══
         size_increment = float(derivatives_data.get("size_increment") or 0.0)
+        price_increment = float(derivatives_data.get("price_increment") or 0.0)
         is_strict_metadata = bool(derivatives_data.get("strict_metadata", False))
         if size_increment <= 0:
             if is_strict_metadata:
@@ -726,6 +738,10 @@ class RiskManager(BaseAgent):
                 f"Defaulting to safe fallback 0.001."
             )
             size_increment = 0.001
+        if is_strict_metadata and price_increment < 0:
+            msg = f"Market metadata incomplete: negative price_increment ({price_increment}) for {symbol}. Refusing trade."
+            self.logger.warning(f"[{self.name}] 🚫 MARKET_METADATA_UNAVAILABLE VETO: {msg}")
+            return self._build_veto_result("MARKET_METADATA_UNAVAILABLE", msg, trade_action)
         if size_increment > 0:
             contracts = (contracts // size_increment) * size_increment
         notional_usd = round(contracts * execution_entry, 2)
@@ -781,6 +797,18 @@ class RiskManager(BaseAgent):
             self.logger.warning(f"[{self.name}] ❌ RISK VETO: {msg}")
             return self._build_veto_result("EXCESSIVE_RISK", msg, trade_action)
 
+        # Unified Loss Estimation
+        from core.risk_calculator import estimate_total_loss
+        taker_fee_pct = float(derivatives_data.get("taker_fee_pct") or 0.0005)
+        loss_calc = estimate_total_loss(
+            contracts=contracts,
+            fill_price=execution_entry,
+            sl_price=sl_price,
+            taker_fee_pct=taker_fee_pct,
+            slippage_stress_pct=expected_slippage_pct,
+            approved_risk=risk_amount_usd
+        )
+
         final_reasoning = f"Math calculated based on {profile_name} profile. SL={sl_price}, TP={tp_price}, RR={rr_ratio}"
         return {
             "approved": True,
@@ -789,6 +817,10 @@ class RiskManager(BaseAgent):
             "reasoning": final_reasoning,
             "risk_amount_usd": risk_amount_usd,
             "approved_risk_usd": risk_amount_usd,
+            "expected_fee_usd": loss_calc.fee_loss_usd,
+            "total_expected_loss_usd": loss_calc.total_expected_loss_usd,
+            "total_stress_loss_usd": loss_calc.total_stress_loss_usd,
+            "max_tolerated_risk_usd": loss_calc.max_tolerated_risk_usd,
             "notional_size_usd": notional_usd,
             "margin_usd": margin_usd,
             "leverage": effective_leverage,

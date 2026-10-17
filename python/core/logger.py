@@ -75,6 +75,12 @@ class TradeLogger:
         """
         self.log_decision("System_Error", message, level="error", **kwargs)
 
+    def critical(self, message: str, **kwargs):
+        """
+        Critical error logging method for urgent safety and risk incidents.
+        """
+        self.log_decision("System_Critical", message, level="critical", **kwargs)
+
     def warning(self, message: str, **kwargs):
         """
         Standard warning logging method.

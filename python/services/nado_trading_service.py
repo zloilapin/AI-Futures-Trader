@@ -57,6 +57,8 @@ class NadoTradingService(BaseTradingService):
         self.cooldown_until = 0.0
         self._last_cooldown_processed_len = 0
         self._last_close_info: Dict[str, Any] = {}
+        self.last_execution_status: str = "PENDING"
+        self.last_execution_details: Dict[str, Any] = {}
         self._load_state()
         
         # NOTE: self.initialize(nado_client) MUST be awaited explicitly after instantiation.
@@ -353,11 +355,16 @@ class NadoTradingService(BaseTradingService):
         original_thesis: str = "", 
         contracts: float = 0.0, 
         atr_value: float = 0.0,
-        max_slippage_pct: Optional[float] = None
+        max_slippage_pct: Optional[float] = None,
+        approved_risk_usd: float = 0.0,
+        taker_fee_pct: float = 0.0005
     ) -> bool:
         """Submits an EIP-712 signed order to Nado Gateway."""
+        self.last_execution_status = "PENDING"
+        self.last_execution_details = {"symbol": symbol, "direction": direction}
         if not self.is_connected:
             logger.error(f"[NadoTradingService] Cannot open {direction} on {symbol} - SDK not connected.")
+            self.last_execution_status = "SDK_DISCONNECTED"
             return False
 
         clean_sym = symbol.replace('/', '-').strip().upper()
@@ -370,6 +377,7 @@ class NadoTradingService(BaseTradingService):
                 f"[NadoTradingService] ⚠️ Позиция по {symbol} ({canonical_sym}) уже открыта в active_positions! "
                 f"Блокировка дублирующего ордера для защиты капитала."
             )
+            self.last_execution_status = "DUPLICATE_POSITION_BLOCKED"
             return False
             
         logger.info(f"[NadoTradingService] 🚀 Routing {direction} {symbol} to Nado DEX...")
@@ -572,6 +580,7 @@ class NadoTradingService(BaseTradingService):
                     
                 if not filled:
                     logger.error(f"[NadoTradingService] ❌ Order {digest} was accepted but NOT filled within 10s. Cancelling to prevent race condition...")
+                    cancel_confirmed = False
                     try:
                         from nado_protocol.engine_client.types.execute import CancelOrdersParams
                         cancel_params = CancelOrdersParams(
@@ -581,9 +590,34 @@ class NadoTradingService(BaseTradingService):
                         )
                         await asyncio.to_thread(self.client.market.cancel_orders, cancel_params)
                         logger.info(f"[NadoTradingService] 🗑️ Order {digest} cancelled successfully.")
+                        cancel_confirmed = True
                     except Exception as cancel_e:
                         logger.error(f"[NadoTradingService] ❌ Failed to cancel timed out order {digest}: {cancel_e}")
+                        cancel_confirmed = False
                     
+                    if not cancel_confirmed:
+                        logger.critical(
+                            f"[NadoTradingService] 🚨 CRITICAL: Cancellation unconfirmed for order {digest} ({symbol}). "
+                            f"Enqueuing for PENDING_ORDER_RECONCILIATION."
+                        )
+                        self.pending_reconciliations[symbol] = {
+                            "symbol": symbol,
+                            "base_symbol": base_symbol,
+                            "product_id": product_id,
+                            "subaccount": self.default_subaccount_id,
+                            "direction": direction.upper(),
+                            "entry_price": actual_entry_price,
+                            "contracts": amount_base,
+                            "size_usd": notional_usd,
+                            "order_digest": digest,
+                            "open_time": time.time(),
+                            "detected_at": time.time(),
+                            "status": "PENDING_ORDER_RECONCILIATION"
+                        }
+                        self._save_state()
+                        self.last_execution_status = "PENDING_ORDER_RECONCILIATION"
+                    else:
+                        self.last_execution_status = "REJECTED_BY_EXCHANGE"
                     return False
             
             # --- Defensive Step: Immediate local registration before protection checks ---
@@ -623,26 +657,34 @@ class NadoTradingService(BaseTradingService):
                 self.active_positions[canonical_sym] = self.active_positions[symbol]
             self._save_positions()
 
-            # --- Actual Risk vs Approved Risk Check (CRITICAL-13 / Unified P0) ---
-            expected_risk_usd = actual_base_amount * abs(entry_price - sl_price)
-            # Include estimated round-trip taker trading fees in total potential loss assessment
-            fee_loss_est = actual_base_amount * (actual_entry_price + sl_price) * 0.0005
-            total_actual_loss = (actual_base_amount * abs(actual_entry_price - sl_price)) + fee_loss_est
-            
-            # Unified 10% risk expansion tolerance + $0.05 dust floor (eliminates excessive $1.00 floor)
-            allowed_risk_threshold = (expected_risk_usd * 1.10) + 0.05
-            if sl_price > 0 and expected_risk_usd > 0 and total_actual_loss > allowed_risk_threshold:
+            # --- Unified Actual Risk vs Approved Risk Check (P0 / P1-1 / P1-2) ---
+            from core.risk_calculator import estimate_total_loss
+            approved_budget = float(approved_risk_usd) if approved_risk_usd and approved_risk_usd > 0 else (actual_base_amount * abs(entry_price - sl_price))
+            loss_calc = estimate_total_loss(
+                contracts=actual_base_amount,
+                fill_price=actual_entry_price,
+                sl_price=sl_price,
+                taker_fee_pct=taker_fee_pct,
+                approved_risk=approved_budget
+            )
+            total_actual_loss = loss_calc.total_expected_loss_usd
+            allowed_risk_threshold = loss_calc.max_tolerated_risk_usd
+
+            if sl_price > 0 and approved_budget > 0 and total_actual_loss > allowed_risk_threshold:
+                risk_diff_pct = ((total_actual_loss / approved_budget) - 1.0) * 100
                 logger.error(
                     f"[NadoTradingService] ❌ FATAL SLIPPAGE / RISK BREACH: Total potential loss (${total_actual_loss:.2f}) "
-                    f"exceeds approved risk threshold (${allowed_risk_threshold:.2f}, expected=${expected_risk_usd:.2f}) "
+                    f"exceeds approved risk threshold (${allowed_risk_threshold:.2f}, approved=${approved_budget:.2f}, "
+                    f"fee=${loss_calc.fee_loss_usd:.2f}) by {risk_diff_pct:.1f}% "
                     f"due to adverse execution price ({actual_entry_price:.4f} vs ref {entry_price:.4f}). "
                     f"Emergency closing position."
                 )
                 close_ok, _ = await self.emergency_protect_risk_breach(
                     symbol=symbol,
-                    approved_risk=expected_risk_usd,
+                    approved_risk=approved_budget,
                     actual_risk=total_actual_loss
                 )
+                self.last_execution_status = "ABORTED_RISK_BREACH" if close_ok else "RISK_BREACH_UNRESOLVED"
                 return False
                 
             # --- Partial Fill Guard (CRITICAL-4) ---
@@ -651,9 +693,10 @@ class NadoTradingService(BaseTradingService):
                 logger.error(f"[NadoTradingService] ❌ PARTIAL FILL {fill_ratio*100:.1f}%. Closing immediately to prevent slivers.")
                 close_ok, _ = await self.emergency_protect_risk_breach(
                     symbol=symbol,
-                    approved_risk=expected_risk_usd,
+                    approved_risk=approved_budget,
                     actual_risk=total_actual_loss
                 )
+                self.last_execution_status = "ABORTED_PARTIAL_FILL" if close_ok else "RISK_BREACH_UNRESOLVED"
                 return False
             
             # --- Native Trigger Orders (TP/SL) ---
@@ -746,6 +789,28 @@ class NadoTradingService(BaseTradingService):
             # Recalculate notional_usd to reflect actual fill amount
             notional_usd = abs(actual_filled_x18 / 1e18) * actual_entry_price
             
+            # Determine honest protection state (P0-1)
+            has_native_sl = bool(sl_digest)
+            has_native_tp = bool(tp_digest)
+            
+            if has_native_sl:
+                protection_state = "NATIVE_SL_CONFIRMED"
+                prot_mode = "EXCHANGE_PROTECTED"
+            elif sl_price > 0:
+                protection_state = "SOFTWARE_SL_CONFIRMED"
+                prot_mode = "SOFTWARE_ONLY"
+                logger.info(
+                    f"[NadoTradingService] 🛡️ Software Stop-Loss active at {sl_price:.4f} "
+                    f"(native SL order unavailable or below exchange minimum)."
+                )
+            else:
+                protection_state = "PROTECTION_DEGRADED"
+                prot_mode = "UNPROTECTED"
+                logger.critical(
+                    f"[NadoTradingService] 🚨 CRITICAL: Position {symbol} opened with NO VALID STOP-LOSS! "
+                    f"Protection degraded."
+                )
+
             # Finalize position state with confirmed native triggers
             self.active_positions[symbol].update({
                 "direction": direction.upper(),
@@ -756,12 +821,15 @@ class NadoTradingService(BaseTradingService):
                 "tp_price": tp_price,
                 "sl_price": sl_price,
                 "leverage": leverage,
-                "protection_state": "PROTECTED",
+                "protection_state": protection_state,
+                "sl_protection_mode": prot_mode,
                 "sl_digest": sl_digest,
                 "tp_digest": tp_digest,
                 "sl_type": sl_type,
                 "tp_type": tp_type if tp_price > 0 else None,
-                "native_triggers_placed": bool(sl_digest or tp_digest)
+                "native_sl_placed": has_native_sl,
+                "native_tp_placed": has_native_tp,
+                "native_triggers_placed": bool(has_native_sl and has_native_tp)
             })
             if canonical_sym != symbol and canonical_sym in self.active_positions:
                 self.active_positions[canonical_sym] = self.active_positions[symbol]
@@ -772,6 +840,7 @@ class NadoTradingService(BaseTradingService):
                     logger.warning(f"[NadoTradingService] ⚠️ Could not initialize partial TP plan for {symbol}: {plan_err}")
             self._save_positions()
                 
+            self.last_execution_status = "FILLED_AND_PROTECTED" if protection_state in ("NATIVE_SL_CONFIRMED", "SOFTWARE_SL_CONFIRMED") else "PROTECTION_DEGRADED"
             return True
         except Exception as e:
             logger.error(f"[NadoTradingService] ⚠️ Failed to place order: {e}")
@@ -1677,32 +1746,80 @@ class NadoTradingService(BaseTradingService):
             
         if success:
             logger.info(f"[NadoTradingService] ✅ Emergency risk breach close confirmed for {symbol}. Realized PnL: ${pnl:.2f}")
-            return True, pnl
-        else:
-            # Independent on-chain check
-            try:
-                active_on_chain = await self.get_active_positions(bypass_cache=True)
-                is_still_open = any(p["symbol"].split('-')[0].upper() == base_sym for p in active_on_chain)
-                if not is_still_open:
-                    logger.info(f"[NadoTradingService] ℹ️ Independent check confirmed {symbol} is no longer open on exchange.")
-                    for k in [symbol, canonical_sym, base_sym]:
-                        if k in self.active_positions:
-                            del self.active_positions[k]
-                    self._save_positions()
-                    return True, pnl
-            except Exception as check_e:
-                logger.error(f"[NadoTradingService] ⚠️ Verification of emergency close failed: {check_e}")
-
-            # Position is unconfirmed / still open!
             for k in [symbol, canonical_sym, base_sym]:
                 if k in self.active_positions:
-                    self.active_positions[k]["protection_state"] = "RISK_BREACH_UNRESOLVED"
+                    del self.active_positions[k]
             self._save_positions()
-            logger.critical(
-                f"[NadoTradingService] 🚨 CRITICAL: Position {symbol} could not be confirmed closed! "
-                f"Retaining in active_positions as RISK_BREACH_UNRESOLVED for Sentinel reconciliation."
-            )
-            return False, 0.0
+            return True, pnl
+        
+        # If force_close_position failed or was unconfirmed, verify independently.
+        # CRITICAL P1-3: Do NOT assume an empty get_active_positions() right after entry means closed!
+        # Indexer lag could cause an empty response while the position remains open on the engine.
+        closure_status = "UNKNOWN"
+        try:
+            active_on_chain = await self.get_active_positions(bypass_cache=True)
+            product_id = self.product_map.get(base_sym)
+            matched_pos = None
+            if active_on_chain:
+                for p in active_on_chain:
+                    p_sym = p.get("symbol", "").replace('/', '-').strip().upper()
+                    if p.get("product_id") == product_id or p_sym == canonical_sym:
+                        matched_pos = p
+                        break
+            
+            if matched_pos is not None and abs(float(matched_pos.get("contracts", 0.0) or 0.0)) > 0:
+                closure_status = "STILL_OPEN"
+                logger.critical(
+                    f"[NadoTradingService] 🚨 POSITIVELY DETECTED OPEN on exchange: {canonical_sym} "
+                    f"({matched_pos.get('contracts')} contracts). Emergency close FAILED!"
+                )
+            else:
+                # Check recent historical orders for a confirmed closing fill
+                has_closing_fill = False
+                try:
+                    if hasattr(self.client, "market") and hasattr(self.client.market, "get_subaccount_historical_orders"):
+                        orders_resp = await asyncio.to_thread(
+                            self.client.market.get_subaccount_historical_orders,
+                            subaccount=self.default_subaccount_id,
+                            product_ids=[product_id] if product_id is not None else []
+                        )
+                        recent_orders = getattr(orders_resp, "orders", []) or []
+                        now_ms = time.time() * 1000
+                        for o in recent_orders:
+                            o_ts = float(getattr(o, "timestamp", 0) or 0)
+                            if abs(now_ms - o_ts) < 30000 and abs(int(getattr(o, "base_filled", 0) or 0)) > 0:
+                                has_closing_fill = True
+                                break
+                except Exception as hist_e:
+                    logger.warning(f"[NadoTradingService] ⚠️ Historical order check failed during emergency close verification: {hist_e}")
+                    has_closing_fill = False
+
+                if has_closing_fill:
+                    closure_status = "CLOSED_CONFIRMED"
+                else:
+                    closure_status = "UNKNOWN"
+        except Exception as check_e:
+            logger.error(f"[NadoTradingService] ⚠️ Verification of emergency close failed: {check_e}")
+            closure_status = "UNKNOWN"
+
+        if closure_status == "CLOSED_CONFIRMED":
+            logger.info(f"[NadoTradingService] ℹ️ Independent check confirmed {symbol} closing fill.")
+            for k in [symbol, canonical_sym, base_sym]:
+                if k in self.active_positions:
+                    del self.active_positions[k]
+            self._save_positions()
+            return True, pnl
+
+        # Position is STILL_OPEN or UNKNOWN: Retain as RISK_BREACH_UNRESOLVED
+        for k in [symbol, canonical_sym, base_sym]:
+            if k in self.active_positions:
+                self.active_positions[k]["protection_state"] = "RISK_BREACH_UNRESOLVED"
+        self._save_positions()
+        logger.critical(
+            f"[NadoTradingService] 🚨 CRITICAL: Position {symbol} closure status is {closure_status}! "
+            f"Retaining in active_positions as RISK_BREACH_UNRESOLVED for Sentinel reconciliation."
+        )
+        return False, 0.0
 
     async def force_close_position(self, symbol: str, bypass_check: bool = False, max_retries: int = 3) -> tuple:
         """Manually closes a position on Nado by firing a close_position market order.

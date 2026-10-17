@@ -637,6 +637,8 @@ class TradingPipeline:
                     print(f"🟢 Take Profit (TP): ${risk_verdict.get('take_profit_price', 0):,.2f} (+{risk_verdict.get('take_profit_pct', 0)}%)")
                     # Автоматическая торговля 24/7 (полностью автономный режим)
                     atr_14_val = float(market_data.get("indicators", {}).get("atr_14", 0) or 0)
+                    approved_risk_val = float(risk_verdict.get("approved_risk_usd") or risk_verdict.get("risk_amount_usd") or 0.0)
+                    taker_fee_val = float(market_data.get("derivatives_data", {}).get("taker_fee_pct") or 0.0005)
                     try:
                         trade_success = await self.services.trading_service.open_position(
                             symbol=symbol,
@@ -649,12 +651,19 @@ class TradingPipeline:
                             original_thesis=final_trade_decision.reasoning_en,
                             contracts=risk_verdict.get("contracts", 0.0),
                             atr_value=atr_14_val,
-                            max_slippage_pct=risk_verdict.get("expected_slippage_pct")
+                            max_slippage_pct=risk_verdict.get("expected_slippage_pct"),
+                            approved_risk_usd=approved_risk_val,
+                            taker_fee_pct=taker_fee_val
                         )
                     except Exception as e:
                         self.services.logger.error(f"[Stage 5] Unexpected error placing order on exchange for {symbol}: {e}", exc_info=True)
                         print(f"❌ Критическая ошибка при отправке ордера {symbol}: {e}")
                         trade_success = False
+
+                    # Propagate rich execution status from trading service if available
+                    service_exec_status = getattr(self.services.trading_service, "last_execution_status", None)
+                    if isinstance(service_exec_status, str) and service_exec_status:
+                        execution_status = service_exec_status
 
                     actual_fill_price = float(risk_verdict.get("entry_price", current_price) or current_price)
                     if trade_success and hasattr(self.services.trading_service, "active_positions"):
@@ -683,25 +692,30 @@ class TradingPipeline:
                                     if tp_p > 0 and sl_p > 0 and abs(sl_p - actual_fill_price) > 0:
                                         risk_verdict["risk_reward_ratio"] = round(abs(tp_p - actual_fill_price) / abs(sl_p - actual_fill_price), 2)
                                     
-                                    # Post-Execution Actual Risk Verification
+                                    # Post-Execution Actual Risk Verification via Unified Loss Calculator
                                     if sl_p > 0 and real_contracts > 0:
-                                        price_risk = real_contracts * abs(actual_fill_price - sl_p)
-                                        taker_fee_pct = float(market_data.get("derivatives_data", {}).get("taker_fee_pct") or 0.0005) * 2
-                                        fee_loss = real_contracts * (actual_fill_price + sl_p) * (taker_fee_pct / 2)
-                                        total_actual_loss_usd = round(price_risk + fee_loss, 2)
+                                        from core.risk_calculator import estimate_total_loss
+                                        loss_calc = estimate_total_loss(
+                                            contracts=real_contracts,
+                                            fill_price=actual_fill_price,
+                                            sl_price=sl_p,
+                                            taker_fee_pct=taker_fee_val,
+                                            approved_risk=approved_risk
+                                        )
+                                        total_actual_loss_usd = loss_calc.total_expected_loss_usd
+                                        max_tolerated_risk = loss_calc.max_tolerated_risk_usd
                                         
                                         risk_verdict["approved_risk_usd"] = approved_risk
-                                        risk_verdict["actual_risk_usd"] = round(price_risk, 2)
+                                        risk_verdict["actual_risk_usd"] = loss_calc.price_loss_usd
                                         risk_verdict["total_actual_loss_usd"] = total_actual_loss_usd
+                                        risk_verdict["total_stress_loss_usd"] = loss_calc.total_stress_loss_usd
                                         
-                                        # Strict risk threshold: 10% tolerance + 5 cents dust floor
-                                        max_tolerated_risk = (approved_risk * 1.10) + 0.05
                                         if approved_risk > 0 and total_actual_loss_usd > max_tolerated_risk:
                                             risk_diff_pct = ((total_actual_loss_usd / approved_risk) - 1.0) * 100
                                             self.services.logger.error(
                                                 f"[Stage 5] 🚨 CRITICAL EXECUTION RISK BREACH: Total potential loss (${total_actual_loss_usd:.2f}) "
                                                 f"exceeds approved risk budget (${approved_risk:.2f}) by {risk_diff_pct:.1f}% "
-                                                f"(fill={actual_fill_price:.4f} vs ref={current_price:.4f}, fee=${fee_loss:.2f}). "
+                                                f"(fill={actual_fill_price:.4f} vs ref={current_price:.4f}, fee=${loss_calc.fee_loss_usd:.2f}). "
                                                 f"Triggering emergency position protection."
                                             )
                                             # Invoke emergency protection
@@ -841,14 +855,37 @@ class TradingPipeline:
                             await self.services.tg_sender.broadcast_to_channel(tg_message)
                     else:
                         # Предупреждение оператору об ошибке исполнения на бирже (НЕ транслируем фантом в канал)
-                        fail_msg = (
-                            f"⚠️ *ОШИБКА ИСПОЛНЕНИЯ / EXCHANGE ERROR*\n\n"
-                            f"🪙 *Asset:* `{symbol}`\n"
-                            f"📊 *Decision:* `{decision}` (Conviction: {conviction}%)\n"
-                            f"❌ *Status:* Ордер отклонён биржей Nado (`{execution_status}`). Позиция НЕ открыта!\n"
-                            f"🛡 *Risk Check:* Одобрен риск-менеджером, но транзакция на бирже отклонена."
-                        )
-                        print(f"⚠️ [Telegram Alert] Отправка уведомления о сбое биржи для {symbol}...")
+                        if execution_status == "RISK_BREACH_UNRESOLVED":
+                            fail_msg = (
+                                f"🚨 *КРИТИЧЕСКИЙ СБОЙ / RISK BREACH UNRESOLVED*\n\n"
+                                f"🪙 *Asset:* `{symbol}`\n"
+                                f"📊 *Decision:* `{decision}` (Conviction: {conviction}%)\n"
+                                f"❌ *Status:* Позиция была исполнена с ПРЕВЫШЕНИЕМ РИСКА, но закрытие НЕ подтверждено!\n"
+                                f"⚠️ *ВНИМАНИЕ:* Позиция удерживается в active_positions для экстренного вмешательства Sentinel / оператора. Все новые сделки заблокированы!"
+                            )
+                        elif execution_status == "ABORTED_RISK_BREACH":
+                            fail_msg = (
+                                f"🛡️ *ПРЕВЫШЕНИЕ РИСКА / ABORTED RISK BREACH*\n\n"
+                                f"🪙 *Asset:* `{symbol}`\n"
+                                f"📊 *Decision:* `{decision}` (Conviction: {conviction}%)\n"
+                                f"⚠️ *Status:* Фактический риск превысил лимит. Позиция успешно АВАРИЙНО ЗАКРЫТА на бирже.\n"
+                                f"🛡 *Capital Protected:* Средства защищены от неконтролируемого убытка."
+                            )
+                        elif execution_status == "PENDING_ORDER_RECONCILIATION":
+                            fail_msg = (
+                                f"⏳ *НЕОПРЕДЕЛЕННОСТЬ ОРДЕРА / ORDER PENDING*\n\n"
+                                f"🪙 *Asset:* `{symbol}`\n"
+                                f"⚠️ *Status:* Ордер не исполнился вовремя, отмена не подтверждена. Помещен в очередь сверки."
+                            )
+                        else:
+                            fail_msg = (
+                                f"⚠️ *ОШИБКА ИСПОЛНЕНИЯ / EXCHANGE ERROR*\n\n"
+                                f"🪙 *Asset:* `{symbol}`\n"
+                                f"📊 *Decision:* `{decision}` (Conviction: {conviction}%)\n"
+                                f"❌ *Status:* Ордер отклонён биржей Nado (`{execution_status}`). Позиция НЕ открыта!\n"
+                                f"🛡 *Risk Check:* Одобрен риск-менеджером, но транзакция на бирже отклонена."
+                            )
+                        print(f"⚠️ [Telegram Alert] Отправка уведомления для {symbol} ({execution_status})...")
                         await self.services.tg_sender.send_message(fail_msg)
                 elif risk_verdict.get("pending_trade_id"):
                     pass
