@@ -742,6 +742,42 @@ async def test_reconcile_closing_fills_rejects_missing_or_invalid_timestamp():
 
 
 @pytest.mark.asyncio
+async def test_reconcile_closing_fills_supports_missing_timestamp_when_allowed():
+    """Verifies that real Nado Indexer fills with timestamp=None are successfully
+    reconciled when allow_missing_timestamp=True or target_digest matches."""
+    service = get_mock_service()
+    import time
+
+    now = time.time()
+    fill_no_ts = MagicMock()
+    fill_no_ts.base_filled = -1.0 * 1e18
+    fill_no_ts.quote_filled = 100000.0 * 1e18
+    fill_no_ts.fee_x18 = 50.0 * 1e18
+    fill_no_ts.timestamp = None
+    fill_no_ts.digest = "0xfill_real_nado"
+
+    mock_hist = MagicMock()
+    mock_hist.orders = [fill_no_ts]
+    service.client.market.get_subaccount_historical_orders.return_value = mock_hist
+
+    recon = await service._reconcile_closing_fills_from_history(
+        subaccount=service.default_subaccount_id,
+        product_id=2,
+        direction="LONG",
+        entry_price=95000.0,
+        expected_contracts=1.0,
+        close_timestamp=now,
+        allow_missing_timestamp=True
+    )
+
+    assert recon["is_exact"] is True
+    assert recon["total_base"] == pytest.approx(1.0)
+    assert recon["exit_price"] == pytest.approx(100000.0)
+    assert recon["digests"] == ["0xfill_real_nado"]
+    assert recon["fee"] == pytest.approx(50.0)
+
+
+@pytest.mark.asyncio
 async def test_reconcile_closing_fills_excludes_tp_and_open_digests():
     """Verifies that TP tier fills and open order digests are excluded so they
     cannot be accidentally aggregated into the remainder closure."""

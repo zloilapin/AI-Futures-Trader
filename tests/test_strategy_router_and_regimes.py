@@ -535,7 +535,8 @@ def create_test_pipeline(mock_logger, mock_llm):
     mock_services.trading_service.get_market_limits = AsyncMock(return_value={
         "size_increment": 0.001,
         "min_notional": 10.0,
-        "min_size": 0.001
+        "min_size": 0.001,
+        "price_increment": 0.1
     })
     mock_services.trading_service.open_position = AsyncMock(return_value=True)
 

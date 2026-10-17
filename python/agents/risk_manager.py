@@ -32,36 +32,36 @@ class RiskManager(BaseAgent):
         if profile == "AGGRESSIVE":
             rules = {
                 "min_conviction": 65,
-                "base_risk": 0.020,
-                "risk_cap": 0.025,
-                "portfolio_risk_cap": 0.06,
-                "max_daily_drawdown_pct": 0.08, # 8% max daily loss
+                "base_risk": 0.060,           # 6.0% base risk per trade (was 2.0%)
+                "risk_cap": 0.080,            # 8.0% risk cap
+                "portfolio_risk_cap": 0.16,   # 16.0% portfolio risk cap
+                "max_daily_drawdown_pct": 0.15, # 15% max daily loss for boost mode
                 "max_concurrent_positions": max_concurrent,
                 "sl_mult": 1.75,
                 "tp_mult": 3.0,
                 "min_rr": 1.20,
-                "target_margin_pct": 0.20,
-                "max_margin_pct": 0.45,
+                "target_margin_pct": 0.45,    # 45% margin allocation per trade (~$43 on $96)
+                "max_margin_pct": 0.60,       # 60% max margin allocation
                 "max_leverage": 15,
-                "sentinel_be_atr": 2.2,
-                "sentinel_trail_atr": 3.0,
-                "sentinel_trail_activation_atr": 3.0,
-                "sentinel_trail_distance_atr": 2.0,
-                "sentinel_min_improve_atr": 0.25
+                "sentinel_be_atr": 2.5,
+                "sentinel_trail_atr": 3.5,
+                "sentinel_trail_activation_atr": 3.5,
+                "sentinel_trail_distance_atr": 2.5,
+                "sentinel_min_improve_atr": 0.30
             }
         elif profile == "CONSERVATIVE":
             rules = {
                 "min_conviction": 80,
-                "base_risk": 0.005,
-                "risk_cap": 0.010,
-                "portfolio_risk_cap": 0.02,
-                "max_daily_drawdown_pct": 0.04, # 4% max daily loss
+                "base_risk": 0.010,
+                "risk_cap": 0.015,
+                "portfolio_risk_cap": 0.03,
+                "max_daily_drawdown_pct": 0.05,
                 "max_concurrent_positions": min(2, max_concurrent),
                 "sl_mult": 2.0,
                 "tp_mult": 3.0,
                 "min_rr": 1.25,
-                "target_margin_pct": 0.05,
-                "max_margin_pct": 0.10,
+                "target_margin_pct": 0.10,
+                "max_margin_pct": 0.15,
                 "max_leverage": 5,
                 "sentinel_be_atr": 1.5,
                 "sentinel_trail_atr": 2.0,
@@ -73,20 +73,20 @@ class RiskManager(BaseAgent):
             rules = {
                 "min_conviction": 70,
                 "base_risk": 0.015,
-                "risk_cap": 0.020,
-                "portfolio_risk_cap": 0.04,
-                "max_daily_drawdown_pct": 0.06, # 6% max daily loss
+                "risk_cap": 0.025,
+                "portfolio_risk_cap": 0.05,
+                "max_daily_drawdown_pct": 0.06,
                 "max_concurrent_positions": max_concurrent,
                 "sl_mult": 1.5,
                 "tp_mult": 2.6,
                 "min_rr": 1.25,
                 "target_margin_pct": 0.10,
-                "max_margin_pct": 0.20,
+                "max_margin_pct": 0.15,
                 "max_leverage": 10,
-                "sentinel_be_atr": 1.8,
-                "sentinel_trail_atr": 2.5,
-                "sentinel_trail_activation_atr": 2.5,
-                "sentinel_trail_distance_atr": 1.5,
+                "sentinel_be_atr": 2.0,
+                "sentinel_trail_atr": 2.8,
+                "sentinel_trail_activation_atr": 2.8,
+                "sentinel_trail_distance_atr": 1.8,
                 "sentinel_min_improve_atr": 0.25
             }
             

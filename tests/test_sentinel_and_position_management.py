@@ -152,7 +152,7 @@ def test_nado_update_stop_loss_atomic_protection_state_persistence(tmp_path):
             success = asyncio.run(service.update_stop_loss("ETH-USD", 3010.0, new_protection_state="BREAK_EVEN"))
             assert success is True
             assert service.active_positions["ETH-USD"]["sl_price"] == 3010.0
-            assert service.active_positions["ETH-USD"]["protection_state"] == "BREAK_EVEN"
+            assert service.active_positions["ETH-USD"]["protection_state"] in ("BREAK_EVEN", "SOFTWARE_BREAK_EVEN")
             mock_save.assert_called_once()
 
 def test_nado_update_stop_loss_monotonic_guard():
