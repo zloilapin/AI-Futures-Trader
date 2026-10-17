@@ -3,7 +3,7 @@ import asyncio
 import math
 import time
 from dataclasses import dataclass
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Set, Union
 from core.interfaces import BaseTradingService
 from core.web3_wallet import Web3Wallet
 
