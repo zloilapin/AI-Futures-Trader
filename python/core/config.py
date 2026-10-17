@@ -61,7 +61,7 @@ class Settings(BaseSettings):
     ENABLE_REFLECTOR_AGENT: bool = Field(default=False)
     
     # Режим сетки частичного Take-Profit ("2_TIER" = 50/50 с Б/У на TP1, "4_TIER" = 25/25/25/25, "SINGLE_TIER" = 100%)
-    PARTIAL_TP_MODE: str = Field(default="2_TIER")
+    PARTIAL_TP_MODE: Literal["2_TIER", "4_TIER", "SINGLE_TIER"] = Field(default="2_TIER")
     
     # Расширенные лимиты Risk Manager
     MIN_SL_PCT: float = Field(default=0.01)    # 1.0% floor (was 2.5% — dominated ATR for stable coins)

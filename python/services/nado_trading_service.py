@@ -1153,14 +1153,23 @@ class NadoTradingService(BaseTradingService):
                         if hist and getattr(hist, "orders", None):
                             direction = str(pos_data.get("direction", (target_pos.get("direction") if target_pos else "LONG"))).upper()
                             entry_price = float(pos_data.get("entry_price") or (target_pos.get("entry_price") if target_pos else 0.0) or 0.0)
+                            expected_contracts = abs(float(pos_data.get("contracts") or (target_pos.get("contracts") if target_pos else 0.0) or 0.0))
+                            if expected_contracts <= 0 and entry_price > 0:
+                                sz = float(pos_data.get("size_usd") or 0.0)
+                                expected_contracts = sz / entry_price if sz > 0 else 0.0
                             
                             for order in hist.orders:
                                 bf = float(getattr(order, "base_filled", 0) or 0)
                                 qf = abs(float(getattr(order, "quote_filled", 0) or 0))
-                                base_amt = abs(bf)
+                                if bf == 0:
+                                    continue
+
+                                # Unit normalization: Nado sequencer returns base/quote in x18 or human units depending on endpoint
+                                norm_base = abs(bf) / 1e18 if abs(bf) > 1e10 else abs(bf)
+                                norm_quote = qf / 1e18 if qf > 1e14 else qf
                                 
                                 is_close_dir = (direction == "LONG" and bf < 0) or (direction == "SHORT" and bf > 0)
-                                if is_close_dir and base_amt > 0:
+                                if is_close_dir and norm_base > 0:
                                     ts = getattr(order, "timestamp", None)
                                     order_time_ok = True
                                     if ts is not None and str(ts).strip() != "None":
@@ -1173,8 +1182,13 @@ class NadoTradingService(BaseTradingService):
                                             
                                     if not order_time_ok:
                                         continue
+
+                                    # Size match check: avoid attributing fills from unrelated previous positions
+                                    if expected_contracts > 0:
+                                        if abs(norm_base - expected_contracts) / max(expected_contracts, 1e-6) > 0.20:
+                                            continue
                                         
-                                    actual_exit_price = qf / base_amt
+                                    actual_exit_price = norm_quote / norm_base
                                     
                                     raw_fee = getattr(order, "fee", getattr(order, "fee_x18", None))
                                     if raw_fee is not None and isinstance(raw_fee, (int, float, str)):
@@ -1185,21 +1199,25 @@ class NadoTradingService(BaseTradingService):
                                         except (ValueError, TypeError):
                                             pass
                                     if actual_fee == 0.0 and actual_exit_price > 0:
-                                        actual_fee = base_amt * (entry_price + actual_exit_price) * 0.0005
+                                        actual_fee = norm_base * (entry_price + actual_exit_price) * 0.0005
                                         
                                     if entry_price > 0 and actual_exit_price > 0:
-                                        gross_pnl = base_amt * (actual_exit_price - entry_price) if direction == "LONG" else base_amt * (entry_price - actual_exit_price)
+                                        gross_pnl = norm_base * (actual_exit_price - entry_price) if direction == "LONG" else norm_base * (entry_price - actual_exit_price)
                                         actual_pnl = round(gross_pnl - actual_fee, 4)
                                         is_exact_pnl = True
                                         logger.info(
                                             f"[NadoTradingService] 🎯 Reconciled EXACT close fill for {symbol}: "
-                                            f"{base_amt:.4f} contracts @ {actual_exit_price:.4f}, fee: ${actual_fee:.4f}, PnL: ${actual_pnl:.4f}"
+                                            f"{norm_base:.4f} contracts @ {actual_exit_price:.4f}, fee: ${actual_fee:.4f}, PnL: ${actual_pnl:.4f}"
                                         )
                                     break
                     except Exception as hist_err:
                         logger.warning(f"[NadoTradingService] ⚠️ Indexer fill reconciliation skipped ({hist_err}), using pre-close snapshot.")
 
                     pnl = actual_pnl if (is_exact_pnl and actual_pnl is not None) else (target_pos["pnl"] if target_pos else 0.0)
+                    acc_pnl = float(target_pos.get("accumulated_realized_pnl", 0.0)) if target_pos else 0.0
+                    if acc_pnl != 0.0:
+                        pnl = round(pnl + acc_pnl, 4)
+                        logger.info(f"[NadoTradingService] 🧩 Total Closed Position Net PnL (including partial TPs ${acc_pnl:.2f}): ${pnl:.2f}")
 
                     if not hasattr(self, "_last_close_info"):
                         self._last_close_info = {}
@@ -1225,11 +1243,74 @@ class NadoTradingService(BaseTradingService):
                 except Exception as close_e:
                     err_str = str(close_e).lower()
                     if "2002" in err_str or "amount is zero" in err_str:
+                        # 1. Strictly verify on-chain that position is ACTUALLY zero before cleaning up
+                        still_open_on_chain = False
+                        try:
+                            fresh_positions = await self.get_active_positions(bypass_cache=True)
+                            for fp in fresh_positions:
+                                fp_prod = fp.get("_product_id") or fp.get("product_id") or self.product_map.get(fp.get("symbol"))
+                                if product_id is not None and fp_prod == product_id:
+                                    still_open_on_chain = True
+                                    break
+                                elif fp.get("symbol") in (symbol, canonical_sym):
+                                    still_open_on_chain = True
+                                    break
+                        except Exception as verify_err:
+                            logger.warning(f"[NadoTradingService] ⚠️ Could not verify on-chain zero status on 2002 error: {verify_err}")
+
+                        if still_open_on_chain:
+                            logger.error(
+                                f"[NadoTradingService] 🚨 CRITICAL DIVERGENCE: close_position returned error 2002, "
+                                f"but position {symbol} is STILL OPEN on-chain! RETAINING local tracking for retry."
+                            )
+                            return False, 0.0
+
                         logger.info(
-                            f"[NadoTradingService] ℹ️ Position {symbol} is already closed on exchange (order amount is zero). "
-                            f"Cleaning up local tracking."
+                            f"[NadoTradingService] ℹ️ Position {symbol} confirmed zero on exchange (order amount is zero). "
+                            f"Reconciling final exit fill before cleanup."
                         )
+                        
+                        # 2. Try to query the closing fill from history so real PnL is NOT lost as fake 0.0
+                        reconciled_pnl = 0.0
                         pos_data = dict(self.active_positions.get(symbol) or self.active_positions.get(base_symbol) or {})
+                        direction = str(pos_data.get("direction", "LONG")).upper()
+                        entry_price = float(pos_data.get("entry_price") or 0.0)
+                        contracts_val = float(pos_data.get("contracts") or 0.0)
+                        
+                        try:
+                            from nado_protocol.indexer_client.types.query import IndexerSubaccountHistoricalOrdersParams
+                            params = IndexerSubaccountHistoricalOrdersParams(
+                                subaccounts=[subaccount],
+                                product_ids=[product_id] if product_id is not None else None,
+                                limit=10,
+                            )
+                            hist = await asyncio.to_thread(self.client.market.get_subaccount_historical_orders, params)
+                            if hist and getattr(hist, "orders", None):
+                                for order in hist.orders:
+                                    bf = float(getattr(order, "base_filled", 0) or 0)
+                                    qf = abs(float(getattr(order, "quote_filled", 0) or 0))
+                                    if bf == 0:
+                                        continue
+                                    norm_b = abs(bf) / 1e18 if abs(bf) > 1e10 else abs(bf)
+                                    norm_q = qf / 1e18 if qf > 1e14 else qf
+                                    is_close_dir = (direction == "LONG" and bf < 0) or (direction == "SHORT" and bf > 0)
+                                    if is_close_dir and norm_b > 0:
+                                        exit_p = norm_q / norm_b
+                                        if entry_price > 0 and exit_p > 0:
+                                            raw_pnl = norm_b * (exit_p - entry_price) if direction == "LONG" else norm_b * (entry_price - exit_p)
+                                            fee_est = norm_b * (entry_price + exit_p) * 0.0005
+                                            reconciled_pnl = round(raw_pnl - fee_est, 4)
+                                            logger.info(f"[NadoTradingService] 🎯 Reconciled actual PnL for 2002-closed position {symbol}: ${reconciled_pnl:.4f}")
+                                            break
+                        except Exception as h_err:
+                            logger.warning(f"[NadoTradingService] ⚠️ Failed to query history on 2002 closure: {h_err}")
+
+                        acc_pnl = float(pos_data.get("accumulated_realized_pnl", 0.0))
+                        if acc_pnl != 0.0:
+                            reconciled_pnl = round(reconciled_pnl + acc_pnl, 4)
+                            logger.info(f"[NadoTradingService] 🧩 Total 2002 Closed Position Net PnL (including partial TPs ${acc_pnl:.2f}): ${reconciled_pnl:.2f}")
+
+                        # Cancel any orphan trigger orders
                         sl_dig = pos_data.get("sl_digest")
                         tp_dig = pos_data.get("tp_digest")
                         digests_to_cancel = [d for d in [sl_dig, tp_dig] if d]
@@ -1242,7 +1323,13 @@ class NadoTradingService(BaseTradingService):
                         if alias_key in self.active_positions:
                             del self.active_positions[alias_key]
                         self._save_positions()
-                        return True, 0.0
+
+                        if reconciled_pnl > 0.001:
+                            self._update_streak_and_cooldown("WIN")
+                        elif reconciled_pnl < -0.001:
+                            self._update_streak_and_cooldown("LOSS")
+
+                        return True, reconciled_pnl
 
                     logger.warning(f"[NadoTradingService] ⚠️ Retryable close error for {symbol}: {close_e}")
                     if attempt < max_retries - 1:
@@ -1775,11 +1862,41 @@ class NadoTradingService(BaseTradingService):
                 f"[NadoTradingService] ⚠️ Reconcile: On-chain balance for {canonical_sym} is ZERO, "
                 f"but local plan had {plan.remaining_contracts:.4f} contracts. Finalizing closure."
             )
+            # Determine best known exit price for the unclosed remainder
+            exit_price = None
+            triggered_by = "ON_CHAIN_RECONCILED_CLOSED"
+            sl_price = float(pos.get("sl_price") or 0.0)
+            base_sym = canonical_sym.split('-')[0].upper()
+            prod_id = pos.get("product_id") or self.product_map.get(base_sym)
+            mark_price = None
+            if prod_id is not None and getattr(self, "_market_cache", None) and prod_id in self._market_cache:
+                m_info = self._market_cache[prod_id]
+                if hasattr(m_info, "oracle_price_x18"):
+                    mark_price = float(m_info.oracle_price_x18) / 1e18
+                elif hasattr(m_info, "product") and hasattr(m_info.product, "oracle_price_x18"):
+                    mark_price = float(m_info.product.oracle_price_x18) / 1e18
+
+            if sl_price > 0:
+                exit_price = sl_price
+                triggered_by = "ON_CHAIN_RECONCILED_SL"
+            elif mark_price and mark_price > 0:
+                exit_price = mark_price
+                triggered_by = "ON_CHAIN_RECONCILED_MARK"
+            else:
+                entry_p = float(pos.get("entry_price") or 0.0)
+                exit_price = entry_p if entry_p > 0 else None
+                triggered_by = "ON_CHAIN_RECONCILED_UNVERIFIED_PNL"
+                pos["requires_reconciliation"] = True
+                logger.warning(
+                    f"[NadoTradingService] ⚠️ Exit price unverified for {canonical_sym} remainder. "
+                    f"Marking position as requiring audit."
+                )
+
             self._finalize_partial_tp_closure(
                 symbol=canonical_sym,
                 pos=pos,
-                exit_price=float(pos.get("entry_price", 0.0)),
-                triggered_by="ON_CHAIN_RECONCILED_CLOSED"
+                exit_price=exit_price,
+                triggered_by=triggered_by
             )
             return True
 
@@ -1830,6 +1947,34 @@ class NadoTradingService(BaseTradingService):
         total_pnl = float(pos.get("accumulated_realized_pnl", 0.0))
         entry_price = float(pos.get("entry_price", 0.0))
         initial_size = float(pos.get("size_usd", 0.0))
+
+        # Reconcile remainder PnL if contracts were still open locally but closed on-chain
+        plan_dict = pos.get("partial_tp_plan")
+        rem_contracts = 0.0
+        if plan_dict:
+            try:
+                from services.partial_tp_calculator import PartialTPPlan
+                plan = PartialTPPlan.from_dict(plan_dict)
+                rem_contracts = float(plan.remaining_contracts)
+            except Exception:
+                rem_contracts = 0.0
+        elif pos.get("contracts"):
+            rem_contracts = float(pos.get("contracts", 0.0))
+
+        if rem_contracts > 1e-6 and exit_price is not None and exit_price > 0 and entry_price > 0:
+            direction = str(pos.get("direction", "LONG")).upper()
+            if direction == "LONG":
+                rem_gross = (exit_price - entry_price) * rem_contracts
+            else:
+                rem_gross = (entry_price - exit_price) * rem_contracts
+            is_unverified = (triggered_by == "ON_CHAIN_RECONCILED_UNVERIFIED_PNL")
+            rem_fee = 0.0 if is_unverified else (rem_contracts * exit_price * 0.0005)
+            rem_net = round(rem_gross - rem_fee, 4)
+            total_pnl = round(total_pnl + rem_net, 4)
+            logger.info(
+                f"[NadoTradingService] ⚖️ Reconciled remainder {rem_contracts:.4f} contracts @ {exit_price:.4f} "
+                f"(Gross: ${rem_gross:.2f}, Fee: ${rem_fee:.2f}, Rem PnL: ${rem_net:.2f}) -> Total PnL: ${total_pnl:.2f}"
+            )
 
         # Cancel any orphan trigger orders (SL / TP) on exchange
         product_id = pos.get("product_id") or self.product_map.get(base_sym)
@@ -2744,13 +2889,17 @@ class NadoTradingService(BaseTradingService):
             if not sl_digest:
                 pos["sl_price"] = new_sl_price
                 if new_protection_state:
-                    pos["protection_state"] = new_protection_state
+                    pos["protection_state"] = "SOFTWARE_BREAK_EVEN" if new_protection_state == "BREAK_EVEN" else new_protection_state
+                else:
+                    pos["protection_state"] = "SOFTWARE_PROTECTED"
+                pos["sl_protection_mode"] = "SOFTWARE_ONLY"
+                pos["unverified_triggers"] = True
                 if new_contracts is not None and new_contracts > 0:
                     amount_base = float(new_contracts)
                     amount_x18_val = int(amount_base * 10**18)
                     pos["trigger_amount_x18"] = str(-amount_x18_val if direction == "LONG" else amount_x18_val)
                 self._save_positions()
-                logger.info(f"[NadoTradingService] 🛡️ Software Stop Loss updated for {symbol} -> {new_sl_price:.4f}")
+                logger.info(f"[NadoTradingService] 🛡️ Software Stop Loss updated for {symbol} -> {new_sl_price:.4f} (mode: SOFTWARE_ONLY, state: {pos['protection_state']})")
                 return True
 
             if product_id is None:
@@ -2883,6 +3032,10 @@ class NadoTradingService(BaseTradingService):
                     pos["sl_update_failed"] = True
                     if sl_digest:
                         pos["sl_protection_mode"] = "EXCHANGE_PROTECTED"
+                        pos["protection_state"] = "EXCHANGE_PROTECTED_OLD_SL"
+                    else:
+                        pos["sl_protection_mode"] = "SOFTWARE_ONLY"
+                        pos["protection_state"] = "SOFTWARE_BREAK_EVEN" if new_protection_state == "BREAK_EVEN" else "SOFTWARE_PROTECTED"
                     self._save_positions()
                     try:
                         from services.telegram_service import TelegramService
@@ -2918,6 +3071,7 @@ class NadoTradingService(BaseTradingService):
                 # Keep old sl_digest and old current_sl active on exchange!
                 if sl_digest:
                     pos["sl_protection_mode"] = "EXCHANGE_PROTECTED"
+                    pos["protection_state"] = "EXCHANGE_PROTECTED_OLD_SL"
                     logger.critical(
                         f"[NadoTradingService] 🚨 Failed to place NEW on-chain SL for {symbol} at {new_sl_price:.4f} after {max_trigger_retries} attempts ({last_err}). "
                         f"RETAINING ACTIVE ON-CHAIN SL at {current_sl:.4f} (digest: {sl_digest}) to ensure capital protection!"
@@ -2925,6 +3079,7 @@ class NadoTradingService(BaseTradingService):
                 else:
                     pos["sl_price"] = new_sl_price
                     pos["sl_protection_mode"] = "SOFTWARE_ONLY"
+                    pos["protection_state"] = "SOFTWARE_BREAK_EVEN" if new_protection_state == "BREAK_EVEN" else "SOFTWARE_PROTECTED"
                     logger.warning(
                         f"[NadoTradingService] ⚠️ Failed to place on-chain SL for {symbol} at {new_sl_price:.4f} after {max_trigger_retries} attempts ({last_err}). "
                         f"Enforcing Software Stop Loss at {new_sl_price:.4f}."
@@ -3160,8 +3315,10 @@ class NadoTradingService(BaseTradingService):
             is_mocked = getattr(self.update_stop_loss_to_be, "mock_calls", None) is not None or not hasattr(self.client, "market")
             if sl_ok and (pos.get("sl_digest") or is_mocked):
                 pos["sl_protection_mode"] = "EXCHANGE_PROTECTED"
+                pos["protection_state"] = "BREAK_EVEN"
             else:
                 pos["sl_protection_mode"] = "SOFTWARE_ONLY"
+                pos["protection_state"] = "SOFTWARE_BREAK_EVEN"
             self._save_positions()
 
         # Prepare Telegram notification with HONEST protection state

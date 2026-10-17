@@ -273,12 +273,12 @@ async def test_force_close_reconciles_exact_fill_from_indexer():
         "pnl": 10.0  # Pre-close estimate, should be overridden by exact fill
     }])
 
-    # Mock historical orders returned from indexer
+    # Mock historical orders returned from indexer (both base and quote in x18 notation)
     mock_order = MagicMock()
-    mock_order.base_filled = "-500000000000000000"  # -0.5 base (closing LONG)
-    mock_order.quote_filled = "35000"  # $35,000 -> exit price 70,000.0
+    mock_order.base_filled = "-500000000000000000"  # -0.5 base (closing LONG) in x18
+    mock_order.quote_filled = "35000000000000000000000"  # $35,000 quote in x18 -> exit price 70,000.0
     mock_order.timestamp = str(int(time.time() * 1000))
-    mock_order.fee = "200000000000000000"  # 0.20 USD fee
+    mock_order.fee = "200000000000000000"  # 0.20 USD fee in x18
 
     mock_hist = MagicMock()
     mock_hist.orders = [mock_order]
@@ -292,6 +292,45 @@ async def test_force_close_reconciles_exact_fill_from_indexer():
     assert "BTC-USD" in service._last_close_info
     assert service._last_close_info["BTC-USD"]["exit_price"] == pytest.approx(70000.0)
     assert service._last_close_info["BTC-USD"]["is_exact"] is True
+
+
+@pytest.mark.asyncio
+async def test_force_close_reconciles_human_readable_quote_units():
+    """Verifies that force_close_position handles quote_filled provided as raw human USD without scaling."""
+    service = get_mock_service()
+    service.active_positions["BTC-USD"] = {
+        "direction": "LONG",
+        "entry_price": 60000.0,
+        "size_usd": 30000.0,
+        "product_id": 2,
+        "contracts": 0.5,
+        "sender": service.default_subaccount_id
+    }
+
+    mock_sub = MagicMock()
+    mock_sub.subaccount = service.default_subaccount_id
+    mock_subs = MagicMock()
+    mock_subs.subaccounts = [mock_sub]
+    service.client.subaccount.get_subaccounts.return_value = mock_subs
+    service.client.market.close_position = MagicMock(return_value="0xtx123")
+    service.get_active_positions = AsyncMock(return_value=[{"symbol": "BTC-USD", "pnl": 0.0}])
+
+    # Mock historical orders with quote_filled in human dollars
+    mock_order = MagicMock()
+    mock_order.base_filled = "-500000000000000000"  # -0.5 base (x18)
+    mock_order.quote_filled = "35000"  # 35,000 human USD
+    mock_order.timestamp = str(int(time.time() * 1000))
+    mock_order.fee = "0.20"  # human fee
+
+    mock_hist = MagicMock()
+    mock_hist.orders = [mock_order]
+    service.client.market.get_subaccount_historical_orders = MagicMock(return_value=mock_hist)
+
+    success, pnl = await service.force_close_position("BTC-USD", bypass_check=True)
+
+    assert success is True
+    assert pnl == pytest.approx(4999.80, rel=1e-3)
+    assert service._last_close_info["BTC-USD"]["exit_price"] == pytest.approx(70000.0)
 
 
 @pytest.mark.asyncio
@@ -318,7 +357,7 @@ async def test_cancel_trigger_digests_matches_product_ids_length():
 @pytest.mark.asyncio
 async def test_force_close_handles_amount_zero_error_2002_gracefully():
     """Verifies that when close_position encounters error 2002 ('amount is zero'),
-    it recognizes the position is already closed, cleans up local state, and returns success."""
+    it verifies zero balance on-chain, cleans up local state, and returns success."""
     service = get_mock_service()
     service.active_positions["ZEC-USD"] = {
         "direction": "LONG",
@@ -350,4 +389,78 @@ async def test_force_close_handles_amount_zero_error_2002_gracefully():
     assert pnl == 0.0
     assert "ZEC-USD" not in service.active_positions
     service._cancel_trigger_digests.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_force_close_error_2002_retains_position_if_still_open_on_chain():
+    """Critical safety test: if close_position raises error 2002 but on-chain query shows
+    position is STILL OPEN, local tracking is RETAINED and not silently deleted!"""
+    service = get_mock_service()
+    service.active_positions["BTC-USD"] = {
+        "direction": "SHORT",
+        "entry_price": 80000.0,
+        "size_usd": 40.0,
+        "product_id": 2,
+        "contracts": 0.0005,
+        "sender": service.default_subaccount_id
+    }
+
+    mock_sub = MagicMock()
+    mock_sub.subaccount = service.default_subaccount_id
+    mock_subs = MagicMock()
+    mock_subs.subaccounts = [mock_sub]
+    service.client.subaccount.get_subaccounts.return_value = mock_subs
+
+    # API returns 2002
+    service.client.market.close_position.side_effect = Exception(
+        '{"status":"failure","error_code":2002,"error":"Invalid order amount: The provided amount is zero."}'
+    )
+    # But get_active_positions confirms position is STILL OPEN on-chain
+    service.get_active_positions = AsyncMock(return_value=[{
+        "symbol": "BTC-USD",
+        "amount": -0.0005,
+        "_product_id": 2
+    }])
+
+    success, pnl = await service.force_close_position("BTC-USD", bypass_check=True)
+
+    # Must reject false cleanup and keep position for next retry cycle
+    assert success is False
+    assert "BTC-USD" in service.active_positions
+
+
+@pytest.mark.asyncio
+async def test_reconcile_partial_tp_remainder_calculates_stop_loss_pnl():
+    """Verifies that when on-chain contracts hit 0 after TP1, the remainder PnL is
+    calculated using sl_price instead of being erased with entry_price."""
+    service = get_mock_service()
+    service.active_positions["ETH-USD"] = {
+        "direction": "LONG",
+        "entry_price": 2000.0,
+        "sl_price": 1900.0,
+        "tp_price": 2200.0,
+        "size_usd": 2000.0,
+        "contracts": 1.0,
+        "product_id": 4,
+        "accumulated_realized_pnl": 50.0  # +$50 from TP1
+    }
+    # Initialize plan: 2 tiers (0.5 contracts each)
+    service.initialize_partial_tp_plan("ETH-USD")
+    pos = service.active_positions["ETH-USD"]
+    plan_dict = pos["partial_tp_plan"]
+    # Simulate tier 1 filled, 0.5 contracts remaining
+    plan_dict["tiers"][0]["status"] = "FILLED"
+    plan_dict["remaining_contracts"] = 0.5
+    pos["partial_tp_plan"] = plan_dict
+
+    # Now on-chain balance is confirmed ZERO (e.g. stopped out at 1900.0)
+    reconciled = service.reconcile_partial_tp_with_chain("ETH-USD", on_chain_contracts=0.0)
+
+    assert reconciled is True
+    assert "ETH-USD" not in service.active_positions
+    # Remainder loss: 0.5 * (1900 - 2000) = -$50.0. Remainder fee: 0.5 * 1900 * 0.0005 = $0.475.
+    # Total PnL: +$50.0 (TP1) - $50.0 (remainder loss) - $0.475 (fee) = -$0.475
+    # The trade must be recorded as a LOSS (net < 0), not as a fake +$50 WIN!
+    assert service.loss_count == 1
+    assert service.win_count == 0
 
