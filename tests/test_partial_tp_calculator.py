@@ -12,8 +12,8 @@ import pytest
 from services.partial_tp_calculator import PartialTPCalculator, PartialTPPlan, TPTier
 
 
-def test_long_4_tier_pricing_and_exact_sum():
-    """Verifies standard 4-tier calculation for a LONG position."""
+def test_long_2_tier_50_50_default():
+    """Verifies default 2-tier (50/50) calculation with immediate Breakeven on Tier 1."""
     market_params = {
         "size_increment": 0.1,
         "min_size": 0.1,
@@ -26,6 +26,78 @@ def test_long_4_tier_pricing_and_exact_sum():
         tp_final_price=120.0,
         total_contracts=1.6,
         market_params=market_params
+    )
+
+    assert plan.mode == "2_TIER"
+    assert len(plan.tiers) == 2
+
+    # Tier 1 (50% distance)
+    t1 = plan.tiers[0]
+    assert t1.tier_index == 1
+    assert t1.fraction == 0.50
+    assert t1.target_price == pytest.approx(110.00)
+    assert t1.close_contracts == pytest.approx(0.8)
+    assert t1.action == "PROTECT_BREAKEVEN"
+    assert t1.is_final is False
+
+    # Tier 2 (100% distance)
+    t2 = plan.tiers[1]
+    assert t2.tier_index == 2
+    assert t2.fraction == 1.00
+    assert t2.target_price == pytest.approx(120.00)
+    assert t2.close_contracts == pytest.approx(0.8)
+    assert t2.action == "CLOSE_ALL"
+    assert t2.is_final is True
+
+    # Exact sum
+    assert (t1.close_contracts + t2.close_contracts) == pytest.approx(1.6)
+
+
+def test_short_2_tier_50_50_default():
+    """Verifies default 2-tier (50/50) calculation for SHORT position."""
+    market_params = {
+        "size_increment": 0.1,
+        "min_size": 0.1,
+        "price_increment": 0.01
+    }
+    plan = PartialTPCalculator.calculate_plan(
+        symbol="ETH-USD",
+        direction="SHORT",
+        entry_price=2600.0,
+        tp_final_price=2400.0,
+        total_contracts=1.0,
+        market_params=market_params
+    )
+
+    assert plan.mode == "2_TIER"
+    assert len(plan.tiers) == 2
+
+    t1, t2 = plan.tiers
+    assert t1.target_price == pytest.approx(2500.00)
+    assert t1.close_contracts == pytest.approx(0.5)
+    assert t1.action == "PROTECT_BREAKEVEN"
+
+    assert t2.target_price == pytest.approx(2400.00)
+    assert t2.close_contracts == pytest.approx(0.5)
+    assert t2.action == "CLOSE_ALL"
+    assert (t1.close_contracts + t2.close_contracts) == pytest.approx(1.0)
+
+
+def test_long_4_tier_pricing_and_exact_sum():
+    """Verifies standard 4-tier calculation for a LONG position when preferred_mode='4_TIER'."""
+    market_params = {
+        "size_increment": 0.1,
+        "min_size": 0.1,
+        "price_increment": 0.01
+    }
+    plan = PartialTPCalculator.calculate_plan(
+        symbol="SOL-USD",
+        direction="LONG",
+        entry_price=100.0,
+        tp_final_price=120.0,
+        total_contracts=1.6,
+        market_params=market_params,
+        preferred_mode="4_TIER"
     )
 
     assert plan.mode == "4_TIER"
@@ -68,7 +140,8 @@ def test_short_4_tier_pricing_and_exact_sum():
         entry_price=106.7826,
         tp_final_price=103.6736,
         total_contracts=1.6,
-        market_params=market_params
+        market_params=market_params,
+        preferred_mode="4_TIER"
     )
 
     assert plan.mode == "4_TIER"
@@ -178,7 +251,8 @@ def test_non_clean_multiples_flooring_prevents_risk_inflation():
         entry_price=100.0,
         tp_final_price=110.0,
         total_contracts=1.1,
-        market_params=market_params
+        market_params=market_params,
+        preferred_mode="4_TIER"
     )
 
     assert plan.mode == "4_TIER"
@@ -208,7 +282,8 @@ def test_plan_serialization_roundtrip_and_status_tracking():
         tp_final_price=120.0,
         total_contracts=1.6,
         market_params=market_params,
-        created_at=1791890000.0
+        created_at=1791890000.0,
+        preferred_mode="4_TIER"
     )
 
     # Test initial pending tier
@@ -269,7 +344,7 @@ def test_partially_filled_tier_strictly_blocks_subsequent_tier_and_calculates_re
     and strictly PREVENTS the state machine from jumping to the next tier!
     """
     params = {"size_increment": 0.1, "min_size": 0.1, "price_increment": 0.01}
-    plan = PartialTPCalculator.calculate_plan("SOL-USD", "LONG", 100.0, 120.0, 1.6, params)
+    plan = PartialTPCalculator.calculate_plan("SOL-USD", "LONG", 100.0, 120.0, 1.6, params, preferred_mode="4_TIER")
 
     t1 = plan.get_active_or_next_tier()
     assert t1.tier_index == 1
@@ -292,7 +367,7 @@ def test_partially_filled_tier_strictly_blocks_subsequent_tier_and_calculates_re
 def test_submitting_tier_strictly_blocks_subsequent_tier():
     """Verifies that an in-flight SUBMITTING tier is returned and blocks jumping to tier 2."""
     params = {"size_increment": 0.1, "min_size": 0.1, "price_increment": 0.01}
-    plan = PartialTPCalculator.calculate_plan("SOL-USD", "LONG", 100.0, 120.0, 1.6, params)
+    plan = PartialTPCalculator.calculate_plan("SOL-USD", "LONG", 100.0, 120.0, 1.6, params, preferred_mode="4_TIER")
 
     t1 = plan.tiers[0]
     t1.status = "SUBMITTING"

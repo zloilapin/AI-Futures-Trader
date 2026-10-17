@@ -1,6 +1,6 @@
 import os
 import json
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from agents.base_agent import BaseAgent
 from core.logger import TradeLogger
@@ -12,9 +12,21 @@ class ReflectorAgent(BaseAgent):
     Analyzes closed trades (especially Stop Loss losses) to extract lessons learned 
     and store negative pattern warnings in data/memory/lessons.json.
     """
-    def __init__(self, logger: TradeLogger, llm_client: LLMClient, lessons_file: str = "data/memory/lessons.json"):
+    def __init__(self, logger: TradeLogger, llm_client: LLMClient, lessons_file: str = "data/memory/lessons.json", enabled: Optional[bool] = None):
         super().__init__("Reflector_Agent", logger, llm_client)
         self.lessons_file = lessons_file
+        if enabled is not None:
+            self.enabled = enabled
+        else:
+            try:
+                from core.config import config
+                if lessons_file != "data/memory/lessons.json":
+                    self.enabled = True
+                else:
+                    self.enabled = getattr(config, "ENABLE_REFLECTOR_AGENT", False)
+            except Exception:
+                self.enabled = False
+
         prompt_path = os.path.join(os.path.dirname(__file__), "..", "prompts", "reflector_prompt.txt")
         try:
             with open(prompt_path, "r", encoding="utf-8") as f:
@@ -59,6 +71,8 @@ class ReflectorAgent(BaseAgent):
 
     def get_lessons(self, limit: int = 5, symbol: str = None) -> List[str]:
         """Returns the most recent actionable rules/lessons learned, prioritizing LOSSes and specific symbols."""
+        if not getattr(self, "enabled", False):
+            return []
         try:
             from core.state_store import StateStore
             data = StateStore.load(self.lessons_file, default=[])
@@ -123,6 +137,10 @@ class ReflectorAgent(BaseAgent):
         """
         Runs LLM reflection on a closed trade and saves actionable rule to memory.
         """
+        if not getattr(self, "enabled", False):
+            self.logger.info(f"[{self.name}] ⏸️ Reflector Agent отключен в конфигурации (ENABLE_REFLECTOR_AGENT=False). Пост-мортем анализ пропущен.")
+            return {}
+
         if not isinstance(closed_trade, dict):
             return {}
 

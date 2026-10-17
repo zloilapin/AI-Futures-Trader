@@ -52,6 +52,7 @@ class NadoTradingService(BaseTradingService):
         self._daily_start_total_trades = 0
         self.cooldown_until = 0.0
         self._last_cooldown_processed_len = 0
+        self._last_close_info: Dict[str, Any] = {}
         self._load_state()
         
         # NOTE: self.initialize(nado_client) MUST be awaited explicitly after instantiation.
@@ -1052,14 +1053,18 @@ class NadoTradingService(BaseTradingService):
                             self._position_locks = {}
                         lock = self._position_locks.setdefault(symbol, asyncio.Lock())
                         async with lock:
+                            if symbol not in self.active_positions and symbol.split('-')[0].upper() not in self.active_positions:
+                                return closed_reports
                             success, realized_pnl = await self.force_close_position(symbol, bypass_check=True)
                         if success:
+                            close_info = getattr(self, "_last_close_info", {}).get(symbol) or {}
+                            exit_p = close_info.get("exit_price") or current_price
                             closed_reports.append({
                                 "symbol": symbol,
                                 "direction": direction,
                                 "triggered_by": f"SOFTWARE_{reason}",
                                 "entry_price": pos.get("entry_price", current_price),
-                                "exit_price": current_price,
+                                "exit_price": exit_p,
                                 "pnl_usd": realized_pnl,
                                 "roi_pct": (realized_pnl / pos.get("margin_used", pos.get("size_usd", 1.0)) * 100) if pos.get("size_usd", 0) > 0 else 0,
                                 "original_thesis": pos.get("original_thesis", "")
@@ -1112,7 +1117,7 @@ class NadoTradingService(BaseTradingService):
                     logger.info(f"[NadoTradingService] 🧹 Successfully forced closed {symbol}. TX: {res}")
                     
                     # Cancel any remaining trigger orders on exchange
-                    pos_data = self.active_positions.get(symbol) or self.active_positions.get(base_symbol) or {}
+                    pos_data = dict(self.active_positions.get(symbol) or self.active_positions.get(base_symbol) or {})
                     sl_dig = pos_data.get("sl_digest")
                     tp_dig = pos_data.get("tp_digest")
                     digests_to_cancel = [d for d in [sl_dig, tp_dig] if d]
@@ -1127,7 +1132,87 @@ class NadoTradingService(BaseTradingService):
                         del self.active_positions[alias_key]
                     self._save_positions()
                         
-                    pnl = target_pos["pnl"] if target_pos else 0.0
+                    # Reconcile exact execution fill price and real PnL from Nado indexer
+                    actual_exit_price = None
+                    actual_fee = 0.0
+                    actual_pnl = None
+                    is_exact_pnl = False
+                    close_time = time.time()
+
+                    try:
+                        from nado_protocol.indexer_client.types.query import IndexerSubaccountHistoricalOrdersParams
+                        
+                        # Short delay to allow indexer to record fill
+                        await asyncio.sleep(0.8)
+                        params = IndexerSubaccountHistoricalOrdersParams(
+                            subaccounts=[subaccount],
+                            product_ids=[product_id],
+                            limit=10,
+                        )
+                        hist = await asyncio.to_thread(self.client.market.get_subaccount_historical_orders, params)
+                        if hist and getattr(hist, "orders", None):
+                            direction = str(pos_data.get("direction", (target_pos.get("direction") if target_pos else "LONG"))).upper()
+                            entry_price = float(pos_data.get("entry_price") or (target_pos.get("entry_price") if target_pos else 0.0) or 0.0)
+                            
+                            for order in hist.orders:
+                                bf = float(getattr(order, "base_filled", 0) or 0)
+                                qf = abs(float(getattr(order, "quote_filled", 0) or 0))
+                                base_amt = abs(bf)
+                                
+                                is_close_dir = (direction == "LONG" and bf < 0) or (direction == "SHORT" and bf > 0)
+                                if is_close_dir and base_amt > 0:
+                                    ts = getattr(order, "timestamp", None)
+                                    order_time_ok = True
+                                    if ts is not None and str(ts).strip() != "None":
+                                        try:
+                                            order_ts_sec = float(ts) / 1000.0 if len(str(ts)) > 10 else float(ts)
+                                            if order_ts_sec < (close_time - 30.0):
+                                                order_time_ok = False
+                                        except (ValueError, TypeError):
+                                            pass
+                                            
+                                    if not order_time_ok:
+                                        continue
+                                        
+                                    actual_exit_price = qf / base_amt
+                                    
+                                    raw_fee = getattr(order, "fee", getattr(order, "fee_x18", None))
+                                    if raw_fee is not None and isinstance(raw_fee, (int, float, str)):
+                                        try:
+                                            f_val = float(raw_fee) / 1e18 if float(raw_fee) > 1e10 else float(raw_fee)
+                                            if f_val > 0:
+                                                actual_fee = f_val
+                                        except (ValueError, TypeError):
+                                            pass
+                                    if actual_fee == 0.0 and actual_exit_price > 0:
+                                        actual_fee = base_amt * (entry_price + actual_exit_price) * 0.0005
+                                        
+                                    if entry_price > 0 and actual_exit_price > 0:
+                                        gross_pnl = base_amt * (actual_exit_price - entry_price) if direction == "LONG" else base_amt * (entry_price - actual_exit_price)
+                                        actual_pnl = round(gross_pnl - actual_fee, 4)
+                                        is_exact_pnl = True
+                                        logger.info(
+                                            f"[NadoTradingService] 🎯 Reconciled EXACT close fill for {symbol}: "
+                                            f"{base_amt:.4f} contracts @ {actual_exit_price:.4f}, fee: ${actual_fee:.4f}, PnL: ${actual_pnl:.4f}"
+                                        )
+                                    break
+                    except Exception as hist_err:
+                        logger.warning(f"[NadoTradingService] ⚠️ Indexer fill reconciliation skipped ({hist_err}), using pre-close snapshot.")
+
+                    pnl = actual_pnl if (is_exact_pnl and actual_pnl is not None) else (target_pos["pnl"] if target_pos else 0.0)
+
+                    if not hasattr(self, "_last_close_info"):
+                        self._last_close_info = {}
+                    close_record = {
+                        "exit_price": actual_exit_price,
+                        "pnl": pnl,
+                        "fee": actual_fee,
+                        "is_exact": is_exact_pnl
+                    }
+                    self._last_close_info[symbol] = close_record
+                    self._last_close_info[base_symbol] = close_record
+                    self._last_close_info[f"{base_symbol}-USD"] = close_record
+
                     if pnl > 0.001:
                         self._update_streak_and_cooldown("WIN")
                     elif pnl < -0.001:
@@ -1138,6 +1223,27 @@ class NadoTradingService(BaseTradingService):
                         
                     return True, pnl
                 except Exception as close_e:
+                    err_str = str(close_e).lower()
+                    if "2002" in err_str or "amount is zero" in err_str:
+                        logger.info(
+                            f"[NadoTradingService] ℹ️ Position {symbol} is already closed on exchange (order amount is zero). "
+                            f"Cleaning up local tracking."
+                        )
+                        pos_data = dict(self.active_positions.get(symbol) or self.active_positions.get(base_symbol) or {})
+                        sl_dig = pos_data.get("sl_digest")
+                        tp_dig = pos_data.get("tp_digest")
+                        digests_to_cancel = [d for d in [sl_dig, tp_dig] if d]
+                        if digests_to_cancel:
+                            await self._cancel_trigger_digests(product_id, digests_to_cancel, sender=pos_data.get("sender", subaccount))
+
+                        if symbol in self.active_positions:
+                            del self.active_positions[symbol]
+                        alias_key = base_symbol if '-' in symbol else f"{base_symbol}-USD"
+                        if alias_key in self.active_positions:
+                            del self.active_positions[alias_key]
+                        self._save_positions()
+                        return True, 0.0
+
                     logger.warning(f"[NadoTradingService] ⚠️ Retryable close error for {symbol}: {close_e}")
                     if attempt < max_retries - 1:
                         await asyncio.sleep(1.5)
@@ -1414,6 +1520,8 @@ class NadoTradingService(BaseTradingService):
 
         try:
             from services.partial_tp_calculator import PartialTPCalculator
+            from core.config import config
+            pref_mode = getattr(config, "PARTIAL_TP_MODE", "2_TIER")
             import time
             plan = PartialTPCalculator.calculate_plan(
                 symbol=canonical_sym,
@@ -1422,7 +1530,8 @@ class NadoTradingService(BaseTradingService):
                 tp_final_price=tp_price,
                 total_contracts=total_contracts,
                 market_params=params,
-                created_at=time.time()
+                created_at=time.time(),
+                preferred_mode=pref_mode
             )
             pos["partial_tp_plan"] = plan.to_dict()
             pos["contracts"] = plan.remaining_contracts
@@ -2165,7 +2274,7 @@ class NadoTradingService(BaseTradingService):
         try:
             from nado_protocol.trigger_client.types.execute import CancelTriggerOrdersParams
             cancel_params = CancelTriggerOrdersParams(
-                productIds=[product_id],
+                productIds=[product_id] * len(valid_digests),
                 digests=valid_digests,
                 sender=target_sender
             )
@@ -3203,8 +3312,13 @@ class NadoTradingService(BaseTradingService):
                                         self._position_locks = {}
                                     lock = self._position_locks.setdefault(sym, asyncio.Lock())
                                     async with lock:
+                                        if sym not in self.active_positions and sym.split('-')[0].upper() not in self.active_positions:
+                                            logger.info(f"[NadoTradingService] ℹ️ Position {sym} already closed or removed from active positions. Skipping Fast Monitor close.")
+                                            return
                                         success, pnl = await self.force_close_position(sym, bypass_check=True)
                                     if success:
+                                        close_info = getattr(self, "_last_close_info", {}).get(sym) or {}
+                                        real_exit_price = close_info.get("exit_price") or cur_p
                                         pnl_emoji = "🎉" if pnl >= 0 else "🔻"
                                         slices_pnl = float(p_dict.get("accumulated_realized_pnl", 0.0))
                                         total_trade_pnl = pnl + slices_pnl
@@ -3215,7 +3329,7 @@ class NadoTradingService(BaseTradingService):
                                             f"{pnl_emoji} *TRADE CLOSED / СДЕЛКА ЗАКРЫТА (FAST_MONITOR_{t_name})*\n\n"
                                             f"🪙 *Asset / Монета:* `{sym}`\n"
                                             f"📊 *Direction / Направление:* `{p_dict.get('direction', 'UNKNOWN')}`\n"
-                                            f"🎯 *Entry / Вход:* `${p_dict.get('entry_price', 0):,.4f}` ➔ *Exit / Выход:* `${cur_p:,.4f}`\n"
+                                            f"🎯 *Entry / Вход:* `${p_dict.get('entry_price', 0):,.4f}` ➔ *Exit / Выход:* `${real_exit_price:,.4f}`\n"
                                             f"💰 *PnL:* {pnl_display}\n"
                                         )
                                         try:

@@ -40,5 +40,54 @@
         "root_cause": "Entered SHORT into mixed timeframe alignment (MIXED_CHOP) with bullish 15m trend and RSI > 60.",
         "actionable_rule": "WARNING: Do not enter SHORT when MTF alignment is MIXED_CHOP, 15m trend is BULLISH, and RSI > 60.",
         "trade_outcome": "LOSS"
+    },
+    {
+        "symbol": "BTC-USD",
+        "reasoning": "The trade was initiated based on a bullish thesis supported by multi-timeframe trend alignment and RSI divergence. The market context at close showed a bullish trend across all timeframes, with price action confirming the bullish bias. The trade was closed with a positive ROI, indicating a successful execution of the thesis.",
+        "root_cause": "Successful LONG entry supported by FULL_ALIGNMENT MTF trend and bullish indicators.",
+        "actionable_rule": "CONFIRM: Enter LONG when MTF trend alignment is FULL_ALIGNMENT and RSI divergence supports bullish momentum.",
+        "trade_outcome": "WIN"
+    },
+    {
+        "symbol": "SOL-USD",
+        "reasoning": "The trade was a SHORT triggered by a bearish breakout below a recent swing low, supported by bearish multi-timeframe trends (15m, 1h, 4h). The RSI was not oversold (44.25), and the MACD was below the signal line, indicating bearish momentum. The order book showed a slight seller imbalance (-0.0542). The trade was closed by a stop-loss (SL) at 106.80848394200001, resulting in a small profit.",
+        "root_cause": "The trade was stopped out prematurely due to a bullish liquidity sweep at 106.05, followed by a doji candle indicating potential reversal. The stop-loss was likely too tight given the ATR (0.410553).",
+        "actionable_rule": "WARNING: Adjust stop-loss to at least 1.5x ATR (0.62 in this case) when entering SHORT in a fully aligned bearish trend to avoid premature exits from minor reversals.",
+        "trade_outcome": "WIN"
+    },
+    {
+        "symbol": "HYPE-USD",
+        "reasoning": "The trade was triggered as a SHORT based on a bearish MTF trend and order book imbalance. The MTF alignment was fully bearish, and the RSI was neutral at 38.8. The trade was closed due to a stop-loss trigger, resulting in a small loss. The market context at close showed continued bearish trends across all timeframes, but the price did not move significantly lower, leading to the stop-loss being hit.",
+        "root_cause": "Stop-loss triggered despite bearish MTF alignment and neutral RSI, indicating insufficient downward momentum.",
+        "actionable_rule": "WARNING: Ensure sufficient downward momentum and confirm bearish signals before entering SHORT positions, even with full MTF bearish alignment.",
+        "trade_outcome": "LOSS"
+    },
+    {
+        "symbol": "XRP-USD",
+        "reasoning": "The trade was triggered as a SHORT based on bearish MTF trends and indicators. However, the 15m trend was neutral, and there was a bullish RSI divergence and MACD crossover. The price action showed a bullish liquidity sweep, indicating potential reversal. The trade was stopped out as the price moved against the position.",
+        "root_cause": "Entered SHORT into neutral 15m trend with bullish RSI divergence and MACD crossover, ignoring bullish liquidity sweep signals.",
+        "actionable_rule": "WARNING: Do not enter SHORT when 15m trend is NEUTRAL and there are bullish RSI divergence, MACD crossover, and liquidity sweep signals.",
+        "trade_outcome": "LOSS"
+    },
+    {
+        "symbol": "ETH-USD",
+        "reasoning": "Trade was SHORT with full bearish alignment across 15m, 1h, and 4h timeframes. Indicators showed bearish MACD, RSI at 40.18 (not oversold), and a bearish engulfing candle pattern. Price was below all EMAs (20, 50, 200) with negative EMA trend. Volume spike confirmed bearish momentum.",
+        "root_cause": "Successful SHORT due to full bearish MTF alignment, confirmed by bearish indicators and volume spike.",
+        "actionable_rule": "CONFIRM: Enter SHORT when MTF trends are fully bearish (15m/1h/4h), price below key EMAs, and bearish candle patterns appear with volume confirmation.",
+        "trade_outcome": "WIN"
+    },
+    {
+        "symbol": "ZEC-USD",
+        "reasoning": "Trade entered LONG despite 15m trend being BEARISH and price trading below both EMA_20 (1229.49) and EMA_50 (1224.79), with EMA_trend='down'. At close, RSI_14=40.1 (bearish momentum), MACD histogram=-2.0179 (bearish and accelerating), and minus_DI_14 (26.48) > plus_DI_14 (18.56), confirming bearish directional strength. Price closed at 1217.81 — below BB_lower (1220.25) and 10.29% below BB_middle, indicating extreme lower-band rejection. A bearish liquidity sweep occurred at 1235.93 (bar -3), which preceded the breakdown — violating the original thesis of 'bullish breakout confirmation'. MTF alignment was 'MIXED_CHOP', contradicting the 'FULL_ALIGNMENT' claim in the original thesis.",
+        "root_cause": "Entered LONG against dominant 15m bearish trend, below key EMAs, with bearish MACD histogram acceleration and confirmed bearish DI dominance — while falsely assuming MTF alignment.",
+        "actionable_rule": "WARNING: Do not enter LONG when 15m trend is BEARISH, price is below EMA_20 & EMA_50, MACD histogram is negative and accelerating, and minus_DI > plus_DI — regardless of higher-timeframe bullish bias.",
+        "trade_outcome": "LOSS"
+    },
+    {
+        "symbol": "BTC",
+        "reasoning": "Trade was SHORT with entry at 81474.67 and exit at 81048.0, yielding positive PnL (0.2758 USD) and ROI (0.42%). Market context shows full multi-timeframe bearish alignment (15m/1h/4h all BEARISH), confirmed by EMA trend = 'down', MACD label = 'bearish', histogram = negative & decelerating, ADX = 30.47 (strong trend), minus_DI > plus_DI, RSI = 44.03 (neutral-bearish, no divergence), and two consecutive 'strong_bearish' candle patterns in last two bars. Price closed below BB lower (80986.30), VWAP (82055.98), and all key EMAs — confirming structural weakness. No contradictory signals (e.g., no RSI divergence, no bullish MACD crossover, no liquidity sweeps). Trade aligned with dominant trend and confluence.",
+        "root_cause": "None — trade was correctly aligned with strong multi-timeframe bearish trend and technical confluence.",
+        "actionable_rule": "CONFIRM: Enter SHORT only when MTF alignment is FULL BEARISH AND MACD label = 'bearish' AND at least two recent 'strong_bearish' candle patterns appear.",
+        "trade_outcome": "WIN"
     }
 ]

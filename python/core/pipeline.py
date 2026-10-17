@@ -920,7 +920,8 @@ class TradingPipeline:
                     pnl_val = float(closed.get("pnl_usd", 0.0) or 0.0)
                     out_tag = "WIN" if pnl_val > 0.001 else ("LOSS" if pnl_val < -0.001 else "BREAK_EVEN")
                     tracker.record_closed_trade(out_tag, pnl_val)
-                    asyncio.create_task(safe_reflect(self.agents.reflector, closed, market_data))
+                    if getattr(self.agents.reflector, "enabled", False):
+                        asyncio.create_task(safe_reflect(self.agents.reflector, closed, market_data))
                 
                 # СТАДИЯ 1.6: SENTINEL AGENT (PHASE 2) - DETERMINISTIC RISK CONTROL
                 if symbol in self.services.trading_service.active_positions:

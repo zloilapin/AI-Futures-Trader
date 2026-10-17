@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     # Лимиты риск-менеджера
     MAX_CONCURRENT_POSITIONS: int = Field(default=3, ge=1)
     
+    # Флаг активности Reflector Agent (пост-мортем анализ и инъекция прошлых правил)
+    ENABLE_REFLECTOR_AGENT: bool = Field(default=False)
+    
+    # Режим сетки частичного Take-Profit ("2_TIER" = 50/50 с Б/У на TP1, "4_TIER" = 25/25/25/25, "SINGLE_TIER" = 100%)
+    PARTIAL_TP_MODE: str = Field(default="2_TIER")
+    
     # Расширенные лимиты Risk Manager
     MIN_SL_PCT: float = Field(default=0.01)    # 1.0% floor (was 2.5% — dominated ATR for stable coins)
     MIN_TP_PCT: float = Field(default=0.03)    # 3.0% floor (was 7.5%)

@@ -220,10 +220,12 @@ class PartialTPCalculator:
         tp_final_price: float,
         total_contracts: float,
         market_params: Dict[str, Any],
-        created_at: Optional[float] = None
+        created_at: Optional[float] = None,
+        preferred_mode: Optional[str] = None
     ) -> PartialTPPlan:
         """
-        Builds a comprehensive PartialTPPlan based on entry, final TP, and exchange product parameters.
+        Builds a comprehensive PartialTPPlan based on entry, final TP, exchange product parameters,
+        and preferred tier mode (2_TIER, 4_TIER, SINGLE_TIER).
         """
         dir_clean = str(direction).strip().upper()
         if dir_clean not in ("LONG", "SHORT"):
@@ -236,6 +238,15 @@ class PartialTPCalculator:
             raise ValueError(f"For LONG, tp_final_price ({tp_final_price}) must be > entry_price ({entry_price}).")
         elif dir_clean == "SHORT" and tp_final_price >= entry_price:
             raise ValueError(f"For SHORT, tp_final_price ({tp_final_price}) must be < entry_price ({entry_price}).")
+
+        # Resolve preferred mode (defaults to 2_TIER / 50-50 per risk design)
+        if preferred_mode is None:
+            try:
+                from core.config import config
+                preferred_mode = getattr(config, "PARTIAL_TP_MODE", "2_TIER")
+            except Exception:
+                preferred_mode = "2_TIER"
+        preferred_mode = str(preferred_mode or "2_TIER").upper().strip()
 
         # Extract market parameters
         size_inc = float(
@@ -285,61 +296,8 @@ class PartialTPCalculator:
             raise ValueError(f"Total contracts ({total_contracts}) is zero after size_increment alignment.")
 
         # --- TIER SIZING & ADAPTATION LOGIC ---
-        # 1. Test 4-tier candidate
-        # Intermediate tiers close floor(0.25 * total_contracts)
-        q4 = cls.floor_to_step(0.25 * total_contracts, size_inc)
-        rem4 = cls.floor_to_step(total_contracts - (3 * q4), size_inc)
-
-        can_do_4_tier = (
-            q4 >= min_size and
-            rem4 >= min_size and
-            q4 > 0 and
-            rem4 > 0
-        )
-
-        if can_do_4_tier:
-            tiers = [
-                TPTier(
-                    tier_index=1,
-                    fraction=0.25,
-                    target_price=get_price_at(0.25),
-                    close_contracts=q4,
-                    cumulative_fraction=0.25,
-                    is_final=False,
-                    action=None
-                ),
-                TPTier(
-                    tier_index=2,
-                    fraction=0.50,
-                    target_price=get_price_at(0.50),
-                    close_contracts=q4,
-                    cumulative_fraction=0.50,
-                    is_final=False,
-                    action="PROTECT_BREAKEVEN"
-                ),
-                TPTier(
-                    tier_index=3,
-                    fraction=0.75,
-                    target_price=get_price_at(0.75),
-                    close_contracts=q4,
-                    cumulative_fraction=0.75,
-                    is_final=False,
-                    action="START_TRAILING"
-                ),
-                TPTier(
-                    tier_index=4,
-                    fraction=1.00,
-                    target_price=cls.round_to_tick(tp_final_price, price_inc),
-                    close_contracts=rem4,
-                    cumulative_fraction=1.00,
-                    is_final=True,
-                    action="CLOSE_ALL"
-                )
-            ]
-            mode = "4_TIER"
-
-        else:
-            # 2. Test 2-tier candidate
+        if preferred_mode == "2_TIER":
+            # 2-Tier Candidate (50% / 50% with immediate Breakeven on TP1)
             q2 = cls.floor_to_step(0.50 * total_contracts, size_inc)
             rem2 = cls.floor_to_step(total_contracts - q2, size_inc)
 
@@ -372,9 +330,8 @@ class PartialTPCalculator:
                     )
                 ]
                 mode = "2_TIER"
-
             else:
-                # 3. Fallback: SINGLE_TIER (100% full TP)
+                # Fallback to SINGLE_TIER if position volume too small for 2 tiers
                 tiers = [
                     TPTier(
                         tier_index=1,
@@ -387,6 +344,121 @@ class PartialTPCalculator:
                     )
                 ]
                 mode = "SINGLE_TIER"
+
+        elif preferred_mode == "SINGLE_TIER":
+            tiers = [
+                TPTier(
+                    tier_index=1,
+                    fraction=1.00,
+                    target_price=cls.round_to_tick(tp_final_price, price_inc),
+                    close_contracts=total_contracts,
+                    cumulative_fraction=1.00,
+                    is_final=True,
+                    action="CLOSE_ALL"
+                )
+            ]
+            mode = "SINGLE_TIER"
+
+        else: # "4_TIER"
+            # 1. Test 4-tier candidate
+            q4 = cls.floor_to_step(0.25 * total_contracts, size_inc)
+            rem4 = cls.floor_to_step(total_contracts - (3 * q4), size_inc)
+
+            can_do_4_tier = (
+                q4 >= min_size and
+                rem4 >= min_size and
+                q4 > 0 and
+                rem4 > 0
+            )
+
+            if can_do_4_tier:
+                tiers = [
+                    TPTier(
+                        tier_index=1,
+                        fraction=0.25,
+                        target_price=get_price_at(0.25),
+                        close_contracts=q4,
+                        cumulative_fraction=0.25,
+                        is_final=False,
+                        action=None
+                    ),
+                    TPTier(
+                        tier_index=2,
+                        fraction=0.50,
+                        target_price=get_price_at(0.50),
+                        close_contracts=q4,
+                        cumulative_fraction=0.50,
+                        is_final=False,
+                        action="PROTECT_BREAKEVEN"
+                    ),
+                    TPTier(
+                        tier_index=3,
+                        fraction=0.75,
+                        target_price=get_price_at(0.75),
+                        close_contracts=q4,
+                        cumulative_fraction=0.75,
+                        is_final=False,
+                        action="START_TRAILING"
+                    ),
+                    TPTier(
+                        tier_index=4,
+                        fraction=1.00,
+                        target_price=cls.round_to_tick(tp_final_price, price_inc),
+                        close_contracts=rem4,
+                        cumulative_fraction=1.00,
+                        is_final=True,
+                        action="CLOSE_ALL"
+                    )
+                ]
+                mode = "4_TIER"
+            else:
+                # 2. Test 2-tier candidate
+                q2 = cls.floor_to_step(0.50 * total_contracts, size_inc)
+                rem2 = cls.floor_to_step(total_contracts - q2, size_inc)
+
+                can_do_2_tier = (
+                    q2 >= min_size and
+                    rem2 >= min_size and
+                    q2 > 0 and
+                    rem2 > 0
+                )
+
+                if can_do_2_tier:
+                    tiers = [
+                        TPTier(
+                            tier_index=1,
+                            fraction=0.50,
+                            target_price=get_price_at(0.50),
+                            close_contracts=q2,
+                            cumulative_fraction=0.50,
+                            is_final=False,
+                            action="PROTECT_BREAKEVEN"
+                        ),
+                        TPTier(
+                            tier_index=2,
+                            fraction=1.00,
+                            target_price=cls.round_to_tick(tp_final_price, price_inc),
+                            close_contracts=rem2,
+                            cumulative_fraction=1.00,
+                            is_final=True,
+                            action="CLOSE_ALL"
+                        )
+                    ]
+                    mode = "2_TIER"
+                else:
+                    # 3. Fallback: SINGLE_TIER (100% full TP)
+                    tiers = [
+                        TPTier(
+                            tier_index=1,
+                            fraction=1.00,
+                            target_price=cls.round_to_tick(tp_final_price, price_inc),
+                            close_contracts=total_contracts,
+                            cumulative_fraction=1.00,
+                            is_final=True,
+                            action="CLOSE_ALL"
+                        )
+                    ]
+                    mode = "SINGLE_TIER"
 
         return PartialTPPlan(
             symbol=symbol,

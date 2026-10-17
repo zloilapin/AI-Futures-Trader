@@ -249,4 +249,105 @@ async def test_closure_fallback_when_current_price_is_zero():
     # Gross PnL is 0, Net PnL is only fees (-0.03)
     assert report["pnl_usd"] < 0  # Only fees
     assert abs(report["pnl_usd"] - (-32.80 * 0.001)) < 0.01
+@pytest.mark.asyncio
+async def test_force_close_reconciles_exact_fill_from_indexer():
+    """Verifies that force_close_position queries indexer for exact fill price and net PnL."""
+    service = get_mock_service()
+    service.active_positions["BTC-USD"] = {
+        "direction": "LONG",
+        "entry_price": 60000.0,
+        "size_usd": 30000.0,
+        "product_id": 2,
+        "contracts": 0.5,
+        "sender": service.default_subaccount_id
+    }
+
+    mock_sub = MagicMock()
+    mock_sub.subaccount = service.default_subaccount_id
+    mock_subs = MagicMock()
+    mock_subs.subaccounts = [mock_sub]
+    service.client.subaccount.get_subaccounts.return_value = mock_subs
+    service.client.market.close_position = MagicMock(return_value="0xtx123")
+    service.get_active_positions = AsyncMock(return_value=[{
+        "symbol": "BTC-USD",
+        "pnl": 10.0  # Pre-close estimate, should be overridden by exact fill
+    }])
+
+    # Mock historical orders returned from indexer
+    mock_order = MagicMock()
+    mock_order.base_filled = "-500000000000000000"  # -0.5 base (closing LONG)
+    mock_order.quote_filled = "35000"  # $35,000 -> exit price 70,000.0
+    mock_order.timestamp = str(int(time.time() * 1000))
+    mock_order.fee = "200000000000000000"  # 0.20 USD fee
+
+    mock_hist = MagicMock()
+    mock_hist.orders = [mock_order]
+    service.client.market.get_subaccount_historical_orders = MagicMock(return_value=mock_hist)
+
+    success, pnl = await service.force_close_position("BTC-USD", bypass_check=True)
+
+    assert success is True
+    # Gross PnL: 0.5 * (70000 - 60000) = 5000.0. Net: 5000.0 - 0.20 = 4999.80
+    assert pnl == pytest.approx(4999.80, rel=1e-3)
+    assert "BTC-USD" in service._last_close_info
+    assert service._last_close_info["BTC-USD"]["exit_price"] == pytest.approx(70000.0)
+    assert service._last_close_info["BTC-USD"]["is_exact"] is True
+
+
+@pytest.mark.asyncio
+async def test_cancel_trigger_digests_matches_product_ids_length():
+    """Verifies that _cancel_trigger_digests supplies equal lengths for productIds and digests."""
+    service = get_mock_service()
+    service.is_connected = True
+    service.default_subaccount_id = "0xsubaccount"
+    
+    cancel_mock = MagicMock()
+    service.client.market.cancel_trigger_orders = cancel_mock
+
+    digests = ["0xdigest1", "0xdigest2"]
+    res = await service._cancel_trigger_digests(product_id=5, digests=digests, sender="0xsubaccount")
+
+    assert res is True
+    cancel_mock.assert_called_once()
+    call_args = cancel_mock.call_args[0][0]
+    assert call_args.productIds == [5, 5]
+    assert call_args.digests == ["0xdigest1", "0xdigest2"]
+    assert len(call_args.productIds) == len(call_args.digests)
+
+
+@pytest.mark.asyncio
+async def test_force_close_handles_amount_zero_error_2002_gracefully():
+    """Verifies that when close_position encounters error 2002 ('amount is zero'),
+    it recognizes the position is already closed, cleans up local state, and returns success."""
+    service = get_mock_service()
+    service.active_positions["ZEC-USD"] = {
+        "direction": "LONG",
+        "entry_price": 1235.0,
+        "size_usd": 100.0,
+        "product_id": 8,
+        "contracts": 0.09,
+        "sl_digest": "0xsl",
+        "tp_digest": "0xtp",
+        "sender": service.default_subaccount_id
+    }
+
+    mock_sub = MagicMock()
+    mock_sub.subaccount = service.default_subaccount_id
+    mock_subs = MagicMock()
+    mock_subs.subaccounts = [mock_sub]
+    service.client.subaccount.get_subaccounts.return_value = mock_subs
+    
+    # Simulate Nado API throwing Error 2002 because on-chain SL already closed the position
+    service.client.market.close_position.side_effect = Exception(
+        '{"status":"failure","error_code":2002,"error":"Invalid order amount: The provided amount is zero."}'
+    )
+    service.get_active_positions = AsyncMock(return_value=[])
+    service._cancel_trigger_digests = AsyncMock(return_value=True)
+
+    success, pnl = await service.force_close_position("ZEC-USD", bypass_check=True)
+
+    assert success is True
+    assert pnl == 0.0
+    assert "ZEC-USD" not in service.active_positions
+    service._cancel_trigger_digests.assert_awaited_once()
 

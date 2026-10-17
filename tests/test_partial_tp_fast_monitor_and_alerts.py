@@ -30,6 +30,9 @@ def mock_service():
     service._save_positions = MagicMock()
     service._save_state = MagicMock()
 
+    from core.config import config
+    config.PARTIAL_TP_MODE = "4_TIER"
+
     service._market_cache = {
         8: MagicMock(
             book_info=MagicMock(
@@ -215,3 +218,62 @@ async def test_legacy_position_without_partial_tp_plan_safely_ignored(mock_servi
 
     report = await mock_service.check_and_execute_partial_tp_tier("SOL-USD", current_price=101.50)
     assert report is None
+
+
+@pytest.mark.asyncio
+async def test_check_and_execute_partial_tp_2_tier_50_50_immediate_be(mock_service):
+    """Verifies that in 2_TIER mode, completing Tier 1 (50%) immediately activates Breakeven protection."""
+    from core.config import config
+    config.PARTIAL_TP_MODE = "2_TIER"
+
+    mock_service.active_positions["SOL-USD"] = {
+        "direction": "LONG",
+        "entry_price": 100.0,
+        "sl_price": 98.0,
+        "tp_price": 104.0,
+        "size_usd": 160.0,
+        "contracts": 1.6,
+        "product_id": 8
+    }
+    mock_service.initialize_partial_tp_plan("SOL-USD")
+
+    pos = mock_service.active_positions["SOL-USD"]
+    plan = PartialTPPlan.from_dict(pos["partial_tp_plan"])
+    assert plan.mode == "2_TIER"
+    assert len(plan.tiers) == 2
+    assert plan.tiers[0].action == "PROTECT_BREAKEVEN"
+    assert plan.tiers[0].fraction == 0.50
+    assert plan.tiers[0].target_price == pytest.approx(102.0)  # 50% of 4.0 target
+
+    mock_service.execute_partial_close = AsyncMock(return_value=PartialCloseResult(
+        success=True,
+        digest="0xmock_tp1_50_50",
+        requested_contracts=0.8,
+        filled_contracts=0.8,
+        fill_price=102.0,
+        realized_pnl=1.60,
+        is_partial_fill=False
+    ))
+    mock_service.update_stop_loss_to_be = AsyncMock(return_value=True)
+
+    mock_tg = MagicMock()
+    mock_tg.send_message = AsyncMock(return_value=True)
+    mock_tg.broadcast_to_channel = AsyncMock(return_value=True)
+
+    with patch("services.telegram_service.TelegramService", return_value=mock_tg):
+        report = await mock_service.check_and_execute_partial_tp_tier("SOL-USD", current_price=102.05)
+
+    assert report is not None
+    assert report["tier_index"] == 1
+    assert report["fraction"] == 0.50
+    assert report["slice_pnl"] == pytest.approx(1.60)
+    assert report["remaining_contracts"] == pytest.approx(0.8)
+
+    # Breakeven was updated immediately on Tier 1
+    mock_service.update_stop_loss_to_be.assert_awaited_once_with("SOL-USD")
+
+    # Telegram message confirms 50% slice and Breakeven
+    msg = mock_tg.send_message.call_args[0][0]
+    assert "TP1 - 50%" in msg
+    assert "БЕЗУБЫТОК" in msg
+
