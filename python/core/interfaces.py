@@ -32,6 +32,10 @@ class BaseTradingService(ABC):
         """Manually closes a position. Returns (success_bool, message_string)."""
         pass
         
+    async def emergency_protect_risk_breach(self, symbol: str, approved_risk: float = 0.0, actual_risk: float = 0.0) -> tuple:
+        """Emergency handler when post-fill actual risk violates approved risk budget. Returns (success_bool, pnl)."""
+        return await self.force_close_position(symbol, bypass_check=True)
+
     @abstractmethod
     async def sync_with_exchange(self) -> None:
         """Synchronizes local state with exchange state (e.g. dropped orders, manual closes)."""

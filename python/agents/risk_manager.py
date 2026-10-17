@@ -715,7 +715,12 @@ class RiskManager(BaseAgent):
 
         # ═══ Stage 8: Rounding, Increments & Exchange Sanity ═══
         size_increment = float(derivatives_data.get("size_increment") or 0.0)
+        is_strict_metadata = bool(derivatives_data.get("strict_metadata", False))
         if size_increment <= 0:
+            if is_strict_metadata:
+                msg = f"Market metadata incomplete: missing or non-positive size_increment ({size_increment}) for {symbol}. Refusing trade."
+                self.logger.warning(f"[{self.name}] 🚫 MARKET_METADATA_UNAVAILABLE VETO: {msg}")
+                return self._build_veto_result("MARKET_METADATA_UNAVAILABLE", msg, trade_action)
             self.logger.warning(
                 f"[{self.name}] ⚠️ Missing or non-positive size_increment in derivatives_data for {symbol}. "
                 f"Defaulting to safe fallback 0.001."

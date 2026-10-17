@@ -400,8 +400,9 @@ class NadoTradingService(BaseTradingService):
                 logger.error(f"[NadoTradingService] ❌ Market params not found for product_id {product_id}")
                 return False
                 
+            from decimal import Decimal
             amount_base = contracts if contracts > 0 else notional_usd / entry_price
-            amount_x18 = int(amount_base * 10**18)
+            amount_x18 = int(Decimal(str(round(amount_base, 8))) * Decimal(10**18))
             # Explicitly guard against non-directional execution (HOLD, WAIT, etc.)
             dir_clean = str(direction).strip().upper()
             
@@ -419,7 +420,7 @@ class NadoTradingService(BaseTradingService):
                 logger.error(f"[NadoTradingService] ❌ Refusing execution: invalid direction '{direction}'. Only LONG or SHORT allowed!")
                 return False
                 
-            price_x18 = int(limit_price * 10**18)
+            price_x18 = int(Decimal(str(round(limit_price, 8))) * Decimal(10**18))
             
             # Align to size and price increments
             size_increment = params_dict["size_increment_x18"]
@@ -585,32 +586,74 @@ class NadoTradingService(BaseTradingService):
                     
                     return False
             
-            # --- Actual Risk vs Approved Risk Check (CRITICAL-13) ---
+            # --- Defensive Step: Immediate local registration before protection checks ---
+            # Ensures position is never orphaned or invisible if emergency close fails or indexer lags
             actual_base_amount = abs(actual_filled_x18) / 1e18
-            expected_risk_usd = actual_base_amount * abs(entry_price - sl_price)
-            actual_risk_usd = actual_base_amount * abs(actual_entry_price - sl_price)
+            notional_usd = actual_base_amount * actual_entry_price
             
-            # If slippage caused the risk to increase by more than 10% (with a strict $1.00 floor to ignore dust and normal spread)
-            if sl_price > 0 and expected_risk_usd > 0 and actual_risk_usd > expected_risk_usd + max(expected_risk_usd * 0.10, 1.00):
+            self.active_positions[symbol] = {
+                "symbol": symbol,
+                "direction": direction.upper(),
+                "entry_price": actual_entry_price,
+                "size_usd": notional_usd,
+                "notional_usd": notional_usd,
+                "margin_used": notional_usd / float(leverage) if leverage > 0 else notional_usd,
+                "tp_price": tp_price,
+                "sl_price": sl_price,
+                "leverage": leverage,
+                "highest_price": actual_entry_price,
+                "lowest_price": actual_entry_price,
+                "protection_state": "SUBMITTING_PROTECTION",
+                "atr_reference": atr_value,
+                "product_id": product_id,
+                "sender": sender,
+                "sl_digest": None,
+                "tp_digest": None,
+                "sl_type": None,
+                "tp_type": None,
+                "trigger_amount_x18": str(-actual_filled_x18),
+                "contracts": actual_base_amount,
+                "accumulated_realized_pnl": 0.0,
+                "original_thesis": original_thesis,
+                "native_triggers_placed": False,
+                "open_time": time.time(),
+                "open_digest": digest
+            }
+            if canonical_sym != symbol:
+                self.active_positions[canonical_sym] = self.active_positions[symbol]
+            self._save_positions()
+
+            # --- Actual Risk vs Approved Risk Check (CRITICAL-13 / Unified P0) ---
+            expected_risk_usd = actual_base_amount * abs(entry_price - sl_price)
+            # Include estimated round-trip taker trading fees in total potential loss assessment
+            fee_loss_est = actual_base_amount * (actual_entry_price + sl_price) * 0.0005
+            total_actual_loss = (actual_base_amount * abs(actual_entry_price - sl_price)) + fee_loss_est
+            
+            # Unified 10% risk expansion tolerance + $0.05 dust floor (eliminates excessive $1.00 floor)
+            allowed_risk_threshold = (expected_risk_usd * 1.10) + 0.05
+            if sl_price > 0 and expected_risk_usd > 0 and total_actual_loss > allowed_risk_threshold:
                 logger.error(
-                    f"[NadoTradingService] ❌ FATAL SLIPPAGE: Actual risk (${actual_risk_usd:.2f}) exceeds approved risk "
-                    f"(${expected_risk_usd:.2f}) due to bad execution price ({actual_entry_price:.4f} vs expected {entry_price:.4f}). "
-                    f"Emergency closing position to protect capital."
+                    f"[NadoTradingService] ❌ FATAL SLIPPAGE / RISK BREACH: Total potential loss (${total_actual_loss:.2f}) "
+                    f"exceeds approved risk threshold (${allowed_risk_threshold:.2f}, expected=${expected_risk_usd:.2f}) "
+                    f"due to adverse execution price ({actual_entry_price:.4f} vs ref {entry_price:.4f}). "
+                    f"Emergency closing position."
                 )
-                try:
-                    await self.force_close_position(symbol, bypass_check=True)
-                except Exception as e:
-                    logger.error(f"[NadoTradingService] ⚠️ Failed to close high-risk position {symbol}: {e}")
+                close_ok, _ = await self.emergency_protect_risk_breach(
+                    symbol=symbol,
+                    approved_risk=expected_risk_usd,
+                    actual_risk=total_actual_loss
+                )
                 return False
                 
             # --- Partial Fill Guard (CRITICAL-4) ---
             fill_ratio = abs(actual_filled_x18) / abs(amount_x18) if amount_x18 != 0 else 0
             if fill_ratio < 0.95:
                 logger.error(f"[NadoTradingService] ❌ PARTIAL FILL {fill_ratio*100:.1f}%. Closing immediately to prevent slivers.")
-                try:
-                    await self.force_close_position(symbol, bypass_check=True)
-                except Exception as e:
-                    logger.error(f"[NadoTradingService] ⚠️ Failed to close partial position {symbol}: {e}")
+                close_ok, _ = await self.emergency_protect_risk_breach(
+                    symbol=symbol,
+                    approved_risk=expected_risk_usd,
+                    actual_risk=total_actual_loss
+                )
                 return False
             
             # --- Native Trigger Orders (TP/SL) ---
@@ -703,8 +746,8 @@ class NadoTradingService(BaseTradingService):
             # Recalculate notional_usd to reflect actual fill amount
             notional_usd = abs(actual_filled_x18 / 1e18) * actual_entry_price
             
-            # Store position state to prevent duplicate orders and track PnL
-            self.active_positions[symbol] = {
+            # Finalize position state with confirmed native triggers
+            self.active_positions[symbol].update({
                 "direction": direction.upper(),
                 "entry_price": actual_entry_price,
                 "size_usd": notional_usd,
@@ -713,23 +756,15 @@ class NadoTradingService(BaseTradingService):
                 "tp_price": tp_price,
                 "sl_price": sl_price,
                 "leverage": leverage,
-                "highest_price": actual_entry_price,
-                "lowest_price": actual_entry_price,
                 "protection_state": "PROTECTED",
-                "atr_reference": atr_value,
-                "product_id": product_id,
-                "sender": sender,
                 "sl_digest": sl_digest,
                 "tp_digest": tp_digest,
                 "sl_type": sl_type,
                 "tp_type": tp_type if tp_price > 0 else None,
-                "trigger_amount_x18": trigger_amount_x18,
-                "contracts": abs(actual_filled_x18 / 1e18),
-                "accumulated_realized_pnl": 0.0,
-                "original_thesis": original_thesis,
-                "native_triggers_placed": bool(sl_digest or tp_digest),
-                "open_time": time.time()
-            }
+                "native_triggers_placed": bool(sl_digest or tp_digest)
+            })
+            if canonical_sym != symbol and canonical_sym in self.active_positions:
+                self.active_positions[canonical_sym] = self.active_positions[symbol]
             if tp_price > 0:
                 try:
                     self.initialize_partial_tp_plan(symbol)
@@ -1611,6 +1646,63 @@ class NadoTradingService(BaseTradingService):
                 self._save_pending_reconciliations()
 
             return resolved_reports
+
+    async def emergency_protect_risk_breach(self, symbol: str, approved_risk: float = 0.0, actual_risk: float = 0.0) -> tuple:
+        """
+        Emergency handler when post-fill actual risk violates the approved risk budget.
+        1. Marks local position state as RISK_BREACH to halt normal management.
+        2. Closes position on exchange via force_close_position().
+        3. Independently verifies via get_active_positions(bypass_cache=True) that the position is closed.
+        4. If closed: cleans up local state, logs resolution, and returns (True, realized_pnl).
+        5. If unconfirmed: marks state as RISK_BREACH_UNRESOLVED and alerts Sentinel.
+        """
+        logger.warning(f"[NadoTradingService] 🚨 Executing emergency risk breach close for {symbol} (Approved: ${approved_risk:.2f}, Actual: ${actual_risk:.2f})")
+        
+        canonical_sym = symbol.replace('/', '-').strip().upper()
+        if '-' not in canonical_sym:
+            canonical_sym = f"{canonical_sym}-USD"
+        base_sym = canonical_sym.split('-')[0].upper()
+        
+        for k in [symbol, canonical_sym, base_sym]:
+            if k in self.active_positions:
+                self.active_positions[k]["protection_state"] = "RISK_BREACH"
+        self._save_positions()
+        
+        # Fire force close with retries
+        try:
+            success, pnl = await self.force_close_position(symbol, bypass_check=True, max_retries=3)
+        except Exception as e:
+            logger.error(f"[NadoTradingService] ❌ Exception during emergency risk breach close for {symbol}: {e}")
+            success, pnl = False, 0.0
+            
+        if success:
+            logger.info(f"[NadoTradingService] ✅ Emergency risk breach close confirmed for {symbol}. Realized PnL: ${pnl:.2f}")
+            return True, pnl
+        else:
+            # Independent on-chain check
+            try:
+                active_on_chain = await self.get_active_positions(bypass_cache=True)
+                is_still_open = any(p["symbol"].split('-')[0].upper() == base_sym for p in active_on_chain)
+                if not is_still_open:
+                    logger.info(f"[NadoTradingService] ℹ️ Independent check confirmed {symbol} is no longer open on exchange.")
+                    for k in [symbol, canonical_sym, base_sym]:
+                        if k in self.active_positions:
+                            del self.active_positions[k]
+                    self._save_positions()
+                    return True, pnl
+            except Exception as check_e:
+                logger.error(f"[NadoTradingService] ⚠️ Verification of emergency close failed: {check_e}")
+
+            # Position is unconfirmed / still open!
+            for k in [symbol, canonical_sym, base_sym]:
+                if k in self.active_positions:
+                    self.active_positions[k]["protection_state"] = "RISK_BREACH_UNRESOLVED"
+            self._save_positions()
+            logger.critical(
+                f"[NadoTradingService] 🚨 CRITICAL: Position {symbol} could not be confirmed closed! "
+                f"Retaining in active_positions as RISK_BREACH_UNRESOLVED for Sentinel reconciliation."
+            )
+            return False, 0.0
 
     async def force_close_position(self, symbol: str, bypass_check: bool = False, max_retries: int = 3) -> tuple:
         """Manually closes a position on Nado by firing a close_position market order.
