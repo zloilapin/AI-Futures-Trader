@@ -269,3 +269,33 @@ async def test_scanner_agent_handles_none_spread_pct():
     result = await scanner.analyze(asset_data)
     assert "proceed" in result
     assert result["proceed"] is True
+
+@pytest.mark.asyncio
+async def test_pipeline_injects_price_increment_into_derivatives_data(dummy_agents, dummy_services):
+    """Verifies that trading_service limits (including price_increment) are correctly passed into derivatives_data."""
+    pipeline = TradingPipeline(dummy_agents, dummy_services, "NADO")
+    now = time.time()
+    market_data = {
+        "price_data": {"current_price": 60000.0, "timestamp": now},
+        "order_book_data": {"spread_pct": 0.05, "best_bid": 59990.0, "best_ask": 60010.0},
+        "indicators": {"atr_14": 500.0},
+        "derivatives_data": {"open_interest": 100.0, "funding_rate": 0.0001}
+    }
+    dummy_services.fetcher.fetch_all_market_data = AsyncMock(return_value=market_data)
+    dummy_services.trading_service.get_market_limits = AsyncMock(return_value={
+        "size_increment": 0.001,
+        "min_size": 0.001,
+        "min_notional": 0.0,
+        "price_increment": 1.0
+    })
+    dummy_agents.regime.analyze = AsyncMock(return_value={"regime": "RANGE_CHOPPY", "recommended_profile": "BALANCED"})
+    dummy_agents.reflector.get_lessons = MagicMock(return_value=[])
+    dummy_agents.universe.analyze = AsyncMock(return_value={"selected_pairs": ["BTC-USD"]})
+    dummy_services.fetcher.fetch_active_perps = AsyncMock(return_value=[{"symbol": "BTC-USD", "volumeQuote": 1000000}])
+    dummy_agents.scanner.analyze = AsyncMock(return_value={"proceed": False, "reasoning": "Filter passed"})
+
+    await pipeline.run_cycle(cycle_number=1, force_scan=True)
+
+    assert market_data["derivatives_data"]["price_increment"] == 1.0
+    assert market_data["derivatives_data"]["strict_metadata"] is True
+

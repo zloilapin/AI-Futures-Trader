@@ -321,6 +321,8 @@ class TradingPipeline:
                         market_data["derivatives_data"]["min_notional"] = limits["min_notional"]
                     if "min_size" in limits:
                         market_data["derivatives_data"]["min_size"] = limits["min_size"]
+                    if "price_increment" in limits and limits["price_increment"] > 0:
+                        market_data["derivatives_data"]["price_increment"] = limits["price_increment"]
 
                     if is_retest:
                         market_data["is_pullback_retest"] = True

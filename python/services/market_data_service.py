@@ -862,6 +862,10 @@ class MarketDataService:
                             else:
                                 result["min_size"] = max(raw_min_size, result["size_increment"])
                             result["min_notional"] = 0.0
+                            if hasattr(p.book_info, "price_increment_x18"):
+                                raw_price_inc = float(p.book_info.price_increment_x18) / 1e18
+                                if raw_price_inc > 0:
+                                    result["price_increment"] = raw_price_inc
                         except Exception:
                             pass
                         break
