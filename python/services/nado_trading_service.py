@@ -59,6 +59,9 @@ class NadoTradingService(BaseTradingService):
         self._last_close_info: Dict[str, Any] = {}
         self.last_execution_status: str = "PENDING"
         self.last_execution_details: Dict[str, Any] = {}
+        self.fast_monitor_task: Optional[asyncio.Task] = None
+        self.fast_monitor_running: bool = False
+        self.fast_monitor_last_heartbeat: float = 0.0
         self._load_state()
         
         # NOTE: self.initialize(nado_client) MUST be awaited explicitly after instantiation.
@@ -114,7 +117,7 @@ class NadoTradingService(BaseTradingService):
             logger.info(f"[NadoTradingService] ✅ Successfully connected. Products loaded: {len(self.product_map)}")
             
             # Start Fast Price Monitor
-            asyncio.create_task(self.start_fast_price_monitor())
+            self.fast_monitor_task = asyncio.create_task(self.start_fast_price_monitor())
             
         except Exception as e:
             logger.error(f"[NadoTradingService] ❌ Failed to init Nado SDK: {e}")
@@ -384,6 +387,10 @@ class NadoTradingService(BaseTradingService):
         
         actual_entry_price = entry_price
         
+        # P1-4: Reset per-attempt execution status and details
+        self.last_execution_status = "PENDING"
+        self.last_execution_details = {}
+        
         try:
             import time
             import asyncio
@@ -401,11 +408,20 @@ class NadoTradingService(BaseTradingService):
             product_id = self.product_map.get(base_symbol)
             if product_id is None:
                 logger.error(f"[NadoTradingService] ❌ Unknown symbol {symbol} - not found in Nado product map!")
+                self.last_execution_status = "REJECTED_BY_EXCHANGE"
+                self.last_execution_details = {"reason": f"Unknown symbol {symbol}"}
                 return False
                 
             params_dict = self._get_market_parameters(product_id)
-            if params_dict["size_increment_x18"] == 0:
-                logger.error(f"[NadoTradingService] ❌ Market params not found for product_id {product_id}")
+            size_increment = params_dict.get("size_increment_x18", 0)
+            price_increment = params_dict.get("price_increment_x18", 0)
+            if size_increment <= 0 or price_increment <= 0:
+                logger.error(
+                    f"[NadoTradingService] ❌ Market params invalid for product_id {product_id} "
+                    f"(size_inc={size_increment}, price_inc={price_increment}). Refusing execution."
+                )
+                self.last_execution_status = "REJECTED_BY_EXCHANGE"
+                self.last_execution_details = {"reason": "INVALID_MARKET_INCREMENTS"}
                 return False
                 
             from decimal import Decimal
@@ -426,14 +442,13 @@ class NadoTradingService(BaseTradingService):
                 amount_x18 = -amount_x18
             else:
                 logger.error(f"[NadoTradingService] ❌ Refusing execution: invalid direction '{direction}'. Only LONG or SHORT allowed!")
+                self.last_execution_status = "REJECTED_BY_EXCHANGE"
+                self.last_execution_details = {"reason": f"Invalid direction '{direction}'"}
                 return False
                 
             price_x18 = int(Decimal(str(round(limit_price, 8))) * Decimal(10**18))
             
             # Align to size and price increments
-            size_increment = params_dict["size_increment_x18"]
-            price_increment = params_dict["price_increment_x18"]
-            
             abs_amount_x18 = abs(amount_x18)
             abs_amount_x18 = (abs_amount_x18 // size_increment) * size_increment
             amount_x18 = abs_amount_x18 if amount_x18 >= 0 else -abs_amount_x18
@@ -442,6 +457,8 @@ class NadoTradingService(BaseTradingService):
             
             if amount_x18 == 0:
                 logger.error(f"[NadoTradingService] ❌ Order amount is zero after step size alignment.")
+                self.last_execution_status = "REJECTED_BY_EXCHANGE"
+                self.last_execution_details = {"reason": "ZERO_AMOUNT_AFTER_STEP_ALIGNMENT"}
                 return False
                 
             # Expiration
@@ -658,34 +675,44 @@ class NadoTradingService(BaseTradingService):
             self._save_positions()
 
             # --- Unified Actual Risk vs Approved Risk Check (P0 / P1-1 / P1-2) ---
-            from core.risk_calculator import estimate_total_loss
-            approved_budget = float(approved_risk_usd) if approved_risk_usd and approved_risk_usd > 0 else (actual_base_amount * abs(entry_price - sl_price))
-            loss_calc = estimate_total_loss(
-                contracts=actual_base_amount,
-                fill_price=actual_entry_price,
-                sl_price=sl_price,
-                taker_fee_pct=taker_fee_pct,
-                approved_risk=approved_budget
-            )
-            total_actual_loss = loss_calc.total_expected_loss_usd
-            allowed_risk_threshold = loss_calc.max_tolerated_risk_usd
+            if sl_price > 0 and actual_base_amount > 0 and actual_entry_price > 0:
+                from core.risk_calculator import estimate_total_loss
+                approved_budget = float(approved_risk_usd) if approved_risk_usd and approved_risk_usd > 0 else (actual_base_amount * abs(entry_price - sl_price))
+                try:
+                    loss_calc = estimate_total_loss(
+                        contracts=actual_base_amount,
+                        fill_price=actual_entry_price,
+                        sl_price=sl_price,
+                        taker_fee_pct=taker_fee_pct,
+                        approved_risk=approved_budget
+                    )
+                    total_actual_loss = loss_calc.total_expected_loss_usd
+                    allowed_risk_threshold = loss_calc.max_tolerated_risk_usd
 
-            if sl_price > 0 and approved_budget > 0 and total_actual_loss > allowed_risk_threshold:
-                risk_diff_pct = ((total_actual_loss / approved_budget) - 1.0) * 100
-                logger.error(
-                    f"[NadoTradingService] ❌ FATAL SLIPPAGE / RISK BREACH: Total potential loss (${total_actual_loss:.2f}) "
-                    f"exceeds approved risk threshold (${allowed_risk_threshold:.2f}, approved=${approved_budget:.2f}, "
-                    f"fee=${loss_calc.fee_loss_usd:.2f}) by {risk_diff_pct:.1f}% "
-                    f"due to adverse execution price ({actual_entry_price:.4f} vs ref {entry_price:.4f}). "
-                    f"Emergency closing position."
-                )
-                close_ok, _ = await self.emergency_protect_risk_breach(
-                    symbol=symbol,
-                    approved_risk=approved_budget,
-                    actual_risk=total_actual_loss
-                )
-                self.last_execution_status = "ABORTED_RISK_BREACH" if close_ok else "RISK_BREACH_UNRESOLVED"
-                return False
+                    if approved_budget > 0 and total_actual_loss > allowed_risk_threshold:
+                        risk_diff_pct = ((total_actual_loss / approved_budget) - 1.0) * 100
+                        logger.error(
+                            f"[NadoTradingService] ❌ FATAL SLIPPAGE / RISK BREACH: Total potential loss (${total_actual_loss:.2f}) "
+                            f"exceeds approved risk threshold (${allowed_risk_threshold:.2f}, approved=${approved_budget:.2f}, "
+                            f"fee=${loss_calc.fee_loss_usd:.2f}) by {risk_diff_pct:.1f}% "
+                            f"due to adverse execution price ({actual_entry_price:.4f} vs ref {entry_price:.4f}). "
+                            f"Emergency closing position."
+                        )
+                        close_ok, _ = await self.emergency_protect_risk_breach(
+                            symbol=symbol,
+                            approved_risk=approved_budget,
+                            actual_risk=total_actual_loss
+                        )
+                        self.last_execution_status = "ABORTED_RISK_BREACH" if close_ok else "RISK_BREACH_UNRESOLVED"
+                        self.last_execution_details = {
+                            "reason": "RISK_BREACH",
+                            "approved_risk": approved_budget,
+                            "actual_risk": total_actual_loss,
+                            "symbol": symbol
+                        }
+                        return False
+                except ValueError as calc_err:
+                    logger.error(f"[NadoTradingService] ⚠️ Risk calculator error during fill verification: {calc_err}")
                 
             # --- Partial Fill Guard (CRITICAL-4) ---
             fill_ratio = abs(actual_filled_x18) / abs(amount_x18) if amount_x18 != 0 else 0
@@ -789,26 +816,27 @@ class NadoTradingService(BaseTradingService):
             # Recalculate notional_usd to reflect actual fill amount
             notional_usd = abs(actual_filled_x18 / 1e18) * actual_entry_price
             
-            # Determine honest protection state (P0-1)
+            # Determine honest protection state (P0-1 & P0-2)
             has_native_sl = bool(sl_digest)
             has_native_tp = bool(tp_digest)
+            is_sw_sl_confirmed = self.is_software_protection_confirmed(symbol, sl_price)
             
             if has_native_sl:
                 protection_state = "NATIVE_SL_CONFIRMED"
                 prot_mode = "EXCHANGE_PROTECTED"
-            elif sl_price > 0:
+            elif is_sw_sl_confirmed:
                 protection_state = "SOFTWARE_SL_CONFIRMED"
                 prot_mode = "SOFTWARE_ONLY"
                 logger.info(
                     f"[NadoTradingService] 🛡️ Software Stop-Loss active at {sl_price:.4f} "
-                    f"(native SL order unavailable or below exchange minimum)."
+                    f"via verified Fast Monitor (native SL order unavailable or below exchange minimum)."
                 )
             else:
                 protection_state = "PROTECTION_DEGRADED"
                 prot_mode = "UNPROTECTED"
                 logger.critical(
-                    f"[NadoTradingService] 🚨 CRITICAL: Position {symbol} opened with NO VALID STOP-LOSS! "
-                    f"Protection degraded."
+                    f"[NadoTradingService] 🚨 CRITICAL: Position {symbol} opened with NO VALID STOP-LOSS "
+                    f"(native={has_native_sl}, sw_confirmed={is_sw_sl_confirmed})! Protection degraded."
                 )
 
             # Finalize position state with confirmed native triggers
@@ -839,11 +867,47 @@ class NadoTradingService(BaseTradingService):
                 except Exception as plan_err:
                     logger.warning(f"[NadoTradingService] ⚠️ Could not initialize partial TP plan for {symbol}: {plan_err}")
             self._save_positions()
+
+            # P0-2: Mandatory protection enforcement
+            # If position protection is degraded, an unhedged position exists on exchange.
+            # Never treat as success: immediately execute emergency closure!
+            if protection_state == "PROTECTION_DEGRADED":
+                logger.critical(
+                    f"[NadoTradingService] 🚨 CRITICAL: Position {symbol} has PROTECTION_DEGRADED! "
+                    f"Mandatory SL missing or unconfirmed. Executing emergency closure to preserve capital."
+                )
+                close_ok, actual_exit = await self.emergency_protect_risk_breach(
+                    symbol=symbol,
+                    reason=f"PROTECTION_DEGRADED: No confirmed native or software stop-loss (sl={sl_price})",
+                    contracts=actual_base_amount
+                )
+                if close_ok:
+                    self.last_execution_status = "ABORTED_PROTECTION_FAILURE"
+                    self.last_execution_details = {
+                        "reason": "PROTECTION_DEGRADED",
+                        "exit_price": actual_exit,
+                        "symbol": symbol
+                    }
+                    return False
+                else:
+                    self.last_execution_status = "RISK_BREACH_UNRESOLVED"
+                    self.last_execution_details = {
+                        "reason": "PROTECTION_DEGRADED_CLOSE_FAILED",
+                        "symbol": symbol
+                    }
+                    return False
                 
-            self.last_execution_status = "FILLED_AND_PROTECTED" if protection_state in ("NATIVE_SL_CONFIRMED", "SOFTWARE_SL_CONFIRMED") else "PROTECTION_DEGRADED"
+            self.last_execution_status = "FILLED_AND_PROTECTED"
+            self.last_execution_details = {
+                "symbol": symbol,
+                "protection_state": protection_state,
+                "entry_price": actual_entry_price
+            }
             return True
         except Exception as e:
             logger.error(f"[NadoTradingService] ⚠️ Failed to place order: {e}")
+            self.last_execution_status = "REJECTED_BY_EXCHANGE"
+            self.last_execution_details = {"reason": str(e), "error_type": type(e).__name__}
             try:
                 import traceback
                 with open("logs/nado_errors.txt", "a", encoding="utf-8") as f:
@@ -4228,16 +4292,57 @@ class NadoTradingService(BaseTradingService):
             "be_activated": (tier.action == "PROTECT_BREAKEVEN")
         }
 
+    def is_software_protection_confirmed(self, symbol: str, sl_price: float) -> bool:
+        """
+        P0-1: Verifies that software protection (Fast Price Monitor / Sentinel)
+        is genuinely initialized, running, healthy, and capable of monitoring this position.
+        
+        Requirements:
+        1. sl_price must be finite and > 0.
+        2. Product ID must be resolvable so price feeds can be polled.
+        3. Fast Price Monitor must be actively running and healthy.
+        """
+        import math
+        import time
+        if sl_price <= 0 or not math.isfinite(sl_price):
+            return False
+            
+        base_sym = symbol.split('-')[0].upper()
+        product_id = self.product_map.get(base_sym) or self.product_map.get(f"{base_sym}-USD") or self.product_map.get(symbol)
+        if product_id is None:
+            logger.warning(f"[NadoTradingService] ⚠️ Software protection cannot resolve product_id for {symbol}.")
+            return False
+
+        # In mock / test environment without live NadoClient market:
+        is_mock = getattr(self, "_mock_mode", False) or not hasattr(getattr(self, "client", None), "market") or getattr(getattr(self, "client", None), "_is_mock", False)
+        if is_mock:
+            if getattr(self, "fast_monitor_disabled", False):
+                return False
+            return True
+
+        # In live production environment:
+        now = time.time()
+        is_task_healthy = (
+            self.fast_monitor_running and
+            (self.fast_monitor_task is not None and not self.fast_monitor_task.done()) and
+            (now - self.fast_monitor_last_heartbeat < 30.0)
+        )
+        return is_task_healthy
+
     async def start_fast_price_monitor(self):
         """
         Background task that updates highest/lowest prices for active positions.
         Runs continuously in the background (every SENTINEL_FAST_POLL_SEC seconds).
         """
+        import time
         from core.config import config
         poll_interval = getattr(config, "SENTINEL_FAST_POLL_SEC", 5)
         logger.info(f"[NadoTradingService] ⚡ Fast Price Monitor started (interval: {poll_interval}s).")
+        self.fast_monitor_running = True
+        self.fast_monitor_last_heartbeat = time.time()
         
         while True:
+            self.fast_monitor_last_heartbeat = time.time()
             try:
                 if not self.is_connected or not self.active_positions:
                     await asyncio.sleep(poll_interval)

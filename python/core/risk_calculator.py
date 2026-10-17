@@ -5,8 +5,9 @@ slippage stress estimates, and funding cost estimates across RiskManager,
 Pipeline, and NadoTradingService.
 """
 
+import math
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Any
 
 @dataclass
 class LossEstimationResult:
@@ -22,6 +23,27 @@ class LossEstimationResult:
     funding_loss_usd: float
     total_stress_loss_usd: float
     max_tolerated_risk_usd: float
+
+def validate_finite_positive(name: str, value: Any, allow_zero: bool = False, max_val: Optional[float] = None) -> float:
+    """
+    Validates that a numeric input is finite, numeric, and meets sign constraints.
+    Rejects NaN, Inf, and non-numeric inputs immediately.
+    """
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"Invalid {name}: non-numeric value {value!r}")
+    if not math.isfinite(val):
+        raise ValueError(f"Invalid {name}: value must be finite (got {val})")
+    if allow_zero:
+        if val < 0.0:
+            raise ValueError(f"Invalid {name}: value cannot be negative (got {val})")
+    else:
+        if val <= 0.0:
+            raise ValueError(f"Invalid {name}: value must be strictly positive (got {val})")
+    if max_val is not None and val > max_val:
+        raise ValueError(f"Invalid {name}: value {val} exceeds maximum allowed {max_val}")
+    return val
 
 def estimate_total_loss(
     contracts: float,
@@ -44,13 +66,14 @@ def estimate_total_loss(
     6. Total Stress Loss: Total Expected Loss + Slippage Stress + Funding Cost
     7. Max Tolerated Risk: (approved_risk or Total Expected Loss) * 1.10 + 0.05
     """
-    c = abs(float(contracts or 0.0))
-    entry = abs(float(fill_price or 0.0))
-    sl = abs(float(sl_price or 0.0))
-    fee_rate = float(taker_fee_pct if taker_fee_pct is not None else 0.0005)
-    slip_rate = float(slippage_stress_pct if slippage_stress_pct is not None else 0.001)
-    funding_rate = abs(float(funding_rate_hourly if funding_rate_hourly is not None else 0.0))
-    hours = max(0.0, float(holding_hours if holding_hours is not None else 4.0))
+    # Strict validation of all financial parameters (P1-3)
+    c = validate_finite_positive("contracts", contracts)
+    entry = validate_finite_positive("fill_price", fill_price)
+    sl = validate_finite_positive("sl_price", sl_price)
+    fee_rate = validate_finite_positive("taker_fee_pct", taker_fee_pct if taker_fee_pct is not None else 0.0005, allow_zero=True, max_val=0.50)
+    slip_rate = validate_finite_positive("slippage_stress_pct", slippage_stress_pct if slippage_stress_pct is not None else 0.001, allow_zero=True, max_val=0.50)
+    funding_rate = validate_finite_positive("funding_rate_hourly", abs(float(funding_rate_hourly or 0.0)), allow_zero=True, max_val=0.20)
+    hours = validate_finite_positive("holding_hours", holding_hours if holding_hours is not None else 4.0, allow_zero=True, max_val=720.0)
 
     # Base price loss
     price_loss = round(c * abs(entry - sl), 4)
@@ -68,7 +91,10 @@ def estimate_total_loss(
     total_expected = round(price_loss + fee_loss, 2)
     total_stress = round(price_loss + fee_loss + slippage_stress + funding_loss, 2)
 
-    base_budget = float(approved_risk) if approved_risk is not None and approved_risk > 0 else total_expected
+    if approved_risk is not None and approved_risk > 0:
+        base_budget = validate_finite_positive("approved_risk", approved_risk, allow_zero=True)
+    else:
+        base_budget = total_expected
     max_tolerated = round((base_budget * 1.10) + 0.05, 2)
 
     return LossEstimationResult(
@@ -90,5 +116,5 @@ def calculate_max_tolerated_risk(approved_risk: float) -> float:
     """
     Uniform threshold formula: 10% relative tolerance + $0.05 dust floor.
     """
-    risk = max(0.0, float(approved_risk or 0.0))
+    risk = validate_finite_positive("approved_risk", approved_risk or 0.0, allow_zero=True)
     return round((risk * 1.10) + 0.05, 2)

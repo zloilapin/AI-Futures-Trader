@@ -426,9 +426,15 @@ class RiskManager(BaseAgent):
         else:
             base_slip = 0.002  # 0.20% (20 bps) for altcoins
 
+        derivatives_data = market_data.get("derivatives_data", {})
+        if not isinstance(derivatives_data, dict):
+            derivatives_data = {}
+
         # Half the bid-ask spread is the minimum crossing cost
         half_spread_pct = market_spread_pct / 2.0
         expected_slippage_pct = max(base_slip, half_spread_pct)
+        if derivatives_data.get("expected_slippage_pct") is not None:
+            expected_slippage_pct = max(expected_slippage_pct, float(derivatives_data["expected_slippage_pct"]))
             
         if decision == "LONG":
             execution_entry = current_price * (1.0 + expected_slippage_pct)
@@ -610,20 +616,25 @@ class RiskManager(BaseAgent):
             f"Quality: x{quality_mult:.2f}, DD: x{dd_mult}, Kelly: x{kelly_mult:.2f}, Action: x{action_mult}, Cap: {risk_cap*100}%)"
         )
 
-        # ═══ Stage 6: Position Sizing (Canonical Math) ═══
+        # ═══ Stage 6: Position Sizing (Canonical Math with Fee Integration) ═══
         risk_amount_usd = total_balance * dynamic_risk_pct
         if remaining_risk_budget_usd > 0:
             risk_amount_usd = min(risk_amount_usd, remaining_risk_budget_usd)
 
-        if distance_to_sl > 0:
-            contracts = risk_amount_usd / distance_to_sl
+        taker_fee_pct = float(derivatives_data.get("taker_fee_pct") or 0.0005)
+        # Unit loss per contract = price distance to SL + round-trip taker fees
+        fee_loss_per_contract = (execution_entry + sl_price) * taker_fee_pct if (execution_entry > 0 and sl_price > 0) else 0.0
+        effective_loss_per_contract = distance_to_sl + fee_loss_per_contract
+
+        if effective_loss_per_contract > 0:
+            contracts = risk_amount_usd / effective_loss_per_contract
             notional_usd = contracts * execution_entry
             
             # Hard Cap on Max Account Notional
             if notional_usd > max_notional_usd:
                 notional_usd = max_notional_usd
                 contracts = notional_usd / execution_entry
-                risk_amount_usd = contracts * distance_to_sl
+                risk_amount_usd = contracts * effective_loss_per_contract
                 self.logger.info(f"[{self.name}] ⚠️ Notional clamped to Max Notional (${max_notional_usd:.2f}). Reduced risk amount to ${risk_amount_usd:.2f}.")
         else:
             contracts = 0.0
@@ -637,7 +648,7 @@ class RiskManager(BaseAgent):
         elif spread_pct > config.SPREAD_PENALTY_THRESHOLD:
             notional_usd *= 0.8 # Cut notional by 20%
             contracts = notional_usd / execution_entry if execution_entry > 0 else 0.0
-            risk_amount_usd = contracts * distance_to_sl
+            risk_amount_usd = contracts * effective_loss_per_contract
 
         # ═══ Stage 7: Target Margin & Required Leverage ═══
         target_margin_pct = profile_rules.get("target_margin_pct", 0.10)
@@ -699,7 +710,7 @@ class RiskManager(BaseAgent):
             )
             notional_usd = max_safe_notional
             contracts = notional_usd / execution_entry if execution_entry > 0 else 0.0
-            risk_amount_usd = contracts * distance_to_sl
+            risk_amount_usd = contracts * effective_loss_per_contract
             
         effective_leverage = final_leverage
 
@@ -738,8 +749,8 @@ class RiskManager(BaseAgent):
                 f"Defaulting to safe fallback 0.001."
             )
             size_increment = 0.001
-        if is_strict_metadata and price_increment < 0:
-            msg = f"Market metadata incomplete: negative price_increment ({price_increment}) for {symbol}. Refusing trade."
+        if is_strict_metadata and price_increment <= 0:
+            msg = f"Market metadata incomplete: missing or non-positive price_increment ({price_increment}) for {symbol}. Refusing trade."
             self.logger.warning(f"[{self.name}] 🚫 MARKET_METADATA_UNAVAILABLE VETO: {msg}")
             return self._build_veto_result("MARKET_METADATA_UNAVAILABLE", msg, trade_action)
         if size_increment > 0:
@@ -790,24 +801,47 @@ class RiskManager(BaseAgent):
         tp_price = round(tp_price, 6)
         rr_ratio = round(realized_rr, 2)
 
-        # Verify Actual Risk with rounded contracts
-        actual_risk_usd = contracts * distance_to_sl
-        if actual_risk_usd > (risk_amount_usd * 1.05):
-            msg = f"Actual risk ${actual_risk_usd:.2f} exceeds allowed risk ${risk_amount_usd:.2f}."
-            self.logger.warning(f"[{self.name}] ❌ RISK VETO: {msg}")
-            return self._build_veto_result("EXCESSIVE_RISK", msg, trade_action)
-
-        # Unified Loss Estimation
+        # Unified Loss Estimation & Verification (P0-3 & P1-2)
         from core.risk_calculator import estimate_total_loss
         taker_fee_pct = float(derivatives_data.get("taker_fee_pct") or 0.0005)
-        loss_calc = estimate_total_loss(
-            contracts=contracts,
-            fill_price=execution_entry,
-            sl_price=sl_price,
-            taker_fee_pct=taker_fee_pct,
-            slippage_stress_pct=expected_slippage_pct,
-            approved_risk=risk_amount_usd
-        )
+        slippage_stress = float(derivatives_data.get("slippage_stress_pct") or expected_slippage_pct)
+        try:
+            loss_calc = estimate_total_loss(
+                contracts=contracts,
+                fill_price=execution_entry,
+                sl_price=sl_price,
+                taker_fee_pct=taker_fee_pct,
+                slippage_stress_pct=slippage_stress,
+                approved_risk=risk_amount_usd
+            )
+        except ValueError as val_err:
+            msg = f"Invalid risk parameters for loss calculation: {val_err}"
+            self.logger.warning(f"[{self.name}] ❌ DATA_INVALID VETO: {msg}")
+            return self._build_veto_result("DATA_INVALID", msg, trade_action)
+
+        # 1. Total Expected Loss Veto Gate (Price loss + round-trip taker fees)
+        # Bounded by approved risk budget with 5% tolerance + $0.05 dust floor
+        max_allowed_expected_loss = (risk_amount_usd * 1.05) + 0.05
+        if loss_calc.total_expected_loss_usd > max_allowed_expected_loss:
+            msg = (
+                f"Total expected loss (${loss_calc.total_expected_loss_usd:.2f}, "
+                f"price=${loss_calc.price_loss_usd:.2f} + fees=${loss_calc.fee_loss_usd:.2f}) "
+                f"exceeds approved risk budget (${risk_amount_usd:.2f} limit: ${max_allowed_expected_loss:.2f})."
+            )
+            self.logger.warning(f"[{self.name}] ❌ EXCESSIVE_RISK VETO: {msg}")
+            return self._build_veto_result("EXCESSIVE_RISK", msg, trade_action)
+
+        # 2. Stress Loss Veto Gate (Adverse slippage + holding funding stress)
+        # Bounded by 150% of approved risk budget + $0.20 dust floor
+        max_allowed_stress_loss = (risk_amount_usd * 1.50) + 0.20
+        if loss_calc.total_stress_loss_usd > max_allowed_stress_loss:
+            msg = (
+                f"Total stress loss (${loss_calc.total_stress_loss_usd:.2f}, "
+                f"slippage=${loss_calc.slippage_stress_usd:.2f}, funding=${loss_calc.funding_loss_usd:.2f}) "
+                f"exceeds stress risk ceiling (${max_allowed_stress_loss:.2f})."
+            )
+            self.logger.warning(f"[{self.name}] ❌ EXCESSIVE_STRESS_RISK VETO: {msg}")
+            return self._build_veto_result("EXCESSIVE_STRESS_RISK", msg, trade_action)
 
         final_reasoning = f"Math calculated based on {profile_name} profile. SL={sl_price}, TP={tp_price}, RR={rr_ratio}"
         return {

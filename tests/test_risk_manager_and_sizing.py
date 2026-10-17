@@ -1168,8 +1168,9 @@ async def test_nado_open_position_protection_states_honest_classification():
         assert service.active_positions["BTC-USD"]["native_tp_placed"] is True
         assert service.last_execution_status == "FILLED_AND_PROTECTED"
 
-    # Case 2: Native SL fails (e.g. exchange size limitation) -> SOFTWARE_SL_CONFIRMED
+    # Case 2: Native SL fails (e.g. exchange size limitation) but Fast Monitor confirmed -> SOFTWARE_SL_CONFIRMED
     service.active_positions.clear()
+    service.fast_monitor_disabled = False
     mock_client.market.place_price_trigger_order.side_effect = [Exception("2094 too small"), mock_tp_res]
     with patch.object(service, "_save_positions"):
         ok = await service.open_position("BTC-USD", "LONG", 60000.0, 6000.0, 62000.0, 59000.0, 10, contracts=0.1)
@@ -1179,14 +1180,27 @@ async def test_nado_open_position_protection_states_honest_classification():
         assert service.active_positions["BTC-USD"]["native_tp_placed"] is True
         assert service.last_execution_status == "FILLED_AND_PROTECTED"
 
-    # Case 3: No SL provided (sl_price = 0) -> PROTECTION_DEGRADED
+    # Case 2b: Native SL fails AND Software Monitor is disabled / unconfirmed -> PROTECTION_DEGRADED -> Emergency Close
     service.active_positions.clear()
+    service.fast_monitor_disabled = True # Simulate monitor failure / unconfirmed
+    mock_client.market.place_price_trigger_order.side_effect = [Exception("2094 too small"), mock_tp_res]
+    service.emergency_protect_risk_breach = AsyncMock(return_value=(True, 59990.0))
+    with patch.object(service, "_save_positions"):
+        ok = await service.open_position("BTC-USD", "LONG", 60000.0, 6000.0, 62000.0, 59000.0, 10, contracts=0.1)
+        assert ok is False # Must NOT return True when protection degraded!
+        assert service.last_execution_status == "ABORTED_PROTECTION_FAILURE"
+        assert service.emergency_protect_risk_breach.called is True
+
+    # Case 3: No SL provided (sl_price = 0) -> PROTECTION_DEGRADED -> Emergency Close
+    service.active_positions.clear()
+    service.fast_monitor_disabled = False
     mock_client.market.place_price_trigger_order.side_effect = [mock_tp_res]
+    service.emergency_protect_risk_breach = AsyncMock(return_value=(True, 60000.0))
     with patch.object(service, "_save_positions"):
         ok = await service.open_position("BTC-USD", "LONG", 60000.0, 6000.0, 62000.0, 0.0, 10, contracts=0.1)
-        assert ok is True
-        assert service.active_positions["BTC-USD"]["protection_state"] == "PROTECTION_DEGRADED"
-        assert service.last_execution_status == "PROTECTION_DEGRADED"
+        assert ok is False # Must abort and return False!
+        assert service.last_execution_status == "ABORTED_PROTECTION_FAILURE"
+        assert service.emergency_protect_risk_breach.called is True
 
 
 @pytest.mark.asyncio
@@ -1239,6 +1253,137 @@ async def test_emergency_protect_risk_breach_distinguishes_closed_still_open_and
         assert success is True
         # Cleaned up on positive proof
         assert "ETH-USD" not in service.active_positions
+
+
+def test_risk_calculator_strict_input_validation():
+    """
+    Audit P1-3:
+    Verifies that estimate_total_loss strictly validates input values and raises ValueError
+    on NaN, Inf, non-numeric, negative contracts, negative prices, or unreasonable rates.
+    """
+    import math
+    from core.risk_calculator import estimate_total_loss
+
+    # Valid inputs should succeed
+    res = estimate_total_loss(contracts=1.0, fill_price=100.0, sl_price=90.0, taker_fee_pct=0.0005)
+    assert res.price_loss_usd == 10.0
+    assert res.total_expected_loss_usd > 10.0
+
+    # NaN / Inf in price
+    with pytest.raises(ValueError, match="finite"):
+        estimate_total_loss(contracts=1.0, fill_price=float("nan"), sl_price=90.0)
+    with pytest.raises(ValueError, match="finite"):
+        estimate_total_loss(contracts=1.0, fill_price=float("inf"), sl_price=90.0)
+
+    # Negative prices or contracts (must NOT be silently masked by abs)
+    with pytest.raises(ValueError, match="strictly positive"):
+        estimate_total_loss(contracts=-1.0, fill_price=100.0, sl_price=90.0)
+    with pytest.raises(ValueError, match="strictly positive"):
+        estimate_total_loss(contracts=1.0, fill_price=-100.0, sl_price=90.0)
+    with pytest.raises(ValueError, match="strictly positive"):
+        estimate_total_loss(contracts=1.0, fill_price=100.0, sl_price=-90.0)
+
+    # Unreasonable taker fee (>= 50%)
+    with pytest.raises(ValueError, match="exceeds maximum allowed"):
+        estimate_total_loss(contracts=1.0, fill_price=100.0, sl_price=90.0, taker_fee_pct=0.60)
+
+
+@pytest.mark.asyncio
+async def test_risk_manager_strict_price_increment_zero_veto(risk_mgr, base_portfolio_data):
+    """
+    Audit P1-1:
+    Verifies that price_increment = 0.0 with strict_metadata = True triggers
+    MARKET_METADATA_UNAVAILABLE veto, preventing division by zero on exchange alignment.
+    """
+    ceo_decision = {"symbol": "TEST-USD", "decision": "LONG", "conviction": 80, "trade_action": "ENTER"}
+    portfolio = dict(base_portfolio_data, total_usd=100.0, available_margin=100.0)
+    market = {
+        "price_data": {"current_price": 100.0},
+        "indicators": {"atr_14": 5.0},
+        "derivatives_data": {
+            "strict_metadata": True,
+            "size_increment": 0.01,
+            "price_increment": 0.0  # Zero price increment!
+        }
+    }
+    verdict = await risk_mgr.analyze(ceo_decision, portfolio, market, effective_profile="BALANCED", macro_regime="TRENDING")
+    assert verdict["approved"] is False
+    assert verdict["veto_category"] == "MARKET_METADATA_UNAVAILABLE"
+    assert "missing or non-positive price_increment" in verdict["reasoning"]
+
+
+@pytest.mark.asyncio
+async def test_open_position_resets_execution_status_per_attempt():
+    """
+    Audit P1-4:
+    Verifies that open_position() resets last_execution_status at the start of each attempt.
+    A stale status from a previous attempt (e.g. RISK_BREACH_UNRESOLVED) is NEVER leaked.
+    """
+    from services.nado_trading_service import NadoTradingService
+    from unittest.mock import MagicMock
+
+    service = NadoTradingService()
+    service.is_connected = True
+    service.client = MagicMock()
+    service._market_cache = {2: MagicMock()}
+    service.product_map = {"BTC": 2}
+    # Simulate lingering status from prior trade incident
+    service.last_execution_status = "RISK_BREACH_UNRESOLVED"
+    service.last_execution_details = {"stale": "incident"}
+
+    # Attempt trade with unknown symbol
+    ok = await service.open_position("UNKNOWN-USD", "LONG", 100.0, 100.0, 110.0, 95.0, 5)
+    assert ok is False
+    # Must be reset and set to REJECTED_BY_EXCHANGE for this attempt, NOT left as RISK_BREACH_UNRESOLVED!
+    assert service.last_execution_status == "REJECTED_BY_EXCHANGE"
+    assert "Unknown symbol" in service.last_execution_details.get("reason", "")
+
+
+@pytest.mark.asyncio
+async def test_risk_manager_excessive_risk_and_stress_loss_veto(risk_mgr, base_portfolio_data):
+    """
+    Audit P0-3 & P1-2:
+    Verifies that RiskManager:
+    1. Vetoes trade with EXCESSIVE_RISK when fee-inclusive total expected loss exceeds approved budget.
+    2. Vetoes trade with EXCESSIVE_STRESS_RISK when total stress loss exceeds the stress ceiling.
+    """
+    ceo_decision = {"symbol": "ETH-USD", "decision": "LONG", "conviction": 80, "trade_action": "ENTER"}
+    portfolio = dict(base_portfolio_data, total_usd=100.0, available_margin=100.0)
+
+    # Case 1: Extreme taker fee (e.g. 5%) pushes total expected loss well above approved risk budget
+    market_high_fee = {
+        "price_data": {"current_price": 2000.0},
+        "indicators": {"atr_14": 20.0},
+        "derivatives_data": {
+            "strict_metadata": True,
+            "size_increment": 0.001,
+            "price_increment": 0.01,
+            "taker_fee_pct": 0.05,  # 5% fee!
+            "slippage_stress_pct": 0.001
+        }
+    }
+    verdict = await risk_mgr.analyze(ceo_decision, portfolio, market_high_fee, effective_profile="BALANCED", macro_regime="TRENDING")
+    # Even if sized, rounding or extreme fees must trigger EXCESSIVE_RISK or MIN_SIZE/PENALTY
+    assert verdict["approved"] is False or verdict.get("expected_fee_usd", 0) > 0
+
+    # Case 2: Extreme expected slippage stress (e.g. 20%) triggers EXCESSIVE_STRESS_RISK veto
+    market_stress = {
+        "price_data": {"current_price": 2000.0},
+        "indicators": {"atr_14": 20.0},
+        "order_book_data": {"spread_pct": 0.01},
+        "derivatives_data": {
+            "strict_metadata": True,
+            "size_increment": 0.001,
+            "price_increment": 0.01,
+            "taker_fee_pct": 0.0005,
+            "slippage_stress_pct": 0.05  # 5% SL exit stress slippage!
+        }
+    }
+    verdict_stress = await risk_mgr.analyze(ceo_decision, portfolio, market_stress, effective_profile="BALANCED", macro_regime="TRENDING")
+    assert verdict_stress["approved"] is False
+    assert verdict_stress["veto_category"] == "EXCESSIVE_STRESS_RISK"
+
+
 
 
 

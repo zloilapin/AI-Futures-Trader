@@ -693,22 +693,27 @@ class TradingPipeline:
                                         risk_verdict["risk_reward_ratio"] = round(abs(tp_p - actual_fill_price) / abs(sl_p - actual_fill_price), 2)
                                     
                                     # Post-Execution Actual Risk Verification via Unified Loss Calculator
-                                    if sl_p > 0 and real_contracts > 0:
+                                    if sl_p > 0 and real_contracts > 0 and actual_fill_price > 0:
                                         from core.risk_calculator import estimate_total_loss
-                                        loss_calc = estimate_total_loss(
-                                            contracts=real_contracts,
-                                            fill_price=actual_fill_price,
-                                            sl_price=sl_p,
-                                            taker_fee_pct=taker_fee_val,
-                                            approved_risk=approved_risk
-                                        )
-                                        total_actual_loss_usd = loss_calc.total_expected_loss_usd
-                                        max_tolerated_risk = loss_calc.max_tolerated_risk_usd
-                                        
-                                        risk_verdict["approved_risk_usd"] = approved_risk
-                                        risk_verdict["actual_risk_usd"] = loss_calc.price_loss_usd
-                                        risk_verdict["total_actual_loss_usd"] = total_actual_loss_usd
-                                        risk_verdict["total_stress_loss_usd"] = loss_calc.total_stress_loss_usd
+                                        try:
+                                            loss_calc = estimate_total_loss(
+                                                contracts=real_contracts,
+                                                fill_price=actual_fill_price,
+                                                sl_price=sl_p,
+                                                taker_fee_pct=taker_fee_val,
+                                                approved_risk=approved_risk
+                                            )
+                                            total_actual_loss_usd = loss_calc.total_expected_loss_usd
+                                            max_tolerated_risk = loss_calc.max_tolerated_risk_usd
+                                            
+                                            risk_verdict["approved_risk_usd"] = approved_risk
+                                            risk_verdict["actual_risk_usd"] = loss_calc.price_loss_usd
+                                            risk_verdict["total_actual_loss_usd"] = total_actual_loss_usd
+                                            risk_verdict["total_stress_loss_usd"] = loss_calc.total_stress_loss_usd
+                                        except ValueError as val_err:
+                                            self.services.logger.error(f"[Stage 5] ⚠️ Risk calculator error during post-fill check: {val_err}")
+                                            total_actual_loss_usd = 0.0
+                                            max_tolerated_risk = 0.0
                                         
                                         if approved_risk > 0 and total_actual_loss_usd > max_tolerated_risk:
                                             risk_diff_pct = ((total_actual_loss_usd / approved_risk) - 1.0) * 100
@@ -870,6 +875,14 @@ class TradingPipeline:
                                 f"📊 *Decision:* `{decision}` (Conviction: {conviction}%)\n"
                                 f"⚠️ *Status:* Фактический риск превысил лимит. Позиция успешно АВАРИЙНО ЗАКРЫТА на бирже.\n"
                                 f"🛡 *Capital Protected:* Средства защищены от неконтролируемого убытка."
+                            )
+                        elif execution_status == "ABORTED_PROTECTION_FAILURE":
+                            fail_msg = (
+                                f"🛡️ *ОТКАЗ ЗАЩИТЫ / ABORTED PROTECTION FAILURE*\n\n"
+                                f"🪙 *Asset:* `{symbol}`\n"
+                                f"📊 *Decision:* `{decision}` (Conviction: {conviction}%)\n"
+                                f"⚠️ *Status:* Ордер исполнился, но стоп-лосс НЕ подтверждён (нативный отклонён биржей, программный мониторинг не подтверждён)!\n"
+                                f"🛡 *Capital Protected:* Позиция АВАРИЙНО ЗАКРЫТА на бирже. Торговля без подтверждённого стоп-лосса запрещена!"
                             )
                         elif execution_status == "PENDING_ORDER_RECONCILIATION":
                             fail_msg = (
