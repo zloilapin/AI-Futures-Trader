@@ -469,4 +469,134 @@ def test_debate_completeness_guard_veto():
     assert decision.is_actionable is False
 
 
+def test_mtf_partial_one_timeframe_zero_contribution():
+    """
+    Audit Point 2:
+    When only one timeframe is known (e.g. 1H is bullish but 4H is missing/None),
+    the state is PARTIAL, NOT ALIGNED_BULLISH!
+    Partial timeframe context must have zero MTF contribution (raw_mtf = 0.0),
+    preventing unwarranted confidence on incomplete data.
+    """
+    ceo = get_mock_ceo()
+    market_context = {
+        "multi_timeframe_context": {
+            "trend_1h": "bullish",
+            "trend_4h": ""  # 4H is missing!
+        }
+    }
+    breakdown = {
+        "bull_argument": 45,
+        "bear_argument": 0,
+        "mtf_trend": 30
+    }
+    result = ceo._validate_and_compute_score("LONG", breakdown, market_context=market_context)
+    # Directional confidence must be ONLY from bull_argument (45), NOT 45 + 30 = 75!
+    assert result["directional_confidence"] == 45
+    assert result["trade_action"] == "HOLD"
+
+
+def test_risk_penalties_liquidity_friction_without_total():
+    """
+    Audit Point 4:
+    When LLM provides {"liquidity_friction": -10} without a "total" key,
+    it must be properly recognized and deducted in the categorized sum.
+    """
+    ceo = get_mock_ceo()
+    breakdown = {
+        "bull_argument": 45,
+        "bear_argument": 0,
+        "mtf_trend": 0,
+        "risk_penalties": {
+            "liquidity_friction": -10
+        }
+    }
+    result = ceo._validate_and_compute_score("LONG", breakdown, market_context={})
+    assert result["risk_penalties"] == -10
+    assert result["entry_quality"] == 35  # 45 - 10
+    assert result["risk_breakdown"]["liquidity"] == -10
+
+
+def test_debate_guard_breakout_exception_matrix():
+    """
+    Audit Point 3:
+    Full matrix test for Debate Completeness Guard and its breakout exception:
+    - Case A: Degraded debate + BREAKOUT strategy, but price did not break Donchian -> HOLD (INCOMPLETE_DEBATE)
+    - Case B: Degraded debate + BREAKOUT strategy, price broke Donchian, but vol spike < 120% -> HOLD (INCOMPLETE_DEBATE)
+    - Case C: Degraded debate + BREAKOUT strategy, price broke Donchian AND vol spike >= 120% -> Allowed (bypass debate veto)
+    - Case D: Degraded debate + BREAKOUT strategy, with NaN indicators -> HOLD (INCOMPLETE_DEBATE)
+    - Case E: Degraded debate + BREAKOUT strategy, but CEO opposes strategy bias -> HOLD (STRATEGY_GUARD_VETO)
+    """
+    from core.deterministic_guard import DeterministicGuard
+    from core.strategy_router import StrategyProfile
+    import math
+
+    rm = MagicMock()
+    rm._get_profile_rules.return_value = {"min_conviction": 75}
+
+    strat_breakout_long = StrategyProfile(
+        has_directional_signal=True,
+        strategy_mode="BREAKOUT",
+        direction_bias="LONG",
+        reasoning="Breakout test"
+    )
+
+    ceo_proposal_enter = {
+        "decision": "LONG",
+        "conviction": 85,
+        "directional_confidence": 85,
+        "entry_quality": 85,
+        "trade_action": "ENTER",
+        "debate_status": "DEGRADED_BULL_FAILED"
+    }
+
+    # Case A: Price (64000) does not break Donchian High (65000)
+    mkt_a = {
+        "price_data": {"current_price": 64000.0},
+        "indicators": {"donchian_high": 65000.0, "volume_spike_pct": 150.0}
+    }
+    res_a = DeterministicGuard.evaluate(strat_breakout_long, ceo_proposal_enter.copy(), "BALANCED", rm, mkt_a, "BTC-USD")
+    assert res_a.decision == "HOLD"
+    assert res_a.rejection_tag == "INCOMPLETE_DEBATE"
+
+    # Case B: Price breaks Donchian High, but volume spike is 110% (< 120%)
+    mkt_b = {
+        "price_data": {"current_price": 66000.0},
+        "indicators": {"donchian_high": 65000.0, "volume_spike_pct": 110.0}
+    }
+    res_b = DeterministicGuard.evaluate(strat_breakout_long, ceo_proposal_enter.copy(), "BALANCED", rm, mkt_b, "BTC-USD")
+    assert res_b.decision == "HOLD"
+    assert res_b.rejection_tag == "INCOMPLETE_DEBATE"
+
+    # Case C: Confirmed Breakout: price > Donchian High AND volume spike >= 120%
+    mkt_c = {
+        "price_data": {"current_price": 66000.0},
+        "indicators": {"donchian_high": 65000.0, "volume_spike_pct": 135.0}
+    }
+    res_c = DeterministicGuard.evaluate(strat_breakout_long, ceo_proposal_enter.copy(), "BALANCED", rm, mkt_c, "BTC-USD")
+    assert res_c.decision == "LONG"
+    assert res_c.trade_action == "ENTER"
+    assert res_c.is_actionable is True
+
+    # Case D: NaN or invalid indicators
+    mkt_d = {
+        "price_data": {"current_price": float("nan")},
+        "indicators": {"donchian_high": float("nan"), "volume_spike_pct": 200.0}
+    }
+    res_d = DeterministicGuard.evaluate(strat_breakout_long, ceo_proposal_enter.copy(), "BALANCED", rm, mkt_d, "BTC-USD")
+    assert res_d.decision == "HOLD"
+    assert res_d.rejection_tag == "INCOMPLETE_DEBATE"
+
+    # Case E: Breakout confirmed mathematically, but CEO decision opposes strategy direction_bias
+    strat_breakout_short = StrategyProfile(
+        has_directional_signal=True,
+        strategy_mode="BREAKOUT",
+        direction_bias="SHORT",
+        reasoning="Breakout short"
+    )
+    res_e = DeterministicGuard.evaluate(strat_breakout_short, ceo_proposal_enter.copy(), "BALANCED", rm, mkt_c, "BTC-USD")
+    assert res_e.decision == "HOLD"
+    assert res_e.rejection_tag == "STRATEGY_GUARD_VETO"
+
+
+
 

@@ -1,3 +1,4 @@
+import math
 from typing import Dict, Any, Optional
 from core.models import FinalTradeDecision
 from core.strategy_router import StrategyProfile
@@ -72,15 +73,37 @@ class DeterministicGuard:
 
         # 2. Volatility Momentum & Breakout: Confirmed impulse breakdown/breakout enters immediately
         # Only true if market indicators genuinely confirm a breakout with volume spike AND strategy mode is BREAKOUT/VOLATILITY_MOMENTUM;
+        # Domain Rationale for Volume Thresholds: In crypto derivatives, upside breakouts suffer high rates of bull traps
+        # requiring >120% volume expansion, whereas downside breakdowns cascade via liquidations at baseline (>=100%) volume.
         # Never override WAIT_FOR_PULLBACK for TREND_FOLLOWING, PULLBACK, or RELATIVE_MOMENTUM to prevent buying tops/selling bottoms.
         is_confirmed_breakout = False
         breakout_reason = ""
         if strategy_mode in ["BREAKOUT", "VOLATILITY_MOMENTUM"] and market_data and decision in ["LONG", "SHORT"]:
             indicators = market_data.get("indicators") or {}
-            donchian_high = float(indicators.get("donchian_high") or 0.0)
-            donchian_low = float(indicators.get("donchian_low") or 0.0)
-            vol_spike = float(indicators.get("volume_spike_pct") or 0.0)
-            cur_price = float((market_data.get("price_data") or {}).get("current_price") or 0.0)
+            try:
+                donchian_high = float(indicators.get("donchian_high") or 0.0)
+                if not math.isfinite(donchian_high): donchian_high = 0.0
+            except (ValueError, TypeError):
+                donchian_high = 0.0
+
+            try:
+                donchian_low = float(indicators.get("donchian_low") or 0.0)
+                if not math.isfinite(donchian_low): donchian_low = 0.0
+            except (ValueError, TypeError):
+                donchian_low = 0.0
+
+            try:
+                vol_spike = float(indicators.get("volume_spike_pct") or 0.0)
+                if not math.isfinite(vol_spike): vol_spike = 0.0
+            except (ValueError, TypeError):
+                vol_spike = 0.0
+
+            try:
+                cur_price = float((market_data.get("price_data") or {}).get("current_price") or 0.0)
+                if not math.isfinite(cur_price): cur_price = 0.0
+            except (ValueError, TypeError):
+                cur_price = 0.0
+
             if decision == "LONG" and donchian_high > 0 and cur_price > donchian_high and vol_spike >= 120.0:
                 is_confirmed_breakout = True
                 breakout_reason = f"пробой Donchian High ({donchian_high}) с объемом {vol_spike:.1f}%"

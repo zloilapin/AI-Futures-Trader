@@ -689,8 +689,15 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                     bb_pen = -8
 
         llm_pen_dict = breakdown.get("risk_penalties") if isinstance(breakdown, dict) and isinstance(breakdown.get("risk_penalties"), dict) else {}
+        # Canonical category keys for extraction and recognition (Audit Point 4)
+        PRICE_EXTENSION_KEYS = ["rsi_extreme", "rsi_penalty", "overextended", "price_extension", "overbought", "oversold"]
+        MACRO_SENTIMENT_KEYS = ["sentiment_euphoria", "sentiment_fear", "macro_sentiment", "sentiment", "fear_greed", "fng"]
+        MARKET_STRUCTURE_KEYS = ["resistance", "support", "divergence", "structure", "market_structure"]
+        LIQUIDITY_FRICTION_KEYS = ["liquidity", "spread", "slippage", "orderbook", "liquidity_friction"]
+        category_keys = PRICE_EXTENSION_KEYS + MACRO_SENTIMENT_KEYS + MARKET_STRUCTURE_KEYS + LIQUIDITY_FRICTION_KEYS
+
         llm_ext = 0
-        for k in ["rsi_extreme", "rsi_penalty", "overextended", "price_extension"]:
+        for k in PRICE_EXTENSION_KEYS:
             if k in llm_pen_dict:
                 try: llm_ext = min(llm_ext, -abs(int(float(llm_pen_dict[k]))))
                 except (ValueError, TypeError): pass
@@ -710,7 +717,7 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                 elif fear_greed <= 30: fg_pen = -5
 
         llm_sent = 0
-        for k in ["sentiment_euphoria", "sentiment_fear", "macro_sentiment", "sentiment"]:
+        for k in MACRO_SENTIMENT_KEYS:
             if k in llm_pen_dict:
                 try: llm_sent = min(llm_sent, -abs(int(float(llm_pen_dict[k]))))
                 except (ValueError, TypeError): pass
@@ -720,16 +727,16 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
 
         # Category C: Market Structure (Resistance, divergence, pattern invalidation)
         llm_struct = 0
-        for k in ["resistance", "support", "divergence", "structure", "market_structure"]:
+        for k in MARKET_STRUCTURE_KEYS:
             if k in llm_pen_dict:
                 try: llm_struct = min(llm_struct, -abs(int(float(llm_pen_dict[k]))))
                 except (ValueError, TypeError): pass
 
         cat_market_structure = max(-15, llm_struct)
 
-        # Category D: Liquidity & Execution Friction (Spread, orderbook imbalance)
+        # Category D: Liquidity & Execution Friction (Spread, orderbook imbalance, friction)
         llm_liq = 0
-        for k in ["liquidity", "spread", "slippage", "orderbook"]:
+        for k in LIQUIDITY_FRICTION_KEYS:
             if k in llm_pen_dict:
                 try: llm_liq = min(llm_liq, -abs(int(float(llm_pen_dict[k]))))
                 except (ValueError, TypeError): pass
@@ -738,13 +745,6 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
 
         # Orthogonal aggregation: sum independent categories
         raw_categorized_sum = cat_price_extension + cat_macro_sentiment + cat_market_structure + cat_liquidity
-
-        category_keys = [
-            "rsi_extreme", "rsi_penalty", "overextended", "price_extension", "overbought", "oversold",
-            "sentiment_euphoria", "sentiment_fear", "macro_sentiment", "sentiment", "fear_greed",
-            "resistance", "support", "divergence", "structure", "market_structure",
-            "liquidity", "spread", "slippage", "orderbook", "liquidity_friction"
-        ]
         has_recognized_components = any(k in llm_pen_dict for k in category_keys)
 
         final_penalty = raw_categorized_sum
@@ -776,6 +776,7 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
             "macro_sentiment": cat_macro_sentiment,
             "market_structure": cat_market_structure,
             "liquidity_friction": cat_liquidity,
+            "liquidity": cat_liquidity,
             "total": total_penalty
         }
         return total_penalty, risk_breakdown
@@ -849,35 +850,32 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                 has_1h = bool(t1)
                 has_4h = bool(t4)
 
-                if has_1h or has_4h:
-                    # Handle timeframe alignment vs conflict
+                if has_1h and has_4h:
+                    # Both timeframes are known and evaluated
                     if (is_bull_1h and is_bear_4h) or (is_bear_1h and is_bull_4h):
                         # 1H and 4H conflict: MTF trend is in CONFLICT, zero confirmation
                         mtf_status = "CONFLICT"
                         observed_mtf_bias = "NEUTRAL"
-                    elif (is_bull_1h and is_bull_4h) or (is_bull_1h and not is_bear_4h and not is_bull_4h) or (is_bull_4h and not is_bear_1h and not is_bull_1h):
-                        if not (is_bear_1h or is_bear_4h):
-                            mtf_status = "ALIGNED_BULLISH"
-                            observed_mtf_bias = "BULLISH"
-                        else:
-                            mtf_status = "CONFLICT"
-                            observed_mtf_bias = "NEUTRAL"
-                    elif (is_bear_1h and is_bear_4h) or (is_bear_1h and not is_bull_4h and not is_bear_4h) or (is_bear_4h and not is_bull_1h and not is_bear_1h):
-                        if not (is_bull_1h or is_bull_4h):
-                            mtf_status = "ALIGNED_BEARISH"
-                            observed_mtf_bias = "BEARISH"
-                        else:
-                            mtf_status = "CONFLICT"
-                            observed_mtf_bias = "NEUTRAL"
+                    elif is_bull_1h and is_bull_4h:
+                        mtf_status = "ALIGNED_BULLISH"
+                        observed_mtf_bias = "BULLISH"
+                    elif is_bear_1h and is_bear_4h:
+                        mtf_status = "ALIGNED_BEARISH"
+                        observed_mtf_bias = "BEARISH"
                     else:
                         mtf_status = "NEUTRAL_CHOP"
                         observed_mtf_bias = "NEUTRAL"
+                elif has_1h or has_4h:
+                    # Audit Point 2: Exactly one timeframe known, the other is missing/empty.
+                    # Partial context must NOT receive full MTF contribution or be marked ALIGNED!
+                    mtf_status = "PARTIAL"
+                    observed_mtf_bias = "NEUTRAL"
                 else:
                     mtf_status = "UNKNOWN"
 
         # Safe Fallback Handling:
-        # If CONFLICT or NEUTRAL_CHOP: MTF contribution is strictly 0.0 (LLM cannot override conflict)
-        if mtf_status in ["CONFLICT", "NEUTRAL_CHOP"]:
+        # If CONFLICT, NEUTRAL_CHOP or PARTIAL: MTF contribution is strictly 0.0 (LLM cannot override conflict or partial data)
+        if mtf_status in ["CONFLICT", "NEUTRAL_CHOP", "PARTIAL"]:
             raw_mtf = 0.0
             bull_mtf_contrib = 0.0
             bear_mtf_contrib = 0.0

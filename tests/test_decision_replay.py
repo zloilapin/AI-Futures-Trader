@@ -296,3 +296,130 @@ def test_replay_incomplete_detection_on_strict(tmp_path):
     assert is_match is False
     assert "INCOMPLETE_REPLAY" in msg
 
+
+def test_replay_uses_original_ceo_input_not_guard_action(tmp_path):
+    """
+    Audit Point 1:
+    Replay must take the original proposed CEO action ("ENTER") and confirm that
+    DeterministicGuard legitimately converted it to "HOLD" (with full match on
+    rejection_tag and is_actionable). It must NOT cheat by taking guard's "HOLD" as the input!
+    """
+    engine = DecisionReplayEngine(filepath=str(tmp_path / "empty.jsonl"))
+
+    snapshot = {
+        "candidate_id": "BTC-USD:c1_12345",
+        "symbol": "BTC-USD",
+        "trading_profile": "BALANCED",
+        "min_conviction": 75,
+        "router": {
+            "strategy_mode": "TREND_FOLLOWING",
+            "direction_bias": "LONG",
+            "has_directional_signal": True,
+            "reasoning": "Trend long"
+        },
+        "ceo": {
+            "decision": "LONG",
+            "conviction": 85,
+            "directional_confidence": 85,
+            "entry_quality": 85,
+            "trade_action": "ENTER",  # CEO originally wanted to ENTER
+            "debate_status": "DEGRADED_BEAR_FAILED"  # But debate was degraded!
+        },
+        "guard": {
+            "decision": "HOLD",
+            "action": "HOLD",
+            "is_actionable": False,
+            "guard_status": "BLOCKED",
+            "rejection_tag": "INCOMPLETE_DEBATE"
+        }
+    }
+
+    is_match, msg, diff = engine.replay_guard_decision(snapshot)
+    assert is_match is True
+    assert msg == "MATCH"
+    assert diff["replayed"]["action"] == "HOLD"
+    assert diff["replayed"]["decision"] == "HOLD"
+    assert diff["replayed"]["is_actionable"] is False
+    assert diff["replayed"]["rejection_tag"] == "INCOMPLETE_DEBATE"
+    assert diff["replayed"]["guard_status"] == "BLOCKED"
+
+
+def test_replay_strict_context_completeness(tmp_path):
+    """
+    Audit Point 6:
+    When strict=True:
+    - TREND_FOLLOWING missing multi_timeframe must return INCOMPLETE_REPLAY.
+    - TREND_FOLLOWING with complete MTF & RSI context returns MATCH.
+    """
+    engine = DecisionReplayEngine(filepath=str(tmp_path / "empty.jsonl"))
+
+    # Incomplete snapshot (missing MTF)
+    incomplete_snapshot = {
+        "candidate_id": "BTC-USD:c1_999",
+        "symbol": "BTC-USD",
+        "trading_profile": "BALANCED",
+        "router": {
+            "strategy_mode": "TREND_FOLLOWING",
+            "direction_bias": "LONG",
+            "has_directional_signal": True
+        },
+        "ceo": {
+            "decision": "LONG",
+            "conviction": 80,
+            "trade_action": "ENTER"
+        },
+        "guard": {
+            "decision": "LONG",
+            "action": "ENTER",
+            "is_actionable": True,
+            "guard_status": "PASSED"
+        },
+        "market_guard_inputs": {
+            "current_price": 65000.0,
+            # missing multi_timeframe and RSI!
+        }
+    }
+
+    match_incompl, msg_incompl, _ = engine.replay_guard_decision(incomplete_snapshot, strict=True)
+    assert match_incompl is False
+    assert "INCOMPLETE_REPLAY" in msg_incompl
+
+    # Complete snapshot
+    complete_snapshot = {
+        "candidate_id": "BTC-USD:c1_999",
+        "symbol": "BTC-USD",
+        "trading_profile": "BALANCED",
+        "min_conviction": 75,
+        "router": {
+            "strategy_mode": "TREND_FOLLOWING",
+            "direction_bias": "LONG",
+            "has_directional_signal": True
+        },
+        "ceo": {
+            "decision": "LONG",
+            "conviction": 80,
+            "trade_action": "ENTER"
+        },
+        "guard": {
+            "decision": "LONG",
+            "action": "ENTER",
+            "is_actionable": True,
+            "guard_status": "PASSED"
+        },
+        "market_guard_inputs": {
+            "current_price": 65000.0,
+            "rsi_14": 52.0,
+            "bb_position_pct": 50.0,
+            "multi_timeframe": {
+                "mtf_alignment": "FULL_ALIGNMENT",
+                "trend_1h": "BULLISH",
+                "trend_4h": "BULLISH"
+            }
+        }
+    }
+
+    match_compl, msg_compl, _ = engine.replay_guard_decision(complete_snapshot, strict=True)
+    assert match_compl is True
+    assert msg_compl == "MATCH"
+
+

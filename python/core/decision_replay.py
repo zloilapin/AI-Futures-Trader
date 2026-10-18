@@ -319,12 +319,15 @@ class DecisionReplayEngine:
 
         ceo_data = snapshot.get("ceo", {})
         debate_data = snapshot.get("debate", {})
+        # Audit Point 1: Replay must use original CEO proposed trade_action, NOT guard_data["action"]!
+        ceo_trade_action = ceo_data.get("trade_action") or guard_data.get("action", "HOLD")
+        raw_conv = ceo_data.get("conviction", 0)
         ceo_proposal = {
             "decision": ceo_data.get("decision", "HOLD"),
-            "conviction": ceo_data.get("conviction", 0),
-            "directional_confidence": ceo_data.get("directional_confidence", 0),
-            "entry_quality": ceo_data.get("entry_quality", 0),
-            "trade_action": guard_data.get("action", "HOLD"),
+            "conviction": raw_conv,
+            "directional_confidence": ceo_data.get("directional_confidence", raw_conv),
+            "entry_quality": ceo_data.get("entry_quality", raw_conv),
+            "trade_action": ceo_trade_action,
             "reasoning_en": ceo_data.get("reasoning", ""),
             "debate_status": debate_data.get("debate_status") or ceo_data.get("debate_status", "COMPLETE"),
             "bull_status": debate_data.get("bull_status") or ceo_data.get("bull_status", "OK"),
@@ -332,10 +335,11 @@ class DecisionReplayEngine:
             "disputed_arbitration": ceo_data.get("disputed_arbitration", False)
         }
 
-        # Reconstruct market_data from market_guard_inputs if available
+        # Reconstruct market_data from market_guard_inputs if available (Audit Point 6)
         mgi = snapshot.get("market_guard_inputs")
         reconstructed_market_data = None
         if mgi and isinstance(mgi, dict):
+            raw_rsi = mgi.get("rsi_14") if mgi.get("rsi_14") is not None else mgi.get("rsi")
             reconstructed_market_data = {
                 "price_data": {"current_price": mgi.get("current_price", 0.0)},
                 "current_price": mgi.get("current_price", 0.0),
@@ -345,15 +349,33 @@ class DecisionReplayEngine:
                     "volume_spike_pct": mgi.get("volume_spike_pct", 0.0),
                     "atr_pct": mgi.get("atr_pct", 0.0),
                     "bb_position_pct": mgi.get("bb_position_pct", 50.0),
-                    "ema_20": mgi.get("ema_20", 0.0)
+                    "ema_20": mgi.get("ema_20", 0.0),
+                    "rsi_14": float(raw_rsi) if raw_rsi is not None else None,
+                    "algo_signals": mgi.get("algo_signals") or {}
                 },
+                "multi_timeframe": mgi.get("multi_timeframe") or {},
                 "derivatives_data": {
                     "funding_rate": mgi.get("funding_rate", 0.0)
                 },
                 "is_pullback_retest": mgi.get("is_pullback_retest", False)
             }
-        elif strict or (strategy_mode in ["BREAKOUT", "VOLATILITY_MOMENTUM"] and mgi is None):
-            # Audit Point 3: When strict replay is enabled or breakout indicators are absent, report INCOMPLETE_REPLAY
+
+        # Strict context completeness validation (Audit Point 6)
+        if strict:
+            if not mgi or not isinstance(mgi, dict):
+                return False, "INCOMPLETE_REPLAY: missing market_guard_inputs in snapshot", {"status": "INCOMPLETE_REPLAY"}
+            if mgi.get("current_price", 0.0) <= 0:
+                return False, "INCOMPLETE_REPLAY: missing valid current_price in market_guard_inputs", {"status": "INCOMPLETE_REPLAY"}
+            if strategy_mode == "TREND_FOLLOWING":
+                # TREND_FOLLOWING requires multi_timeframe and RSI/BB context
+                if "multi_timeframe" not in mgi or not mgi.get("multi_timeframe"):
+                    return False, "INCOMPLETE_REPLAY: missing multi_timeframe for TREND_FOLLOWING", {"status": "INCOMPLETE_REPLAY"}
+                if mgi.get("rsi_14") is None and mgi.get("bb_position_pct") is None:
+                    return False, "INCOMPLETE_REPLAY: missing RSI/BB indicators for TREND_FOLLOWING", {"status": "INCOMPLETE_REPLAY"}
+            elif strategy_mode in ["BREAKOUT", "VOLATILITY_MOMENTUM"]:
+                if mgi.get("donchian_high", 0.0) <= 0 and mgi.get("donchian_low", 0.0) <= 0:
+                    return False, "INCOMPLETE_REPLAY: missing Donchian indicators for BREAKOUT", {"status": "INCOMPLETE_REPLAY"}
+        elif strategy_mode in ["BREAKOUT", "VOLATILITY_MOMENTUM"] and mgi is None:
             return False, "INCOMPLETE_REPLAY: missing market_guard_inputs in snapshot", {"status": "INCOMPLETE_REPLAY"}
 
         profile = snapshot.get("trading_profile", "BALANCED")
@@ -376,15 +398,44 @@ class DecisionReplayEngine:
 
         orig_action = guard_data.get("action")
         orig_decision = guard_data.get("decision")
+        orig_actionable = guard_data.get("is_actionable")
+        orig_guard_status = guard_data.get("guard_status")
+        orig_rejection_tag = guard_data.get("rejection_tag")
+
         replayed_action = replayed_decision.trade_action
         replayed_dir = replayed_decision.decision
+        replayed_actionable = replayed_decision.is_actionable
+        replayed_guard_status = replayed_decision.guard_status
+        replayed_rejection_tag = replayed_decision.rejection_tag
 
-        matches = (orig_action == replayed_action and orig_decision == replayed_dir)
+        # Audit Point 1: Complete invariant comparison across all guard dimensions
+        matches = (
+            orig_action == replayed_action and
+            orig_decision == replayed_dir and
+            (orig_actionable is None or orig_actionable == replayed_actionable) and
+            (orig_guard_status is None or orig_guard_status == replayed_guard_status) and
+            (orig_rejection_tag is None or orig_rejection_tag == replayed_rejection_tag)
+        )
         diff = {
-            "original": {"decision": orig_decision, "action": orig_action},
-            "replayed": {"decision": replayed_dir, "action": replayed_action}
+            "original": {
+                "decision": orig_decision,
+                "action": orig_action,
+                "is_actionable": orig_actionable,
+                "guard_status": orig_guard_status,
+                "rejection_tag": orig_rejection_tag
+            },
+            "replayed": {
+                "decision": replayed_dir,
+                "action": replayed_action,
+                "is_actionable": replayed_actionable,
+                "guard_status": replayed_guard_status,
+                "rejection_tag": replayed_rejection_tag
+            }
         }
-        msg = "MATCH" if matches else f"MISMATCH: Orig({orig_decision}, {orig_action}) vs Replayed({replayed_dir}, {replayed_action})"
+        msg = "MATCH" if matches else (
+            f"MISMATCH: Orig(dir={orig_decision}, act={orig_action}, actable={orig_actionable}, tag={orig_rejection_tag}) vs "
+            f"Replayed(dir={replayed_dir}, act={replayed_action}, actable={replayed_actionable}, tag={replayed_rejection_tag})"
+        )
         return matches, msg, diff
 
     def run_guard_replay_audit(self, snapshots: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:

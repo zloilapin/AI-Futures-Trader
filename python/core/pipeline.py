@@ -299,6 +299,7 @@ class TradingPipeline:
                 break
 
             try:
+                candidate_id = f"{symbol}:c{cycle_number}_{int(time.time() * 1000)}"
                 is_retest = (symbol == retest_symbol)
                 print(f"\n🔍 ПОЛНЫЙ АНАЛИЗ (15m, 1H, 4H) NADO DEX: {symbol}" + (" [PULLBACK_RETEST]" if is_retest else ""))
                 tracker.record_scan()
@@ -346,6 +347,7 @@ class TradingPipeline:
                     scan_summaries.append({"symbol": symbol, "status": "⛔ DATA INVALID", "reason": dq_reason})
                     tracker.record_rejection("DATA_INVALID")
                     self._record_candidate_snapshot(
+                        candidate_id=candidate_id,
                         symbol=symbol,
                         cycle_number=cycle_number,
                         macro_regime=detected_regime,
@@ -372,6 +374,7 @@ class TradingPipeline:
                     scan_summaries.append({"symbol": symbol, "status": "⛔ СКАН ЗАБЛОКИРОВАН", "reason": scanner_reason})
                     tracker.record_rejection(scan_result.get('status', 'SCANNER_BLOCKED'))
                     self._record_candidate_snapshot(
+                        candidate_id=candidate_id,
                         symbol=symbol,
                         cycle_number=cycle_number,
                         macro_regime=detected_regime,
@@ -430,6 +433,7 @@ class TradingPipeline:
                     })
                     tracker.record_rejection("AGENT_ERROR")
                     self._record_candidate_snapshot(
+                        candidate_id=candidate_id,
                         symbol=symbol,
                         cycle_number=cycle_number,
                         macro_regime=detected_regime,
@@ -473,6 +477,7 @@ class TradingPipeline:
                     })
                     tracker.record_rejection("NO_SIGNAL")
                     self._record_candidate_snapshot(
+                        candidate_id=candidate_id,
                         symbol=symbol,
                         cycle_number=cycle_number,
                         macro_regime=detected_regime,
@@ -661,6 +666,7 @@ class TradingPipeline:
                     scan_summaries.append(asset_summary)
                     tracker.record_rejection(final_trade_decision.rejection_tag or "NO_SIGNAL")
                     self._record_candidate_snapshot(
+                        candidate_id=candidate_id,
                         symbol=symbol,
                         cycle_number=cycle_number,
                         macro_regime=detected_regime,
@@ -712,6 +718,7 @@ class TradingPipeline:
                             })
                             tracker.record_rejection("SLIPPAGE_VETO")
                             self._record_candidate_snapshot(
+                                candidate_id=candidate_id,
                                 symbol=symbol,
                                 cycle_number=cycle_number,
                                 macro_regime=detected_regime,
@@ -918,6 +925,7 @@ class TradingPipeline:
                         tracker.record_trade()
 
                     self._record_candidate_snapshot(
+                        candidate_id=candidate_id,
                         symbol=symbol,
                         cycle_number=cycle_number,
                         macro_regime=detected_regime,
@@ -953,6 +961,7 @@ class TradingPipeline:
                         error=f"Vetoed by Risk Manager: {veto_cat}"
                     )
                     self._record_candidate_snapshot(
+                        candidate_id=candidate_id,
                         symbol=symbol,
                         cycle_number=cycle_number,
                         macro_regime=detected_regime,
@@ -1352,6 +1361,7 @@ class TradingPipeline:
             "timestamp": now_ts,
             "iso_time": iso_str,
             "candidate_id": resolved_candidate_id,
+            "is_fallback_candidate_id": (candidate_id is None),
             "cycle_number": cycle_number,
             "symbol": symbol,
             "macro_regime": macro_regime,
@@ -1368,6 +1378,7 @@ class TradingPipeline:
             price_data = market_data.get("price_data") or {}
             derivatives = market_data.get("derivatives_data") or {}
             raw_bb = indicators.get("bb_position_pct") if "bb_position_pct" in indicators else indicators.get("bb_pos")
+            raw_rsi = indicators.get("rsi_14") if indicators.get("rsi_14") is not None else indicators.get("rsi")
             snapshot["market_guard_inputs"] = {
                 "current_price": float(price_data.get("current_price") or market_data.get("current_price") or 0.0),
                 "donchian_high": float(indicators.get("donchian_high") or 0.0),
@@ -1376,8 +1387,11 @@ class TradingPipeline:
                 "atr_pct": float(indicators.get("atr_pct") or 0.0),
                 "bb_position_pct": float(raw_bb if raw_bb is not None else 50.0),
                 "ema_20": float(indicators.get("ema_20") or 0.0),
+                "rsi_14": float(raw_rsi) if raw_rsi is not None else None,
                 "funding_rate": float(derivatives.get("funding_rate") or 0.0),
-                "is_pullback_retest": bool(market_data.get("is_pullback_retest", False))
+                "is_pullback_retest": bool(market_data.get("is_pullback_retest", False)),
+                "multi_timeframe": market_data.get("multi_timeframe") or {},
+                "algo_signals": indicators.get("algo_signals") or {}
             }
         if strategy_profile:
             snapshot["router"] = {
@@ -1405,6 +1419,7 @@ class TradingPipeline:
                 "raw_score": ceo_verdict.get("raw_score"),
                 "deterministic_score": ceo_verdict.get("deterministic_score"),
                 "risk_breakdown": ceo_verdict.get("risk_breakdown", {}),
+                "trade_action": ceo_verdict.get("trade_action"),
                 "reasoning": ceo_verdict.get("reasoning_en", "")
             }
         if final_trade_decision:
@@ -1413,7 +1428,9 @@ class TradingPipeline:
                 "decision": getattr(final_trade_decision, "decision", None),
                 "conviction": getattr(final_trade_decision, "conviction", None),
                 "reason": getattr(final_trade_decision, "guard_reason", None),
-                "is_actionable": getattr(final_trade_decision, "is_actionable", None)
+                "is_actionable": getattr(final_trade_decision, "is_actionable", None),
+                "guard_status": getattr(final_trade_decision, "guard_status", None),
+                "rejection_tag": getattr(final_trade_decision, "rejection_tag", None)
             }
         if risk_verdict:
             approved_risk_val = float(risk_verdict.get("approved_risk_usd") or risk_verdict.get("risk_amount_usd") or 0.0)
