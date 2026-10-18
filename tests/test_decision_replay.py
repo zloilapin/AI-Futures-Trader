@@ -423,3 +423,141 @@ def test_replay_strict_context_completeness(tmp_path):
     assert msg_compl == "MATCH"
 
 
+def test_replay_strict_fails_on_missing_ceo_trade_action(tmp_path):
+    """
+    Audit Follow-up P1:
+    In strict=True, if snapshot lacks original ceo.trade_action,
+    replay must fail with INCOMPLETE_REPLAY instead of falling back to guard_data["action"]
+    and performing circular validation.
+    """
+    engine = DecisionReplayEngine(filepath=str(tmp_path / "empty.jsonl"))
+
+    snapshot = {
+        "candidate_id": "BTC-USD:c1_missing_action",
+        "symbol": "BTC-USD",
+        "trading_profile": "BALANCED",
+        "min_conviction": 75,
+        "router": {
+            "strategy_mode": "TREND_FOLLOWING",
+            "direction_bias": "LONG",
+            "has_directional_signal": True
+        },
+        "ceo": {
+            "decision": "LONG",
+            "conviction": 80
+            # missing "trade_action"!
+        },
+        "guard": {
+            "decision": "LONG",
+            "action": "ENTER",
+            "is_actionable": True,
+            "guard_status": "PASSED"
+        },
+        "market_guard_inputs": {
+            "current_price": 65000.0,
+            "rsi_14": 50.0,
+            "multi_timeframe": {"trend_1h": "BULLISH"}
+        }
+    }
+
+    match, msg, diff = engine.replay_guard_decision(snapshot, strict=True)
+    assert match is False
+    assert "INCOMPLETE_REPLAY: missing original ceo.trade_action" in msg
+
+
+def test_replay_strict_fails_when_bb_and_rsi_both_none(tmp_path):
+    """
+    Audit Follow-up P1:
+    When raw_bb was None, pipeline must not save a fake 50.0.
+    If both bb_position_pct and rsi_14 are None in market_guard_inputs,
+    strict replay for TREND_FOLLOWING must catch this as incomplete!
+    """
+    engine = DecisionReplayEngine(filepath=str(tmp_path / "empty.jsonl"))
+
+    snapshot = {
+        "candidate_id": "BTC-USD:c1_none_bb",
+        "symbol": "BTC-USD",
+        "trading_profile": "BALANCED",
+        "min_conviction": 75,
+        "router": {
+            "strategy_mode": "TREND_FOLLOWING",
+            "direction_bias": "LONG",
+            "has_directional_signal": True
+        },
+        "ceo": {
+            "decision": "LONG",
+            "conviction": 80,
+            "trade_action": "ENTER"
+        },
+        "guard": {
+            "decision": "LONG",
+            "action": "ENTER",
+            "is_actionable": True,
+            "guard_status": "PASSED"
+        },
+        "market_guard_inputs": {
+            "current_price": 65000.0,
+            "rsi_14": None,            # None!
+            "bb_position_pct": None,   # None! (Not 50.0)
+            "multi_timeframe": {"trend_1h": "BULLISH"}
+        }
+    }
+
+    match, msg, diff = engine.replay_guard_decision(snapshot, strict=True)
+    assert match is False
+    assert "INCOMPLETE_REPLAY" in msg
+    assert "rsi_or_bb" in msg
+
+
+def test_replay_strict_strategy_matrix(tmp_path):
+    """
+    Audit Follow-up P2:
+    Verifies that strict replay validates required fields for all strategy modes
+    (BREAKOUT, PULLBACK, MEAN_REVERSION).
+    """
+    engine = DecisionReplayEngine(filepath=str(tmp_path / "empty.jsonl"))
+
+    # 1. BREAKOUT missing donchian levels
+    snap_bo = {
+        "candidate_id": "BTC-USD:c1_bo",
+        "symbol": "BTC-USD",
+        "trading_profile": "BALANCED",
+        "router": {"strategy_mode": "BREAKOUT", "direction_bias": "LONG", "has_directional_signal": True},
+        "ceo": {"decision": "LONG", "conviction": 80, "trade_action": "ENTER"},
+        "guard": {"decision": "LONG", "action": "ENTER"},
+        "market_guard_inputs": {"current_price": 65000.0, "volume_spike_pct": 150.0, "donchian_high": 0.0, "donchian_low": 0.0}
+    }
+    m1, msg1, _ = engine.replay_guard_decision(snap_bo, strict=True)
+    assert m1 is False
+    assert "donchian" in msg1
+
+    # 2. PULLBACK missing pullback context (is_pullback_retest, ema_20, atr_pct)
+    snap_pb = {
+        "candidate_id": "BTC-USD:c1_pb",
+        "symbol": "BTC-USD",
+        "trading_profile": "BALANCED",
+        "router": {"strategy_mode": "PULLBACK", "direction_bias": "LONG", "has_directional_signal": True},
+        "ceo": {"decision": "LONG", "conviction": 80, "trade_action": "ENTER"},
+        "guard": {"decision": "LONG", "action": "ENTER"},
+        "market_guard_inputs": {"current_price": 65000.0, "ema_20": 0.0, "atr_pct": None}
+    }
+    m2, msg2, _ = engine.replay_guard_decision(snap_pb, strict=True)
+    assert m2 is False
+    assert "pullback_context" in msg2
+
+    # 3. MEAN_REVERSION missing both BB and RSI
+    snap_mr = {
+        "candidate_id": "BTC-USD:c1_mr",
+        "symbol": "BTC-USD",
+        "trading_profile": "BALANCED",
+        "router": {"strategy_mode": "MEAN_REVERSION", "direction_bias": "LONG", "has_directional_signal": True},
+        "ceo": {"decision": "LONG", "conviction": 80, "trade_action": "ENTER"},
+        "guard": {"decision": "LONG", "action": "ENTER"},
+        "market_guard_inputs": {"current_price": 65000.0, "bb_position_pct": None, "rsi_14": None}
+    }
+    m3, msg3, _ = engine.replay_guard_decision(snap_mr, strict=True)
+    assert m3 is False
+    assert "bb_or_rsi" in msg3
+
+
+

@@ -843,12 +843,17 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                 t1 = str((tf_1h.get("trend") if isinstance(tf_1h, dict) else None) or mtf_ctx.get("trend_1h") or "").strip().lower()
                 t4 = str((tf_4h.get("trend") if isinstance(tf_4h, dict) else None) or mtf_ctx.get("trend_4h") or "").strip().lower()
 
-                is_bull_1h = t1 in ["bullish", "bull", "up"]
-                is_bear_1h = t1 in ["bearish", "bear", "down"]
-                is_bull_4h = t4 in ["bullish", "bull", "up"]
-                is_bear_4h = t4 in ["bearish", "bear", "down"]
-                has_1h = bool(t1)
-                has_4h = bool(t4)
+                BULL_TERMS = {"bullish", "bull", "up"}
+                BEAR_TERMS = {"bearish", "bear", "down"}
+                NEUTRAL_TERMS = {"neutral", "flat", "chop", "sideways", "range", "consolidation"}
+                VALID_TERMS = BULL_TERMS | BEAR_TERMS | NEUTRAL_TERMS
+
+                is_bull_1h = t1 in BULL_TERMS
+                is_bear_1h = t1 in BEAR_TERMS
+                is_bull_4h = t4 in BULL_TERMS
+                is_bear_4h = t4 in BEAR_TERMS
+                has_1h = t1 in VALID_TERMS
+                has_4h = t4 in VALID_TERMS
 
                 if has_1h and has_4h:
                     # Both timeframes are known and evaluated

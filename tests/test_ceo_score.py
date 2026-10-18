@@ -598,5 +598,62 @@ def test_debate_guard_breakout_exception_matrix():
     assert res_e.rejection_tag == "STRATEGY_GUARD_VETO"
 
 
+def test_mtf_unrecognized_strings_are_not_treated_as_valid_timeframes():
+    """
+    Audit Follow-up P2:
+    Arbitrary strings like 'unknown', 'n/a', 'unavailable' must NOT be counted as valid
+    timeframes and must NOT accidentally trigger NEUTRAL_CHOP!
+    - 'unknown' + 'n/a' -> UNKNOWN (fallback to LLM sign allowed if present)
+    - 'bullish' + 'unavailable' -> PARTIAL (zero MTF bonus)
+    - 'bullish' + 'neutral' -> NEUTRAL_CHOP (both valid, no conflict, zero bonus)
+    - 'bullish' + 'bullish' -> ALIGNED_BULLISH (full bonus)
+    """
+    ceo = get_mock_ceo()
+
+    # Case 1: Both unknown/n/a -> UNKNOWN (fallback to LLM allowed)
+    mkt_unknown = {
+        "multi_timeframe_context": {
+            "trend_1h": "unknown",
+            "trend_4h": "n/a"
+        }
+    }
+    breakdown = {"bull_argument": 40, "bear_argument": 0, "mtf_trend": 20}
+    res1 = ceo._validate_and_compute_score("LONG", breakdown, market_context=mkt_unknown)
+    # Since UNKNOWN, fallback to LLM mtf_trend (20) is allowed -> 40 + 20 = 60
+    assert res1["directional_confidence"] == 60
+
+    # Case 2: 1H bullish, 4H unavailable -> PARTIAL (zero bonus, NO fallback!)
+    mkt_partial = {
+        "multi_timeframe_context": {
+            "trend_1h": "bullish",
+            "trend_4h": "unavailable"
+        }
+    }
+    res2 = ceo._validate_and_compute_score("LONG", breakdown, market_context=mkt_partial)
+    # Must NOT be ALIGNED_BULLISH and must NOT get LLM fallback -> strictly 40
+    assert res2["directional_confidence"] == 40
+
+    # Case 3: 1H bullish, 4H explicit neutral -> NEUTRAL_CHOP (both valid, zero bonus)
+    mkt_chop = {
+        "multi_timeframe_context": {
+            "trend_1h": "bullish",
+            "trend_4h": "neutral"
+        }
+    }
+    res3 = ceo._validate_and_compute_score("LONG", breakdown, market_context=mkt_chop)
+    assert res3["directional_confidence"] == 40
+
+    # Case 4: 1H bullish, 4H bullish -> ALIGNED_BULLISH (full bonus)
+    mkt_aligned = {
+        "multi_timeframe_context": {
+            "trend_1h": "bullish",
+            "trend_4h": "bullish"
+        }
+    }
+    res4 = ceo._validate_and_compute_score("LONG", breakdown, market_context=mkt_aligned)
+    assert res4["directional_confidence"] == 60
+
+
+
 
 

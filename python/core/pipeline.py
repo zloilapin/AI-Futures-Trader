@@ -1385,7 +1385,7 @@ class TradingPipeline:
                 "donchian_low": float(indicators.get("donchian_low") or 0.0),
                 "volume_spike_pct": float(indicators.get("volume_spike_pct") or 0.0),
                 "atr_pct": float(indicators.get("atr_pct") or 0.0),
-                "bb_position_pct": float(raw_bb if raw_bb is not None else 50.0),
+                "bb_position_pct": float(raw_bb) if raw_bb is not None else None,
                 "ema_20": float(indicators.get("ema_20") or 0.0),
                 "rsi_14": float(raw_rsi) if raw_rsi is not None else None,
                 "funding_rate": float(derivatives.get("funding_rate") or 0.0),

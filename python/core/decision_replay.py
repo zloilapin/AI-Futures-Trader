@@ -320,7 +320,8 @@ class DecisionReplayEngine:
         ceo_data = snapshot.get("ceo", {})
         debate_data = snapshot.get("debate", {})
         # Audit Point 1: Replay must use original CEO proposed trade_action, NOT guard_data["action"]!
-        ceo_trade_action = ceo_data.get("trade_action") or guard_data.get("action", "HOLD")
+        original_ceo_trade_action = ceo_data.get("trade_action")
+        ceo_trade_action = original_ceo_trade_action or guard_data.get("action", "HOLD")
         raw_conv = ceo_data.get("conviction", 0)
         ceo_proposal = {
             "decision": ceo_data.get("decision", "HOLD"),
@@ -340,6 +341,7 @@ class DecisionReplayEngine:
         reconstructed_market_data = None
         if mgi and isinstance(mgi, dict):
             raw_rsi = mgi.get("rsi_14") if mgi.get("rsi_14") is not None else mgi.get("rsi")
+            raw_bb = mgi.get("bb_position_pct") if mgi.get("bb_position_pct") is not None else mgi.get("bb_pos")
             reconstructed_market_data = {
                 "price_data": {"current_price": mgi.get("current_price", 0.0)},
                 "current_price": mgi.get("current_price", 0.0),
@@ -348,7 +350,7 @@ class DecisionReplayEngine:
                     "donchian_low": mgi.get("donchian_low", 0.0),
                     "volume_spike_pct": mgi.get("volume_spike_pct", 0.0),
                     "atr_pct": mgi.get("atr_pct", 0.0),
-                    "bb_position_pct": mgi.get("bb_position_pct", 50.0),
+                    "bb_position_pct": float(raw_bb) if raw_bb is not None else None,
                     "ema_20": mgi.get("ema_20", 0.0),
                     "rsi_14": float(raw_rsi) if raw_rsi is not None else None,
                     "algo_signals": mgi.get("algo_signals") or {}
@@ -357,24 +359,46 @@ class DecisionReplayEngine:
                 "derivatives_data": {
                     "funding_rate": mgi.get("funding_rate", 0.0)
                 },
-                "is_pullback_retest": mgi.get("is_pullback_retest", False)
+                "is_pullback_retest": bool(mgi.get("is_pullback_retest", False))
             }
 
-        # Strict context completeness validation (Audit Point 6)
+        # Required context and indicator invariants by strategy mode (Audit Follow-up P1 & P2)
+        REQUIRED_CONTEXT_BY_STRATEGY = {
+            "TREND_FOLLOWING": [
+                ("multi_timeframe", lambda m: bool(m.get("multi_timeframe"))),
+                ("rsi_or_bb", lambda m: m.get("rsi_14") is not None or m.get("bb_position_pct") is not None),
+            ],
+            "BREAKOUT": [
+                ("donchian", lambda m: m.get("donchian_high", 0.0) > 0 or m.get("donchian_low", 0.0) > 0),
+                ("volume_spike_pct", lambda m: m.get("volume_spike_pct") is not None),
+            ],
+            "VOLATILITY_MOMENTUM": [
+                ("donchian", lambda m: m.get("donchian_high", 0.0) > 0 or m.get("donchian_low", 0.0) > 0),
+                ("volume_spike_pct", lambda m: m.get("volume_spike_pct") is not None),
+            ],
+            "MEAN_REVERSION": [
+                ("bb_or_rsi", lambda m: m.get("bb_position_pct") is not None or m.get("rsi_14") is not None),
+            ],
+            "PULLBACK": [
+                ("pullback_context", lambda m: "is_pullback_retest" in m or m.get("ema_20", 0.0) > 0 or m.get("atr_pct") is not None),
+            ],
+            "RELATIVE_MOMENTUM": [
+                ("volume_spike_pct", lambda m: m.get("volume_spike_pct") is not None),
+            ],
+        }
+
+        # Strict context completeness validation (Audit Follow-up P1 & P2)
         if strict:
+            if not original_ceo_trade_action:
+                return False, "INCOMPLETE_REPLAY: missing original ceo.trade_action in snapshot", {"status": "INCOMPLETE_REPLAY"}
             if not mgi or not isinstance(mgi, dict):
                 return False, "INCOMPLETE_REPLAY: missing market_guard_inputs in snapshot", {"status": "INCOMPLETE_REPLAY"}
             if mgi.get("current_price", 0.0) <= 0:
                 return False, "INCOMPLETE_REPLAY: missing valid current_price in market_guard_inputs", {"status": "INCOMPLETE_REPLAY"}
-            if strategy_mode == "TREND_FOLLOWING":
-                # TREND_FOLLOWING requires multi_timeframe and RSI/BB context
-                if "multi_timeframe" not in mgi or not mgi.get("multi_timeframe"):
-                    return False, "INCOMPLETE_REPLAY: missing multi_timeframe for TREND_FOLLOWING", {"status": "INCOMPLETE_REPLAY"}
-                if mgi.get("rsi_14") is None and mgi.get("bb_position_pct") is None:
-                    return False, "INCOMPLETE_REPLAY: missing RSI/BB indicators for TREND_FOLLOWING", {"status": "INCOMPLETE_REPLAY"}
-            elif strategy_mode in ["BREAKOUT", "VOLATILITY_MOMENTUM"]:
-                if mgi.get("donchian_high", 0.0) <= 0 and mgi.get("donchian_low", 0.0) <= 0:
-                    return False, "INCOMPLETE_REPLAY: missing Donchian indicators for BREAKOUT", {"status": "INCOMPLETE_REPLAY"}
+
+            for rule_name, validator in REQUIRED_CONTEXT_BY_STRATEGY.get(strategy_mode, []):
+                if not validator(mgi):
+                    return False, f"INCOMPLETE_REPLAY: missing required indicator/context '{rule_name}' for {strategy_mode}", {"status": "INCOMPLETE_REPLAY"}
         elif strategy_mode in ["BREAKOUT", "VOLATILITY_MOMENTUM"] and mgi is None:
             return False, "INCOMPLETE_REPLAY: missing market_guard_inputs in snapshot", {"status": "INCOMPLETE_REPLAY"}
 
@@ -432,6 +456,8 @@ class DecisionReplayEngine:
                 "rejection_tag": replayed_rejection_tag
             }
         }
+        if not original_ceo_trade_action:
+            diff["uncertified_fallback_trade_action"] = True
         msg = "MATCH" if matches else (
             f"MISMATCH: Orig(dir={orig_decision}, act={orig_action}, actable={orig_actionable}, tag={orig_rejection_tag}) vs "
             f"Replayed(dir={replayed_dir}, act={replayed_action}, actable={replayed_actionable}, tag={replayed_rejection_tag})"
