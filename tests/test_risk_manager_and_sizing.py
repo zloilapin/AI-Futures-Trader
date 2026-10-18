@@ -1,6 +1,6 @@
 import pytest
 import asyncio
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import MagicMock, AsyncMock, patch
 
 from agents.risk_manager import RiskManager
 from core.logger import TradeLogger
@@ -1971,6 +1971,224 @@ async def test_drawdown_discrepancy_and_strict_fail_closed(risk_mgr, base_portfo
     verdict_missing = await risk_mgr.analyze(ceo_decision, portfolio_missing, market)
     assert verdict_missing["approved"] is False
     assert verdict_missing["veto_category"] == "MISSING_PORTFOLIO_HEALTH"
+
+
+# ==============================================================================
+# 13. AUDIT P1 HARDENING REGRESSION TESTS
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_partial_fill_emergency_protect_defined_vars_and_no_unbound_error():
+    """
+    P1 Audit Requirement 1:
+    Verifies that on partial fill (fill_ratio < 0.95), emergency_protect_risk_breach
+    is called with guaranteed defined float parameters (approved_budget, total_actual_loss),
+    never raising UnboundLocalError even when sl_price is 0 or calculation threw error.
+    """
+    from services.nado_trading_service import NadoTradingService
+    service = NadoTradingService()
+    service.is_connected = True
+    mock_client = MagicMock()
+    service.client = mock_client
+    service._market_cache = {2: MagicMock()}
+    service.product_map = {"BTC": 2}
+    service._get_market_parameters = MagicMock(return_value={
+        "size_increment_x18": int(0.001 * 1e18),
+        "price_increment_x18": int(1.0 * 1e18),
+        "min_size": 0.001,
+        "min_notional": 0.0
+    })
+
+    mock_order_res = MagicMock()
+    mock_order_res.data.digest = "0xpart_digest"
+    mock_client.market.place_order.return_value = mock_order_res
+
+    # Order was for 0.1 BTC, but only 0.05 BTC filled (50% fill ratio < 95%)
+    mock_fill_order = MagicMock()
+    mock_fill_order.base_filled = str(int(0.05 * 1e18))
+    mock_fill_order.quote_filled = str(int(3000.0 * 1e18))
+    mock_client.market.get_historical_orders_by_digest.return_value = MagicMock(orders=[mock_fill_order])
+
+    emergency_args = {}
+    async def mock_emergency(symbol, approved_risk=0.0, actual_risk=0.0):
+        emergency_args["symbol"] = symbol
+        emergency_args["approved_risk"] = approved_risk
+        emergency_args["actual_risk"] = actual_risk
+        return True, 3000.0
+    service.emergency_protect_risk_breach = mock_emergency
+
+    with patch.object(service, "_save_positions"):
+        ok = await service.open_position(
+            "BTC-USD", "LONG", 60000.0, 6000.0, 62000.0, 59000.0, 10,
+            contracts=0.1, approved_risk_usd=130.0
+        )
+        assert ok is False
+        assert service.last_execution_status == "ABORTED_PARTIAL_FILL"
+        assert emergency_args["symbol"] == "BTC-USD"
+        assert isinstance(emergency_args["approved_risk"], float)
+        assert isinstance(emergency_args["actual_risk"], float)
+        assert emergency_args["approved_risk"] == 130.0
+        assert emergency_args["actual_risk"] > 0.0
+
+
+@pytest.mark.asyncio
+async def test_pre_dispatch_stress_loss_breach_veto():
+    """
+    P1 Audit Requirement 2:
+    Verifies that if expected loss is below limit but stress loss (slippage + funding)
+    exceeds the max allowed stress ceiling, pre-dispatch aborts with PRE_DISPATCH_STRESS_BREACH.
+    """
+    from services.nado_trading_service import NadoTradingService
+    service = NadoTradingService()
+    service.is_connected = True
+    mock_client = MagicMock()
+    service.client = mock_client
+    service._market_cache = {2: MagicMock()}
+    service.product_map = {"BTC": 2}
+    service._get_market_parameters = MagicMock(return_value={
+        "size_increment_x18": int(0.001 * 1e18),
+        "price_increment_x18": int(1.0 * 1e18),
+        "min_size": 0.001,
+        "min_notional": 0.0
+    })
+
+    # approved_risk_usd = 10.0 -> max_tolerated = 10*1.10+0.05 = 11.05.
+    # max_allowed_stress = 10*1.30+0.15 = 13.15.
+    # Entry=60000, SL=59900. contracts=0.1. Price loss = 10.0. Fees = 0.1 * 120000 * 0.0005 = 6.0.
+    # With extreme slippage stress (slippage_stress_pct=0.02) -> slippage stress = 0.1 * 59900 * 0.02 = 119.8 USD >> 13.15!
+    ok = await service.open_position(
+        "BTC-USD", "LONG", 60000.0, 6000.0, 62000.0, 59990.0, 10,
+        contracts=0.1, approved_risk_usd=10.0, slippage_stress_pct=0.02
+    )
+    assert ok is False
+    assert service.last_execution_status in ["PRE_DISPATCH_RISK_BREACH", "PRE_DISPATCH_STRESS_BREACH"]
+    assert mock_client.market.place_order.called is False
+
+
+@pytest.mark.asyncio
+async def test_historical_kelly_missing_payoff_neutral_without_fabricating():
+    """
+    P1 Audit Requirement 4:
+    Verifies that when historical payoff ratio is missing / 0.0,
+    Kelly multiplier returns 1.0 (neutral) and does NOT invent b = 1.0.
+    Also verifies win_rate clamping to [0.0, 1.0].
+    """
+    from agents.risk_manager import RiskManager
+    rm = RiskManager(MagicMock(), MagicMock())
+
+    # 1. Missing payoff (0.0): must return 1.0 (no Kelly alteration)
+    k_missing = rm._calculate_kelly_multiplier(win_rate=0.45, payoff_ratio=0.0, total_trades=25)
+    assert k_missing == 1.0
+
+    # 2. Negative payoff: must return 1.0
+    k_neg = rm._calculate_kelly_multiplier(win_rate=0.50, payoff_ratio=-1.0, total_trades=25)
+    assert k_neg == 1.0
+
+    # 3. Clamped win_rate > 1.0 (e.g. 150%) clamped to 1.0
+    k_over = rm._calculate_kelly_multiplier(win_rate=1.5, payoff_ratio=1.5, total_trades=20)
+    assert k_over == 1.00
+
+    # 4. Clamped win_rate < 0.0 clamped to 0.0
+    k_under = rm._calculate_kelly_multiplier(win_rate=-0.2, payoff_ratio=1.5, total_trades=20)
+    assert k_under == 1.0
+
+
+@pytest.mark.asyncio
+async def test_subaccount_health_nan_and_corrupted_vetoed(risk_mgr, base_market_data, base_portfolio_data):
+    """
+    P1 Audit Requirement 5:
+    Verifies that NaN or unparseable subaccount maintenance health is strictly vetoed
+    with SUBACCOUNT_HEALTH_CRITICAL.
+    """
+    ceo_decision = {"symbol": "BTC-USD", "decision": "LONG", "conviction": 80, "trade_action": "ENTER"}
+
+    # 1. NaN health
+    p_nan = dict(base_portfolio_data, maintenance_health_usd=float("nan"))
+    v_nan = await risk_mgr.analyze(ceo_decision, p_nan, base_market_data)
+    assert v_nan["approved"] is False
+    assert v_nan["veto_category"] == "SUBACCOUNT_HEALTH_CRITICAL"
+
+    # 2. String corrupted health
+    p_bad = dict(base_portfolio_data, maintenance_health_usd="CORRUPTED_STRING")
+    v_bad = await risk_mgr.analyze(ceo_decision, p_bad, base_market_data)
+    assert v_bad["approved"] is False
+    assert v_bad["veto_category"] == "SUBACCOUNT_HEALTH_CRITICAL"
+
+
+@pytest.mark.asyncio
+async def test_open_positions_dedup_preserves_distinct_positions_and_handles_signed_amount(risk_mgr, base_market_data):
+    """
+    P1 Audit Requirement 6:
+    1. Multiple distinct positions of the same base asset (e.g. subaccount 1 and subaccount 2,
+       or distinct sizes/entry prices) are BOTH preserved and both counted toward existing risk.
+    2. Negative signed amounts (e.g. amount = -0.5 for short) are handled safely without PORTFOLIO_STATE_DESYNC.
+    """
+    ceo_decision = {"symbol": "SOL-USD", "decision": "LONG", "conviction": 85, "trade_action": "ENTER"}
+    portfolio = {
+        "total_usd": 1000.0,
+        "available_margin": 900.0,
+        "active_positions": [
+            # Position 1: ETH short on subaccount A
+            {
+                "symbol": "ETH-USD",
+                "direction": "SHORT",
+                "entry_price": 3000.0,
+                "sl_price": 3100.0,
+                "amount": -0.05,  # Signed negative amount
+                "_subaccount": "0xsubA",
+                "_product_id": 3
+            },
+            # Position 2: ETH long on subaccount B (distinct position!)
+            {
+                "symbol": "ETH-USD",
+                "direction": "LONG",
+                "entry_price": 3000.0,
+                "sl_price": 2900.0,
+                "amount": 0.05,
+                "_subaccount": "0xsubB",
+                "_product_id": 3
+            }
+        ]
+    }
+    market = {
+        "price_data": {"current_price": 100.0},
+        "indicators": {"atr_14": 2.0},
+        "order_book_data": {"spread_pct": 0.05},
+        "derivatives_data": {"taker_fee_pct": 0.0005, "size_increment": 0.1, "price_increment": 0.01}
+    }
+    verdict = await risk_mgr.analyze(ceo_decision, portfolio, market, effective_profile="BALANCED")
+    # Both positions must be preserved and counted without PORTFOLIO_STATE_DESYNC veto
+    assert verdict.get("veto_category") != "PORTFOLIO_STATE_DESYNC"
+    assert verdict["approved"] is True
+    # Risk budget (BALANCED 4% = $40). Both ETH positions have ~0.05 * 100 = $5 risk each (~$10 total).
+    # SOL is sized into remaining $30 budget.
+    assert verdict["approved_risk_usd"] <= 30.5
+
+
+@pytest.mark.asyncio
+async def test_strict_min_size_unconfirmed_rejected_without_guessing(risk_mgr, base_portfolio_data):
+    """
+    P1 Audit Requirement 3:
+    In strict metadata mode, if min_size is unconfirmed dummy default (100.0),
+    it is strictly rejected with MARKET_METADATA_UNAVAILABLE rather than guessed as size_increment.
+    """
+    ceo_decision = {"symbol": "XRP-USD", "decision": "LONG", "conviction": 80, "trade_action": "ENTER"}
+    portfolio = dict(base_portfolio_data, total_usd=500.0, available_margin=500.0)
+    market = {
+        "price_data": {"current_price": 1.50},
+        "indicators": {"atr_14": 0.05},
+        "derivatives_data": {
+            "strict_metadata": True,
+            "size_increment": 5.0,
+            "price_increment": 0.0001,
+            "min_size": 100.0,  # Unconfirmed 100.0 dummy
+            "confirmed_min_size": False
+        }
+    }
+    verdict = await risk_mgr.analyze(ceo_decision, portfolio, market)
+    assert verdict["approved"] is False
+    assert verdict["veto_category"] == "MARKET_METADATA_UNAVAILABLE"
+
 
 
 

@@ -196,14 +196,26 @@ class RiskManager(BaseAgent):
           b = historical payoff ratio (average win / average loss)
         Clamped to [0.50, 1.00] as asymmetric downside damping only.
         Does NOT boost above 1.00 to prevent overleveraging on short-term sample clustering.
-        Only activated when total_trades >= 15 and b > 0.
+        Only activated when total_trades >= 15 and b > 0 and finite.
         """
-        b = payoff_ratio if payoff_ratio > 0 else (realized_rr or 0.0)
-        if total_trades < 15 or b <= 0 or win_rate <= 0:
+        try:
+            p = float(win_rate)
+            if not math.isfinite(p):
+                return 1.0
+            p = max(0.0, min(1.0, p))
+            
+            raw_b = payoff_ratio if payoff_ratio > 0 else (realized_rr or 0.0)
+            b = float(raw_b)
+            if not math.isfinite(b) or b <= 0.0:
+                return 1.0
+        except (ValueError, TypeError):
+            return 1.0
+
+        if total_trades < 15 or p <= 0:
             return 1.0
         
-        q = 1.0 - win_rate
-        f_star = (win_rate * b - q) / b
+        q = 1.0 - p
+        f_star = (p * b - q) / b
         
         # Asymmetric downside damping with continuous calibration:
         # Instead of a discrete binary step jump between 0.50 and 1.00 at f* = 0,
@@ -347,10 +359,21 @@ class RiskManager(BaseAgent):
         # Gate 2.1: Max Daily Drawdown & Subaccount Health Veto Gate (P1 Finding 2 & P2 Finding 9)
         # 1. Check Subaccount Health (Nado Protocol Health model)
         maint_health_usd = portfolio_data.get("maintenance_health_usd")
-        if maint_health_usd is not None and float(maint_health_usd) < 0.0:
-            msg = f"Subaccount maintenance margin health is negative (${float(maint_health_usd):.2f}). Liquidations imminent. Halting new trades."
-            self.logger.critical(f"[{self.name}] 🚨 SUBACCOUNT_HEALTH_CRITICAL VETO: {msg}")
-            return self._build_veto_result("SUBACCOUNT_HEALTH_CRITICAL", msg, trade_action)
+        if maint_health_usd is not None:
+            try:
+                m_health = float(maint_health_usd)
+                if not math.isfinite(m_health) or m_health < 0.0:
+                    msg = f"Subaccount maintenance margin health is critical or non-finite ({maint_health_usd}). Liquidations imminent. Halting new trades."
+                    self.logger.critical(f"[{self.name}] 🚨 SUBACCOUNT_HEALTH_CRITICAL VETO: {msg}")
+                    return self._build_veto_result("SUBACCOUNT_HEALTH_CRITICAL", msg, trade_action)
+            except (ValueError, TypeError):
+                msg = f"Subaccount maintenance margin health is unparseable ({maint_health_usd!r}). Halting new trades."
+                self.logger.critical(f"[{self.name}] 🚨 SUBACCOUNT_HEALTH_CRITICAL VETO: {msg}")
+                return self._build_veto_result("SUBACCOUNT_HEALTH_CRITICAL", msg, trade_action)
+        elif portfolio_data.get("strict_portfolio_health", False):
+            msg = "Subaccount maintenance health is missing in strict health mode. Blocking trades."
+            self.logger.warning(f"[{self.name}] 🚫 MISSING_PORTFOLIO_HEALTH VETO: {msg}")
+            return self._build_veto_result("MISSING_PORTFOLIO_HEALTH", msg, trade_action)
 
         max_daily_dd = profile_rules.get("max_daily_drawdown_pct", 0.06)
         raw_dd = portfolio_data.get("daily_drawdown_pct")
@@ -406,22 +429,44 @@ class RiskManager(BaseAgent):
             active_positions = {}
         raw_pos_items = active_positions.values() if isinstance(active_positions, dict) else active_positions
         
-        # Deduplicate positions by object identity and canonical asset base
+        # Deduplicate positions by unique position signature / canonical footprint
         unique_positions = []
         seen_pos_ids = set()
-        seen_pos_bases = set()
+        seen_pos_canonical = set()
         for pos in raw_pos_items:
             if isinstance(pos, dict):
                 p_id = id(pos)
                 if p_id in seen_pos_ids:
                     continue
                 seen_pos_ids.add(p_id)
+
                 p_sym = str(pos.get("symbol", "")).replace('/', '-').strip().upper()
-                p_base = p_sym.split('-')[0] if p_sym else ""
-                if p_base and p_base in seen_pos_bases:
+                p_prod = pos.get("_product_id") or pos.get("product_id")
+                p_sub = pos.get("_subaccount") or pos.get("subaccount") or pos.get("sender", "")
+                
+                raw_s = pos.get("contracts")
+                if raw_s is None:
+                    raw_s = pos.get("amount", pos.get("base_amount", 0.0))
+                try:
+                    s_val = abs(float(raw_s))
+                except (ValueError, TypeError):
+                    s_val = 0.0
+
+                p_entry = round(float(pos.get("entry_price", 0.0) or 0.0), 4)
+                p_dir = str(pos.get("direction", pos.get("side", ""))).upper()
+                p_sl = round(float(pos.get("sl_price", 0.0) or 0.0), 4)
+
+                explicit_id = pos.get("position_id") or pos.get("id")
+                if explicit_id:
+                    canon_key = f"ID:{explicit_id}"
+                elif p_prod is not None and p_sub:
+                    canon_key = f"PROD_SUB:{p_prod}:{p_sub}:{s_val:.4f}:{p_entry}:{p_dir}"
+                else:
+                    canon_key = f"FP:{p_sym}:{p_sub}:{p_dir}:{s_val:.4f}:{p_entry}:{p_sl}"
+
+                if canon_key in seen_pos_canonical:
                     continue
-                if p_base:
-                    seen_pos_bases.add(p_base)
+                seen_pos_canonical.add(canon_key)
                 unique_positions.append(pos)
 
         # Gate 2.0: Unresolved Risk Breach Incident Veto
@@ -469,7 +514,8 @@ class RiskManager(BaseAgent):
                 active_keys = set()
                 
             active_bases = {k.replace('/', '-').split('-')[0].upper() for k in active_keys if k}
-            if base_sym in active_bases or canonical_sym in active_keys or clean_sym in active_keys or base_sym in seen_pos_bases:
+            seen_unique_bases = {str(p.get('symbol', '')).replace('/', '-').split('-')[0].upper() for p in unique_positions if p.get('symbol')}
+            if base_sym in active_bases or canonical_sym in active_keys or clean_sym in active_keys or base_sym in seen_unique_bases:
                 msg = f"Position for {symbol} ({canonical_sym}) is already active. Duplicate entries prohibited."
                 self.logger.warning(f"[{self.name}] 🚫 ALREADY_OPEN VETO: {msg}")
                 return self._build_veto_result("ALREADY_OPEN", msg, trade_action)
@@ -490,14 +536,20 @@ class RiskManager(BaseAgent):
                 self.logger.critical(f"[{self.name}] 🚨 RISK_BREACH_UNRESOLVED VETO: {msg}")
                 return self._build_veto_result("RISK_BREACH_UNRESOLVED", msg, trade_action)
                 
-            # 2. Extract position size (support both contracts and amount)
-            raw_size = pos.get("contracts", pos.get("amount", pos.get("base_amount", 0.0)))
-            if not _is_finite_non_negative(raw_size):
+            # 2. Extract position size (support both contracts and signed amount)
+            raw_size = pos.get("contracts")
+            if raw_size is None:
+                raw_size = pos.get("amount", pos.get("base_amount", 0.0))
+            try:
+                f_size = float(raw_size)
+                if not math.isfinite(f_size):
+                    raise ValueError(f"Non-finite size {raw_size}")
+            except (ValueError, TypeError):
                 msg = f"Active position {pos_sym} has invalid or non-finite size ({raw_size}). State desynchronized."
                 self.logger.warning(f"[{self.name}] 🚫 PORTFOLIO_STATE_DESYNC VETO: {msg}")
                 return self._build_veto_result("PORTFOLIO_STATE_DESYNC", msg, trade_action)
                 
-            size = abs(float(raw_size))
+            size = abs(f_size)
             if size <= 1e-7:
                 # Closed or negligible dust position
                 continue
@@ -546,16 +598,20 @@ class RiskManager(BaseAgent):
         if not isinstance(derivatives_data, dict):
             derivatives_data = {}
 
-        # Half the bid-ask spread is the minimum crossing cost
+        from core.risk_calculator import compute_execution_prices
         half_spread_pct = market_spread_pct / 2.0
-        expected_slippage_pct = max(base_slip, half_spread_pct)
-        if derivatives_data.get("expected_slippage_pct") is not None:
-            expected_slippage_pct = max(expected_slippage_pct, float(derivatives_data["expected_slippage_pct"]))
-            
-        if decision == "LONG":
-            execution_entry = current_price * (1.0 + expected_slippage_pct)
-        else:
-            execution_entry = current_price * (1.0 - expected_slippage_pct)
+        explicit_slip = float(derivatives_data["expected_slippage_pct"]) if derivatives_data.get("expected_slippage_pct") is not None else None
+        exec_price_info = compute_execution_prices(
+            current_price=current_price,
+            direction=decision,
+            expected_slippage_pct=explicit_slip,
+            half_spread_pct=half_spread_pct,
+            base_asset=base_asset
+        )
+        execution_entry = exec_price_info["execution_entry"]
+        expected_limit_price = exec_price_info["limit_price"]
+        expected_slip_buffer = exec_price_info["slip_buffer"]
+        expected_slippage_pct = exec_price_info["expected_slippage_pct"]
 
         # Calculate SL and TP distances based on strategy mode
         if strategy_mode == "MEAN_REVERSION":
@@ -661,7 +717,9 @@ class RiskManager(BaseAgent):
             holding_hours = 4.0
 
         # Preserve genuine 0.0 funding without overriding with non-zero defaults (P1 Finding 4)
-        raw_fr = derivatives_data.get("funding_rate_hourly", derivatives_data.get("funding_rate"))
+        raw_fr = derivatives_data.get("funding_rate_hourly")
+        if raw_fr is None:
+            raw_fr = derivatives_data.get("funding_rate")
         funding_rate_hourly = float(raw_fr) if (raw_fr is not None and str(raw_fr).strip() != "") else 0.0
         funding_cost_pct = (funding_rate_hourly if decision == "LONG" else -funding_rate_hourly) * holding_hours
         
@@ -707,8 +765,7 @@ class RiskManager(BaseAgent):
             avg_l = float(portfolio_data.get("avg_loss_usd", 0.0) or 0.0)
             if avg_w > 0 and avg_l > 0:
                 hist_payoff = avg_w / avg_l
-            elif total_trades >= 15:
-                hist_payoff = 1.0  # Neutral fallback if historical PnL ratio is absent
+            # If missing, remain 0.0 without fabricating unmeasured 1.0 assumption
         
         if total_trades >= 30 and hist_payoff > 0:
             historical_expected_r = (win_rate * hist_payoff) - (1.0 - win_rate)
@@ -988,20 +1045,40 @@ class RiskManager(BaseAgent):
         margin_usd = round(notional_usd / effective_leverage if effective_leverage > 0 else notional_usd, 2)
         margin_pct = round((margin_usd / total_balance) * 100 if total_balance > 0 else 0, 2)
 
-        min_size = float(derivatives_data.get("min_size") or 0.0)
-        min_notional = float(derivatives_data.get("min_notional") or 0.0)
-        
-        # Fall back to size_increment if min_size is non-positive or below increment.
-        # Handle unconfirmed Nado engine dummy default (where book_info.min_size is exactly 100.0 across all products)
-        # UNLESS explicitly marked as a confirmed exchange minimum size.
+        raw_min = derivatives_data.get("min_size")
         is_confirmed_min = bool(derivatives_data.get("confirmed_min_size") or derivatives_data.get("is_confirmed"))
-        is_dummy_default = (min_size == 100.0 and not is_confirmed_min and size_increment > 0 and size_increment != 100.0)
+        min_notional = float(derivatives_data.get("min_notional") or 0.0)
 
-        if min_size <= 0.0 or (size_increment > 0 and min_size < size_increment) or is_dummy_default:
-            self.logger.info(
-                f"[{self.name}] ℹ️ Reported min_size ({min_size}) is non-positive, below increment, or unconfirmed dummy default (100.0). "
-                f"Falling back to size_increment ({size_increment}) as true minimum order size."
-            )
+        if raw_min is not None:
+            try:
+                min_size = float(raw_min)
+                if not math.isfinite(min_size):
+                    raise ValueError(f"Non-finite min_size {raw_min}")
+            except (ValueError, TypeError):
+                if is_strict_metadata:
+                    msg = f"Market metadata incomplete: invalid min_size ({raw_min}) for {symbol}. Refusing trade in strict mode."
+                    self.logger.warning(f"[{self.name}] 🚫 MARKET_METADATA_UNAVAILABLE VETO: {msg}")
+                    return self._build_veto_result("MARKET_METADATA_UNAVAILABLE", msg, trade_action)
+                min_size = size_increment
+
+            if is_strict_metadata and min_size <= 0.0:
+                msg = f"Market metadata incomplete: non-positive min_size ({min_size}) for {symbol}. Refusing trade in strict mode."
+                self.logger.warning(f"[{self.name}] 🚫 MARKET_METADATA_UNAVAILABLE VETO: {msg}")
+                return self._build_veto_result("MARKET_METADATA_UNAVAILABLE", msg, trade_action)
+
+            # In strict mode, an unconfirmed 100.0 cannot be guessed
+            if is_strict_metadata and min_size == 100.0 and not is_confirmed_min and size_increment > 0 and size_increment != 100.0:
+                msg = f"Market metadata incomplete: unconfirmed dummy min_size (100.0) for {symbol}. Cannot confirm whether 100.0 is engine dummy or true minimum without confirmation."
+                self.logger.warning(f"[{self.name}] 🚫 MARKET_METADATA_UNAVAILABLE VETO: {msg}")
+                return self._build_veto_result("MARKET_METADATA_UNAVAILABLE", msg, trade_action)
+
+            # In non-strict mode, retain legacy fallback for unconfirmed 100.0 or <= 0
+            if not is_strict_metadata:
+                is_dummy_default = (min_size == 100.0 and not is_confirmed_min and size_increment > 0 and size_increment != 100.0)
+                if min_size <= 0.0 or (size_increment > 0 and min_size < size_increment) or is_dummy_default:
+                    min_size = size_increment
+        else:
+            # If min_size is not explicitly configured, default to product size_increment
             min_size = size_increment
         
         if notional_usd <= 0 or contracts <= 0:
@@ -1032,11 +1109,27 @@ class RiskManager(BaseAgent):
         tp_price = round(tp_price, 6)
         rr_ratio = round(realized_rr, 2)
 
+        # Re-verify net profit and net RR post-rounding on actual contracts (Point 9)
+        post_round_profit = contracts * unit_net_profit
+        if post_round_profit <= 0:
+            msg = f"Candidate trade has non-positive net profit (${post_round_profit:.4f}) after rounding to exchange step size."
+            self.logger.warning(f"[{self.name}] ❌ POOR_RISK_REWARD VETO: {msg}")
+            return self._build_veto_result("POOR_RISK_REWARD", msg, trade_action)
+        if candidate_net_rr < min_rr_required:
+            msg = f"Candidate net RR ({candidate_net_rr:.2f}) is below minimum required {min_rr_required:.2f}:1 after rounding."
+            self.logger.warning(f"[{self.name}] ❌ POOR_RISK_REWARD VETO: {msg}")
+            return self._build_veto_result("POOR_RISK_REWARD", msg, trade_action)
+
         # Unified Loss Estimation & Verification (P0-3 & P1-2 & P1-3)
         from core.risk_calculator import estimate_total_loss
         taker_fee_pct = float(derivatives_data.get("taker_fee_pct") or 0.0005)
         slippage_stress = float(derivatives_data.get("slippage_stress_pct") or expected_slippage_pct)
-        funding_rate_hourly = float(derivatives_data.get("funding_rate_hourly") or derivatives_data.get("funding_rate") or 0.0)
+        
+        # Preserve genuine 0.0 funding without overriding with non-zero defaults (Point 8)
+        raw_fr_final = derivatives_data.get("funding_rate_hourly")
+        if raw_fr_final is None:
+            raw_fr_final = derivatives_data.get("funding_rate")
+        funding_rate_hourly = float(raw_fr_final) if (raw_fr_final is not None and str(raw_fr_final).strip() != "") else 0.0
         
         # Strategy-dependent holding hours
         if strategy_mode == "VOLATILITY_MOMENTUM":
@@ -1125,6 +1218,10 @@ class RiskManager(BaseAgent):
             "candidate_net_rr": round(candidate_net_rr, 2),
             "historical_payoff_ratio": round(hist_payoff, 2),
             "liquidation_price": liq_price,
+            "estimated_liquidation_price": liq_price,
+            "is_estimated_liquidation": True,
+            "limit_price": expected_limit_price,
+            "slip_buffer": expected_slip_buffer,
             "maintenance_margin_pct": mmf,
             "position_size_pct": margin_pct,
         }

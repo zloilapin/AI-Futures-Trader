@@ -118,3 +118,58 @@ def calculate_max_tolerated_risk(approved_risk: float) -> float:
     """
     risk = validate_finite_positive("approved_risk", approved_risk or 0.0, allow_zero=True)
     return round((risk * 1.10) + 0.05, 2)
+
+
+def calculate_max_allowed_stress_loss(approved_risk: float) -> float:
+    """
+    Uniform stress loss ceiling: 30% relative tolerance + $0.15 dust buffer.
+    Ensures identical stress tolerance across RiskManager, pre-dispatch, and fill verification.
+    """
+    risk = validate_finite_positive("approved_risk", approved_risk or 0.0, allow_zero=True)
+    return round((risk * 1.30) + 0.15, 2)
+
+
+def compute_execution_prices(
+    current_price: float,
+    direction: str,
+    expected_slippage_pct: Optional[float] = None,
+    half_spread_pct: float = 0.0,
+    base_asset: str = "BTC"
+) -> dict:
+    """
+    Unified price and slippage model across RiskManager, Pipeline, and NadoTradingService.
+    Returns:
+    - execution_entry: expected fill price for RR and sizing.
+    - limit_price: worst-case crossing price for IOC exchange order.
+    - slip_buffer: bounded slippage tolerance for exchange order (0.05% to 0.50%).
+    - expected_slippage_pct: modelled slippage.
+    """
+    cp = validate_finite_positive("current_price", current_price)
+    dir_upper = (direction or "LONG").strip().upper()
+
+    # Modelled slippage
+    if base_asset.upper() in ["BTC", "ETH"]:
+        base_slip = 0.001  # 10 bps
+    else:
+        base_slip = 0.002  # 20 bps
+
+    modelled_slip = max(base_slip, float(half_spread_pct or 0.0))
+    if expected_slippage_pct is not None and expected_slippage_pct > 0:
+        modelled_slip = max(modelled_slip, float(expected_slippage_pct))
+
+    # Bounded slip_buffer for exchange order
+    slip_buffer = min(0.005, max(0.0005, modelled_slip))
+
+    if dir_upper == "LONG":
+        execution_entry = round(cp * (1.0 + modelled_slip), 6)
+        limit_price = round(cp * (1.0 + slip_buffer), 6)
+    else:
+        execution_entry = round(cp * (1.0 - modelled_slip), 6)
+        limit_price = round(cp * (1.0 - slip_buffer), 6)
+
+    return {
+        "execution_entry": execution_entry,
+        "limit_price": limit_price,
+        "slip_buffer": slip_buffer,
+        "expected_slippage_pct": modelled_slip
+    }

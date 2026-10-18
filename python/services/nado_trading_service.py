@@ -226,7 +226,7 @@ class NadoTradingService(BaseTradingService):
                     elif avg_win_usd > 0:
                         historical_payoff_ratio = round(avg_win_usd, 4)
                     else:
-                        historical_payoff_ratio = 1.0
+                        historical_payoff_ratio = 0.0
             except Exception as e:
                 logger.warning(f"[NadoTradingService] ⚠️ Could not load trade journal metrics: {e}")
             
@@ -255,7 +255,8 @@ class NadoTradingService(BaseTradingService):
                 "historical_payoff_ratio": historical_payoff_ratio,
                 "avg_win_usd": avg_win_usd,
                 "avg_loss_usd": avg_loss_usd,
-                "journal_trades_count": journal_trades_count
+                "journal_trades_count": journal_trades_count,
+                "strict_portfolio_health": True
             }
         except Exception as e:
             logger.error(f"[NadoTradingService] ⚠️ Failed to get portfolio summary: {e}")
@@ -561,7 +562,7 @@ class NadoTradingService(BaseTradingService):
             # Unified Pre-Dispatch Risk Invariant Verification:
             # Check worst-case execution price (limit_price) and stop loss against approved_risk_usd
             if sl_price > 0 and approved_risk_usd > 0 and final_contracts > 0:
-                from core.risk_calculator import estimate_total_loss
+                from core.risk_calculator import estimate_total_loss, calculate_max_allowed_stress_loss
                 try:
                     pre_loss_calc = estimate_total_loss(
                         contracts=final_contracts,
@@ -573,6 +574,7 @@ class NadoTradingService(BaseTradingService):
                         holding_hours=holding_hours,
                         approved_risk=approved_risk_usd
                     )
+                    pre_max_stress = calculate_max_allowed_stress_loss(approved_risk_usd)
                     if pre_loss_calc.total_expected_loss_usd > pre_loss_calc.max_tolerated_risk_usd:
                         logger.error(
                             f"[NadoTradingService] ❌ PRE-DISPATCH RISK BREACH: Expected loss at limit price "
@@ -585,6 +587,21 @@ class NadoTradingService(BaseTradingService):
                             "reason": "PRE_DISPATCH_RISK_BREACH",
                             "expected_loss": pre_loss_calc.total_expected_loss_usd,
                             "max_tolerated": pre_loss_calc.max_tolerated_risk_usd,
+                            "approved_risk": approved_risk_usd
+                        }
+                        return False
+                    if pre_loss_calc.total_stress_loss_usd > pre_max_stress:
+                        logger.error(
+                            f"[NadoTradingService] ❌ PRE-DISPATCH STRESS RISK BREACH: Stress loss at limit price "
+                            f"(${pre_loss_calc.total_stress_loss_usd:.2f}) exceeds approved stress ceiling "
+                            f"(${pre_max_stress:.2f}, approved=${approved_risk_usd:.2f}). "
+                            f"Aborting before sending order to sequencer."
+                        )
+                        self.last_execution_status = "PRE_DISPATCH_STRESS_BREACH"
+                        self.last_execution_details = {
+                            "reason": "PRE_DISPATCH_STRESS_BREACH",
+                            "stress_loss": pre_loss_calc.total_stress_loss_usd,
+                            "max_allowed_stress": pre_max_stress,
                             "approved_risk": approved_risk_usd
                         }
                         return False
@@ -816,10 +833,18 @@ class NadoTradingService(BaseTradingService):
                 self.active_positions[canonical_sym] = self.active_positions[symbol]
             self._save_positions()
 
+            # --- Guaranteed Risk Parameters Initialized Prior to Any Execution Branches (P1-1) ---
+            from core.risk_calculator import estimate_total_loss, calculate_max_tolerated_risk, calculate_max_allowed_stress_loss
+            approved_budget = float(approved_risk_usd) if (approved_risk_usd and approved_risk_usd > 0) else (
+                actual_base_amount * abs(entry_price - sl_price) if (entry_price > 0 and sl_price > 0) else 0.0
+            )
+            allowed_risk_threshold = calculate_max_tolerated_risk(approved_budget) if approved_budget > 0 else 0.0
+            max_allowed_stress = calculate_max_allowed_stress_loss(approved_budget) if approved_budget > 0 else 0.0
+            total_actual_loss = round(actual_base_amount * abs(actual_entry_price - sl_price), 2) if (actual_entry_price > 0 and sl_price > 0) else 0.0
+            total_actual_stress = total_actual_loss
+
             # --- Unified Actual Risk vs Approved Risk Check (P0 / P1-1 / P1-2 / P1-3) ---
             if sl_price > 0 and actual_base_amount > 0 and actual_entry_price > 0:
-                from core.risk_calculator import estimate_total_loss
-                approved_budget = float(approved_risk_usd) if approved_risk_usd and approved_risk_usd > 0 else (actual_base_amount * abs(entry_price - sl_price))
                 try:
                     loss_calc = estimate_total_loss(
                         contracts=actual_base_amount,
@@ -832,14 +857,21 @@ class NadoTradingService(BaseTradingService):
                         approved_risk=approved_budget
                     )
                     total_actual_loss = loss_calc.total_expected_loss_usd
+                    total_actual_stress = loss_calc.total_stress_loss_usd
                     allowed_risk_threshold = loss_calc.max_tolerated_risk_usd
+                    max_allowed_stress = calculate_max_allowed_stress_loss(approved_budget)
 
-                    if approved_budget > 0 and total_actual_loss > allowed_risk_threshold:
-                        risk_diff_pct = ((total_actual_loss / approved_budget) - 1.0) * 100
+                    expected_breached = (approved_budget > 0 and total_actual_loss > allowed_risk_threshold)
+                    stress_breached = (approved_budget > 0 and total_actual_stress > max_allowed_stress)
+
+                    if expected_breached or stress_breached:
+                        breach_desc = "EXPECTED_LOSS" if expected_breached else "STRESS_LOSS"
+                        risk_diff_pct = ((total_actual_loss / approved_budget) - 1.0) * 100 if approved_budget > 0 else 0.0
                         logger.error(
-                            f"[NadoTradingService] ❌ FATAL SLIPPAGE / RISK BREACH: Total potential loss (${total_actual_loss:.2f}) "
-                            f"exceeds approved risk threshold (${allowed_risk_threshold:.2f}, approved=${approved_budget:.2f}, "
-                            f"fee=${loss_calc.fee_loss_usd:.2f}) by {risk_diff_pct:.1f}% "
+                            f"[NadoTradingService] ❌ FATAL SLIPPAGE / RISK BREACH ({breach_desc}): "
+                            f"Total potential loss (${total_actual_loss:.2f}, stress=${total_actual_stress:.2f}) "
+                            f"exceeds approved risk threshold (exp_max=${allowed_risk_threshold:.2f}, stress_max=${max_allowed_stress:.2f}, "
+                            f"approved=${approved_budget:.2f}, fee=${loss_calc.fee_loss_usd:.2f}) by {risk_diff_pct:.1f}% "
                             f"due to adverse execution price ({actual_entry_price:.4f} vs ref {entry_price:.4f}). "
                             f"Emergency closing position."
                         )
@@ -850,25 +882,66 @@ class NadoTradingService(BaseTradingService):
                         )
                         self.last_execution_status = "ABORTED_RISK_BREACH" if close_ok else "RISK_BREACH_UNRESOLVED"
                         self.last_execution_details = {
-                            "reason": "RISK_BREACH",
+                            "reason": f"RISK_BREACH_{breach_desc}",
                             "approved_risk": approved_budget,
                             "actual_risk": total_actual_loss,
+                            "actual_stress": total_actual_stress,
                             "symbol": symbol
                         }
                         return False
                 except ValueError as calc_err:
-                    logger.error(f"[NadoTradingService] ⚠️ Risk calculator error during fill verification: {calc_err}")
-                
+                    logger.error(
+                        f"[NadoTradingService] ❌ Fatal risk calculator error during fill verification: {calc_err}. "
+                        f"Refusing to leave position with unverified risk open; emergency closing immediately."
+                    )
+                    close_ok, _ = await self.emergency_protect_risk_breach(
+                        symbol=symbol,
+                        approved_risk=approved_budget,
+                        actual_risk=total_actual_loss
+                    )
+                    self.last_execution_status = "ABORTED_CALC_ERROR" if close_ok else "RISK_BREACH_UNRESOLVED"
+                    self.last_execution_details = {"reason": "RISK_CALCULATOR_ERROR", "error": str(calc_err)}
+                    return False
+            else:
+                logger.error(
+                    f"[NadoTradingService] ❌ Invalid open position parameters (sl_price={sl_price}, "
+                    f"entry={actual_entry_price}, size={actual_base_amount}). Risk budget cannot be established. "
+                    f"Emergency closing position."
+                )
+                close_ok, _ = await self.emergency_protect_risk_breach(
+                    symbol=symbol,
+                    approved_risk=approved_budget,
+                    actual_risk=total_actual_loss
+                )
+                self.last_execution_status = "ABORTED_PROTECTION_FAILURE" if close_ok else "RISK_BREACH_UNRESOLVED"
+                self.last_execution_details = {
+                    "reason": "INVALID_FILL_PARAMS_OR_PROTECTION_FAILURE",
+                    "sl_price": sl_price,
+                    "entry_price": actual_entry_price,
+                    "size": actual_base_amount
+                }
+                return False
+
             # --- Partial Fill Guard (CRITICAL-4) ---
             fill_ratio = abs(actual_filled_x18) / abs(amount_x18) if amount_x18 != 0 else 0
             if fill_ratio < 0.95:
-                logger.error(f"[NadoTradingService] ❌ PARTIAL FILL {fill_ratio*100:.1f}%. Closing immediately to prevent slivers.")
+                logger.error(
+                    f"[NadoTradingService] ❌ PARTIAL FILL {fill_ratio*100:.1f}%. "
+                    f"Closing immediately to prevent untracked slivers (actual_filled={actual_base_amount})."
+                )
                 close_ok, _ = await self.emergency_protect_risk_breach(
                     symbol=symbol,
                     approved_risk=approved_budget,
                     actual_risk=total_actual_loss
                 )
                 self.last_execution_status = "ABORTED_PARTIAL_FILL" if close_ok else "RISK_BREACH_UNRESOLVED"
+                self.last_execution_details = {
+                    "reason": "PARTIAL_FILL",
+                    "fill_ratio": fill_ratio,
+                    "actual_base_amount": actual_base_amount,
+                    "approved_risk": approved_budget,
+                    "actual_risk": total_actual_loss
+                }
                 return False
             
             # --- Native Trigger Orders (TP/SL) ---
