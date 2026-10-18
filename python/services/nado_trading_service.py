@@ -132,11 +132,21 @@ class NadoTradingService(BaseTradingService):
             self._load_state()
             summary = await asyncio.to_thread(self.client.subaccount.get_engine_subaccount_summary, self.default_subaccount_id)
             
-            # SubaccountInfoData has a healths array. index 0 is Initial Margin health
+            # SubaccountInfoData has a healths array:
+            # index 0 is Initial Margin health, index 1 is Maintenance Margin health
+            maint_health = 0.0
+            maint_liabilities = 0.0
             if hasattr(summary, "healths") and len(summary.healths) > 0:
                 health = summary.healths[0]
                 margin_used = float(health.liabilities) / 1e18
                 free_margin = float(health.health) / 1e18
+                if len(summary.healths) > 1:
+                    m_health = summary.healths[1]
+                    maint_liabilities = float(m_health.liabilities) / 1e18
+                    maint_health = float(m_health.health) / 1e18
+                else:
+                    maint_health = free_margin
+                    maint_liabilities = margin_used
             else:
                 margin_used = free_margin = 0.0
                 
@@ -197,6 +207,29 @@ class NadoTradingService(BaseTradingService):
             total_trades = self.win_count + self.loss_count
             win_rate = round((self.win_count / total_trades) * 100, 1) if total_trades > 0 else 0.0
             
+            # Historical trade metrics from trade journal (for Kelly & Strategy Expectancy)
+            historical_payoff_ratio = 1.0
+            avg_win_usd = 0.0
+            avg_loss_usd = 0.0
+            journal_trades_count = 0
+            try:
+                from core.state_store import StateStore
+                journal = StateStore.load("data/memory/trade_journal.json", default=[])
+                if isinstance(journal, list) and len(journal) > 0:
+                    journal_trades_count = len(journal)
+                    win_pnls = [float(t.get("net_pnl_usd", 0.0) or 0.0) for t in journal if float(t.get("net_pnl_usd", 0.0) or 0.0) > 0]
+                    loss_pnls = [abs(float(t.get("net_pnl_usd", 0.0) or 0.0)) for t in journal if float(t.get("net_pnl_usd", 0.0) or 0.0) < 0]
+                    avg_win_usd = round(sum(win_pnls) / len(win_pnls), 4) if win_pnls else 0.0
+                    avg_loss_usd = round(sum(loss_pnls) / len(loss_pnls), 4) if loss_pnls else 0.0
+                    if avg_loss_usd > 0:
+                        historical_payoff_ratio = round(avg_win_usd / avg_loss_usd, 4)
+                    elif avg_win_usd > 0:
+                        historical_payoff_ratio = round(avg_win_usd, 4)
+                    else:
+                        historical_payoff_ratio = 1.0
+            except Exception as e:
+                logger.warning(f"[NadoTradingService] ⚠️ Could not load trade journal metrics: {e}")
+            
             return {
                 "initial_balance": round(initial, 2),
                 "current_balance": round(equity, 2),
@@ -212,11 +245,17 @@ class NadoTradingService(BaseTradingService):
                 "roi_pct": round(((equity - initial) / initial) * 100, 2) if initial > 0 else 0.0,
                 "available_margin": round(free_margin, 2),
                 "used_margin": round(margin_used, 2),
+                "maintenance_health_usd": round(maint_health, 2),
+                "maintenance_liabilities_usd": round(maint_liabilities, 2),
                 "active_positions_count": active_count,
                 "win_count": self.win_count,
                 "loss_count": self.loss_count,
                 "win_rate_pct": win_rate,
-                "recent_streak": self.recent_streak
+                "recent_streak": self.recent_streak,
+                "historical_payoff_ratio": historical_payoff_ratio,
+                "avg_win_usd": avg_win_usd,
+                "avg_loss_usd": avg_loss_usd,
+                "journal_trades_count": journal_trades_count
             }
         except Exception as e:
             logger.error(f"[NadoTradingService] ⚠️ Failed to get portfolio summary: {e}")
@@ -365,7 +404,10 @@ class NadoTradingService(BaseTradingService):
         base_risk_pct: float = 0.0,
         final_risk_pct: float = 0.0,
         cohort: str = "UNKNOWN",
-        applied_multipliers: Optional[Dict[str, Any]] = None
+        applied_multipliers: Optional[Dict[str, Any]] = None,
+        funding_rate_hourly: float = 0.0,
+        holding_hours: float = 4.0,
+        slippage_stress_pct: Optional[float] = None
     ) -> bool:
         """Submits an EIP-712 signed order to Nado Gateway."""
         self.last_execution_status = "PENDING"
@@ -386,6 +428,23 @@ class NadoTradingService(BaseTradingService):
                 f"Блокировка дублирующего ордера для защиты капитала."
             )
             self.last_execution_status = "DUPLICATE_POSITION_BLOCKED"
+            return False
+
+        # Input numeric sanitization: reject NaN, Inf, or non-positive critical values
+        if not math.isfinite(entry_price) or entry_price <= 0:
+            logger.error(f"[NadoTradingService] ❌ Refusing execution: invalid entry_price ({entry_price}).")
+            self.last_execution_status = "REJECTED_BY_EXCHANGE"
+            self.last_execution_details = {"reason": f"Invalid entry_price ({entry_price})"}
+            return False
+        if not math.isfinite(sl_price) or sl_price < 0:
+            logger.error(f"[NadoTradingService] ❌ Refusing execution: invalid sl_price ({sl_price}).")
+            self.last_execution_status = "REJECTED_BY_EXCHANGE"
+            self.last_execution_details = {"reason": f"Invalid sl_price ({sl_price})"}
+            return False
+        if not math.isfinite(tp_price) or tp_price < 0:
+            logger.error(f"[NadoTradingService] ❌ Refusing execution: invalid tp_price ({tp_price}).")
+            self.last_execution_status = "REJECTED_BY_EXCHANGE"
+            self.last_execution_details = {"reason": f"Invalid tp_price ({tp_price})"}
             return False
             
         logger.info(f"[NadoTradingService] 🚀 Routing {direction} {symbol} to Nado DEX...")
@@ -465,6 +524,75 @@ class NadoTradingService(BaseTradingService):
                 self.last_execution_status = "REJECTED_BY_EXCHANGE"
                 self.last_execution_details = {"reason": "ZERO_AMOUNT_AFTER_STEP_ALIGNMENT"}
                 return False
+
+            final_contracts = float(Decimal(abs_amount_x18) / Decimal(10**18))
+            final_notional = final_contracts * entry_price
+
+            # Exchange minimum checks: never increase order size above approved budget!
+            min_size = float(params_dict.get("min_size", 0.0) or 0.0)
+            min_notional = float(params_dict.get("min_notional", 0.0) or 0.0)
+
+            if min_size > 0 and final_contracts < min_size:
+                logger.error(
+                    f"[NadoTradingService] ❌ Order size after increment alignment ({final_contracts}) "
+                    f"is below exchange min_size ({min_size}). Refusing trade to avoid unauthorized risk expansion."
+                )
+                self.last_execution_status = "ORDER_BELOW_MIN_SIZE"
+                self.last_execution_details = {
+                    "reason": "ORDER_BELOW_MIN_SIZE",
+                    "final_contracts": final_contracts,
+                    "min_size": min_size
+                }
+                return False
+
+            if min_notional > 0 and final_notional < min_notional:
+                logger.error(
+                    f"[NadoTradingService] ❌ Order notional (${final_notional:.2f}) "
+                    f"is below exchange min_notional (${min_notional:.2f}). Refusing trade."
+                )
+                self.last_execution_status = "ORDER_BELOW_MIN_NOTIONAL"
+                self.last_execution_details = {
+                    "reason": "ORDER_BELOW_MIN_NOTIONAL",
+                    "final_notional": final_notional,
+                    "min_notional": min_notional
+                }
+                return False
+
+            # Unified Pre-Dispatch Risk Invariant Verification:
+            # Check worst-case execution price (limit_price) and stop loss against approved_risk_usd
+            if sl_price > 0 and approved_risk_usd > 0 and final_contracts > 0:
+                from core.risk_calculator import estimate_total_loss
+                try:
+                    pre_loss_calc = estimate_total_loss(
+                        contracts=final_contracts,
+                        fill_price=limit_price,
+                        sl_price=sl_price,
+                        taker_fee_pct=taker_fee_pct,
+                        slippage_stress_pct=slippage_stress_pct if slippage_stress_pct is not None else slip_buffer,
+                        funding_rate_hourly=funding_rate_hourly,
+                        holding_hours=holding_hours,
+                        approved_risk=approved_risk_usd
+                    )
+                    if pre_loss_calc.total_expected_loss_usd > pre_loss_calc.max_tolerated_risk_usd:
+                        logger.error(
+                            f"[NadoTradingService] ❌ PRE-DISPATCH RISK BREACH: Expected loss at limit price "
+                            f"(${pre_loss_calc.total_expected_loss_usd:.2f}) exceeds approved risk threshold "
+                            f"(${pre_loss_calc.max_tolerated_risk_usd:.2f}, approved=${approved_risk_usd:.2f}). "
+                            f"Aborting before sending order to sequencer."
+                        )
+                        self.last_execution_status = "PRE_DISPATCH_RISK_BREACH"
+                        self.last_execution_details = {
+                            "reason": "PRE_DISPATCH_RISK_BREACH",
+                            "expected_loss": pre_loss_calc.total_expected_loss_usd,
+                            "max_tolerated": pre_loss_calc.max_tolerated_risk_usd,
+                            "approved_risk": approved_risk_usd
+                        }
+                        return False
+                except ValueError as pre_err:
+                    logger.error(f"[NadoTradingService] ❌ Pre-dispatch risk calculator error: {pre_err}")
+                    self.last_execution_status = "INVALID_RISK_PARAMETERS"
+                    self.last_execution_details = {"reason": str(pre_err)}
+                    return False
                 
             # Expiration
             try:
@@ -669,6 +797,10 @@ class NadoTradingService(BaseTradingService):
                 "tp_type": None,
                 "trigger_amount_x18": str(-actual_filled_x18),
                 "contracts": actual_base_amount,
+                "amount": actual_base_amount,
+                "funding_rate_hourly": funding_rate_hourly,
+                "holding_hours": holding_hours,
+                "slippage_stress_pct": slippage_stress_pct if slippage_stress_pct is not None else slip_buffer,
                 "accumulated_realized_pnl": 0.0,
                 "original_thesis": original_thesis,
                 "native_triggers_placed": False,
@@ -684,7 +816,7 @@ class NadoTradingService(BaseTradingService):
                 self.active_positions[canonical_sym] = self.active_positions[symbol]
             self._save_positions()
 
-            # --- Unified Actual Risk vs Approved Risk Check (P0 / P1-1 / P1-2) ---
+            # --- Unified Actual Risk vs Approved Risk Check (P0 / P1-1 / P1-2 / P1-3) ---
             if sl_price > 0 and actual_base_amount > 0 and actual_entry_price > 0:
                 from core.risk_calculator import estimate_total_loss
                 approved_budget = float(approved_risk_usd) if approved_risk_usd and approved_risk_usd > 0 else (actual_base_amount * abs(entry_price - sl_price))
@@ -694,6 +826,9 @@ class NadoTradingService(BaseTradingService):
                         fill_price=actual_entry_price,
                         sl_price=sl_price,
                         taker_fee_pct=taker_fee_pct,
+                        slippage_stress_pct=slippage_stress_pct if slippage_stress_pct is not None else slip_buffer,
+                        funding_rate_hourly=funding_rate_hourly,
+                        holding_hours=holding_hours,
                         approved_risk=approved_budget
                     )
                     total_actual_loss = loss_calc.total_expected_loss_usd

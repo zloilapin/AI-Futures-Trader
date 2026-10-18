@@ -1534,6 +1534,446 @@ def test_record_closed_trade_journal(monkeypatch):
     assert saved_trades[1]["realized_r"] == -1.00
 
 
+# ==============================================================================
+# 12. RISK MANAGER AUDIT P1 & P2 HARDENING TESTS (CHAIN: RISK -> EXECUTION)
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_risk_manager_early_numeric_sanitization(risk_mgr, base_portfolio_data, base_market_data):
+    """
+    P2 Audit:
+    Verifies that NaN, Inf, and non-finite values in current_price, atr_14,
+    total_balance, or available_margin are rejected at Stage 1 before any math/ceil calculations.
+    """
+    ceo_decision = {"symbol": "BTC-USD", "decision": "LONG", "conviction": 80, "trade_action": "ENTER"}
+
+    # 1. NaN current_price
+    m_nan_price = {
+        "price_data": {"current_price": float("nan")},
+        "indicators": {"atr_14": 100.0}
+    }
+    r1 = await risk_mgr.analyze(ceo_decision, base_portfolio_data, m_nan_price)
+    assert r1["approved"] is False
+    assert r1["veto_category"] == "INVALID_PRICE"
+
+    # 2. Inf current_price
+    m_inf_price = {
+        "price_data": {"current_price": float("inf")},
+        "indicators": {"atr_14": 100.0}
+    }
+    r2 = await risk_mgr.analyze(ceo_decision, base_portfolio_data, m_inf_price)
+    assert r2["approved"] is False
+    assert r2["veto_category"] == "INVALID_PRICE"
+
+    # 3. NaN atr_14
+    m_nan_atr = {
+        "price_data": {"current_price": 60000.0},
+        "indicators": {"atr_14": float("nan")}
+    }
+    r3 = await risk_mgr.analyze(ceo_decision, base_portfolio_data, m_nan_atr)
+    assert r3["approved"] is False
+    assert r3["veto_category"] == "INVALID_ATR"
+
+    # 4. NaN total_balance
+    p_nan_bal = dict(base_portfolio_data, total_usd=float("nan"))
+    r4 = await risk_mgr.analyze(ceo_decision, p_nan_bal, base_market_data)
+    assert r4["approved"] is False
+    assert r4["veto_category"] == "INSUFFICIENT_BALANCE"
+
+    # 5. NaN available_margin
+    p_nan_margin = dict(base_portfolio_data, available_margin=float("nan"))
+    r5 = await risk_mgr.analyze(ceo_decision, p_nan_margin, base_market_data)
+    assert r5["approved"] is False
+    assert r5["veto_category"] == "INSUFFICIENT_BALANCE"
+
+
+@pytest.mark.asyncio
+async def test_risk_manager_portfolio_risk_open_positions_contracts_and_dedup(risk_mgr, base_market_data):
+    """
+    P1 Audit (Gate 2.4):
+    1. Active positions with 'contracts' key are accurately read and summed into open portfolio risk.
+    2. Alias keys (e.g. 'ETH-USD' and 'ETH/USD' pointing to the same position) are deduplicated.
+    3. Exceeding portfolio risk cap vetoes with TOTAL_OPEN_RISK_CAP.
+    """
+    ceo_decision = {"symbol": "AVAX-USD", "decision": "LONG", "conviction": 85, "trade_action": "ENTER"}
+    # Balance = $1000. Cap for BALANCED = 4% ($40).
+    # Open ETH position: contracts=0.1, entry=3000, sl=2700 -> price risk = 0.1 * 300 = $30.
+    portfolio = {
+        "total_usd": 1000.0,
+        "available_margin": 800.0,
+        "active_positions": {
+            "ETH-USD": {"symbol": "ETH-USD", "entry_price": 3000.0, "sl_price": 2700.0, "contracts": 0.1},
+            # Alias key pointing to the same position: must be deduplicated
+            "ETH/USD": {"symbol": "ETH/USD", "entry_price": 3000.0, "sl_price": 2700.0, "contracts": 0.1}
+        }
+    }
+    market = {
+        "price_data": {"current_price": 30.0},
+        "indicators": {"atr_14": 1.0},
+        "order_book_data": {"spread_pct": 0.05},
+        "derivatives_data": {"taker_fee_pct": 0.0005, "size_increment": 0.1, "price_increment": 0.01}
+    }
+    verdict = await risk_mgr.analyze(ceo_decision, portfolio, market, effective_profile="BALANCED")
+    # Remaining risk budget = $40 - ~$30.13 = ~$9.87 > 0. AVAX sized into remaining budget
+    assert verdict["approved"] is True
+    assert verdict["approved_risk_usd"] <= 10.0
+
+
+@pytest.mark.asyncio
+async def test_risk_manager_vetos_unbounded_open_position_risk(risk_mgr, base_market_data):
+    """
+    P1 Audit (Gate 2.4):
+    If any open position lacks a valid stop-loss (sl_price missing or 0),
+    RiskManager strictly vetoes with UNBOUNDED_OPEN_POSITION_RISK rather than guessing size_usd.
+    """
+    ceo_decision = {"symbol": "AVAX-USD", "decision": "LONG", "conviction": 85, "trade_action": "ENTER"}
+    portfolio = {
+        "total_usd": 1000.0,
+        "available_margin": 800.0,
+        "active_positions": {
+            "ETH-USD": {"symbol": "ETH-USD", "entry_price": 3000.0, "sl_price": 0.0, "contracts": 0.1}
+        }
+    }
+    verdict = await risk_mgr.analyze(ceo_decision, portfolio, base_market_data, effective_profile="BALANCED")
+    assert verdict["approved"] is False
+    assert verdict["veto_category"] == "UNBOUNDED_OPEN_POSITION_RISK"
+    assert "missing, non-positive or non-finite stop-loss" in verdict["reasoning"]
+
+
+@pytest.mark.asyncio
+async def test_nado_trading_service_pre_dispatch_min_size_and_notional_rejection():
+    """
+    P1 Audit:
+    Verifies that NadoTradingService:
+    1. Rejects with ORDER_BELOW_MIN_SIZE when post-increment size is below min_size (never increases size).
+    2. Rejects with ORDER_BELOW_MIN_NOTIONAL when post-increment notional is below min_notional.
+    """
+    from services.nado_trading_service import NadoTradingService
+    from unittest.mock import MagicMock
+
+    service = NadoTradingService()
+    service.is_connected = True
+    service.client = MagicMock()
+    service._market_cache = {2: MagicMock()}
+    service.product_map = {"BTC": 2}
+
+    # Case 1: contracts below exchange min_size
+    service._get_market_parameters = MagicMock(return_value={
+        "size_increment_x18": int(0.001 * 1e18),
+        "price_increment_x18": int(1.0 * 1e18),
+        "min_size": 0.05,  # min size is 0.05 BTC
+        "min_notional": 0.0
+    })
+    ok1 = await service.open_position("BTC-USD", "LONG", 60000.0, 600.0, 62000.0, 59000.0, 10, contracts=0.01)
+    assert ok1 is False
+    assert service.last_execution_status == "ORDER_BELOW_MIN_SIZE"
+
+    # Case 2: notional below exchange min_notional
+    service._get_market_parameters = MagicMock(return_value={
+        "size_increment_x18": int(0.001 * 1e18),
+        "price_increment_x18": int(1.0 * 1e18),
+        "min_size": 0.001,
+        "min_notional": 500.0  # min notional $500
+    })
+    ok2 = await service.open_position("BTC-USD", "LONG", 60000.0, 120.0, 62000.0, 59000.0, 10, contracts=0.002)
+    assert ok2 is False
+    assert service.last_execution_status == "ORDER_BELOW_MIN_NOTIONAL"
+
+
+@pytest.mark.asyncio
+async def test_nado_trading_service_pre_dispatch_risk_breach_veto():
+    """
+    P1 Audit:
+    Verifies that if expected loss at limit price (including slippage buffer & fees)
+    exceeds approved risk threshold, NadoTradingService aborts BEFORE sending order to sequencer.
+    """
+    from services.nado_trading_service import NadoTradingService
+    from unittest.mock import MagicMock
+
+    service = NadoTradingService()
+    service.is_connected = True
+    mock_client = MagicMock()
+    service.client = mock_client
+    service._market_cache = {2: MagicMock()}
+    service.product_map = {"BTC": 2}
+    service._get_market_parameters = MagicMock(return_value={
+        "size_increment_x18": int(0.001 * 1e18),
+        "price_increment_x18": int(1.0 * 1e18),
+        "min_size": 0.001,
+        "min_notional": 0.0
+    })
+
+    # Approved risk is only $5.00, but contracts=0.1 on BTC with entry=60000, sl=58000
+    # Price loss = 0.1 * 2000 = $200 >> $5.00!
+    ok = await service.open_position(
+        "BTC-USD", "LONG", 60000.0, 6000.0, 64000.0, 58000.0, 10,
+        contracts=0.1, approved_risk_usd=5.00
+    )
+    assert ok is False
+    assert service.last_execution_status == "PRE_DISPATCH_RISK_BREACH"
+    # Must NOT call place_order!
+    assert mock_client.market.place_order.called is False
+
+
+@pytest.mark.asyncio
+async def test_risk_manager_harmonized_loss_parameters_propagation(risk_mgr, base_portfolio_data):
+    """
+    P1 Audit:
+    Verifies that RiskManager outputs explicit funding_rate_hourly, holding_hours,
+    and slippage_stress_pct, harmonizing the loss model with execution.
+    """
+    ceo_decision = {"symbol": "BTC-USD", "decision": "LONG", "conviction": 80, "trade_action": "ENTER"}
+    portfolio = dict(base_portfolio_data, total_usd=1000.0, available_margin=1000.0)
+    market = {
+        "price_data": {"current_price": 60000.0},
+        "indicators": {"atr_14": 500.0},
+        "order_book_data": {"spread_pct": 0.02},
+        "derivatives_data": {
+            "strict_metadata": True,
+            "size_increment": 0.001,
+            "price_increment": 1.0,
+            "taker_fee_pct": 0.0005,
+            "slippage_stress_pct": 0.002,
+            "funding_rate_hourly": 0.0001
+        }
+    }
+
+    # Case 1: VOLATILITY_MOMENTUM mode -> holding_hours = 1.0
+    v_scalp = await risk_mgr.analyze(ceo_decision, portfolio, market, strategy_mode="VOLATILITY_MOMENTUM")
+    assert v_scalp["approved"] is True
+    assert v_scalp["holding_hours"] == 1.0
+    assert v_scalp["funding_rate_hourly"] == 0.0001
+    assert v_scalp["slippage_stress_pct"] == 0.002
+
+    # Case 2: TREND_FOLLOWING mode -> holding_hours = 4.0
+    v_trend = await risk_mgr.analyze(ceo_decision, portfolio, market, strategy_mode="TREND_FOLLOWING")
+    assert v_trend["approved"] is True
+    assert v_trend["holding_hours"] == 4.0
+    assert v_trend["funding_rate_hourly"] == 0.0001
+
+
+# ==============================================================================
+# 11. RISK AUDIT HARDENING TESTS (P1 & P2 AUDIT FINDINGS)
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_historical_kelly_disentangles_b_from_candidate_rr(risk_mgr, base_portfolio_data):
+    """
+    P1 Audit Finding 1:
+    Verifies that Kelly sizing multiplier is evaluated against HISTORICAL payoff ratio (b_hist),
+    not the prospective candidate trade's planned RR.
+    """
+    # 1. Direct multiplier test:
+    # 45% WR with weak historical payoff (b=0.8) -> f* = (0.45*0.8 - 0.55)/0.8 = -0.2375 <= 0 -> 0.50x
+    k_damp = risk_mgr._calculate_kelly_multiplier(win_rate=0.45, payoff_ratio=0.8, total_trades=20)
+    assert k_damp == 0.50
+
+    # 55% WR with solid historical payoff (b=1.8) -> positive edge, clamped to 1.00x
+    k_cap = risk_mgr._calculate_kelly_multiplier(win_rate=0.55, payoff_ratio=1.8, total_trades=20)
+    assert k_cap == 1.00
+
+    # 2. RiskManager.analyze test:
+    # Even if candidate trade has strong planned RR (e.g. 2.5:1),
+    # weak historical track record in portfolio_data triggers Kelly damping
+    ceo_decision = {"symbol": "BTC-USD", "decision": "LONG", "conviction": 85, "trade_action": "ENTER"}
+    portfolio = dict(
+        base_portfolio_data,
+        total_usd=1000.0,
+        available_margin=1000.0,
+        win_count=9,
+        loss_count=11,  # 20 trades, WR = 45%
+        historical_payoff_ratio=0.80  # Weak historical payoff ratio
+    )
+    market = {
+        "price_data": {"current_price": 60000.0},
+        "indicators": {"atr_14": 500.0},
+        "derivatives_data": {
+            "strict_metadata": True,
+            "size_increment": 0.001,
+            "price_increment": 1.0,
+            "taker_fee_pct": 0.0005,
+            "funding_rate_hourly": 0.0
+        }
+    }
+    verdict = await risk_mgr.analyze(ceo_decision, portfolio, market)
+    assert verdict["approved"] is True
+    assert verdict["applied_multipliers"]["kelly_mult"] == 0.50
+    assert verdict["historical_payoff_ratio"] == 0.80
+    assert verdict["candidate_net_rr"] > 1.5
+
+
+@pytest.mark.asyncio
+async def test_strategy_expectancy_gate_evaluates_historical_track_record(risk_mgr, base_portfolio_data):
+    """
+    P1 Audit Finding 1:
+    Verifies that Expectancy Gate evaluates the historical track record of the strategy,
+    penalizing risk (x0.75) and raising conviction (+5) when historical E(R) < -0.10R.
+    """
+    # 32 trades: 12 wins, 20 losses (WR = 37.5%). Historical payoff b = 0.90.
+    # Historical E(R) = 0.375 * 0.90 - 0.625 = 0.3375 - 0.625 = -0.2875R < -0.10R.
+    ceo_decision = {"symbol": "BTC-USD", "decision": "LONG", "conviction": 80, "trade_action": "ENTER"}
+    portfolio = dict(
+        base_portfolio_data,
+        total_usd=1000.0,
+        available_margin=1000.0,
+        win_count=12,
+        loss_count=20,
+        historical_payoff_ratio=0.90
+    )
+    market = {
+        "price_data": {"current_price": 60000.0},
+        "indicators": {"atr_14": 500.0},
+        "derivatives_data": {
+            "strict_metadata": True,
+            "size_increment": 0.001,
+            "price_increment": 1.0,
+            "taker_fee_pct": 0.0005,
+            "funding_rate_hourly": 0.0
+        }
+    }
+    # Initial base_conviction for BALANCED is 70. With +5 penalty from Expectancy Gate, min_conviction becomes 75.
+    # Conviction 80 will pass with x0.75 penalty applied to base_risk
+    verdict = await risk_mgr.analyze(ceo_decision, portfolio, market, effective_profile="BALANCED")
+    assert verdict["approved"] is True
+    # Base risk for BALANCED is 1.5%. With x0.75 penalty, base_risk is reduced to ~1.125%
+    assert verdict["base_risk_pct"] < 0.015
+
+    # If conviction is 74 (< 75 threshold), it gets vetoed by LOW_CONFIDENCE
+    ceo_decision_low = {"symbol": "BTC-USD", "decision": "LONG", "conviction": 74, "trade_action": "ENTER"}
+    verdict_low = await risk_mgr.analyze(ceo_decision_low, portfolio, market, effective_profile="BALANCED")
+    assert verdict_low["approved"] is False
+    assert verdict_low["veto_category"] == "LOW_CONFIDENCE"
+
+
+@pytest.mark.asyncio
+async def test_zero_funding_rate_preserved(risk_mgr, base_portfolio_data):
+    """
+    P1 Audit Finding 4:
+    Verifies that genuine 0.0 funding rate is preserved and NOT overridden by 0.0001.
+    """
+    ceo_decision = {"symbol": "BTC-USD", "decision": "LONG", "conviction": 80, "trade_action": "ENTER"}
+    portfolio = dict(base_portfolio_data, total_usd=1000.0, available_margin=1000.0)
+    market = {
+        "price_data": {"current_price": 60000.0},
+        "indicators": {"atr_14": 500.0},
+        "derivatives_data": {
+            "strict_metadata": True,
+            "size_increment": 0.001,
+            "price_increment": 1.0,
+            "taker_fee_pct": 0.0005,
+            "funding_rate": 0.0,
+            "funding_rate_hourly": 0.0
+        }
+    }
+    verdict = await risk_mgr.analyze(ceo_decision, portfolio, market)
+    assert verdict["approved"] is True
+    assert verdict["funding_rate_hourly"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_subaccount_health_critical_veto(risk_mgr, base_portfolio_data):
+    """
+    P1 Audit Finding 2:
+    Verifies that negative maintenance health (liquidation impending on subaccount)
+    vetoes new trades with SUBACCOUNT_HEALTH_CRITICAL.
+    """
+    ceo_decision = {"symbol": "BTC-USD", "decision": "LONG", "conviction": 80, "trade_action": "ENTER"}
+    portfolio = dict(
+        base_portfolio_data,
+        total_usd=1000.0,
+        available_margin=1000.0,
+        maintenance_health_usd=-15.50  # Negative maintenance margin health!
+    )
+    market = {
+        "price_data": {"current_price": 60000.0},
+        "indicators": {"atr_14": 500.0},
+        "derivatives_data": {
+            "strict_metadata": True,
+            "size_increment": 0.001,
+            "price_increment": 1.0,
+            "taker_fee_pct": 0.0005
+        }
+    }
+    verdict = await risk_mgr.analyze(ceo_decision, portfolio, market)
+    assert verdict["approved"] is False
+    assert verdict["veto_category"] == "SUBACCOUNT_HEALTH_CRITICAL"
+
+
+@pytest.mark.asyncio
+async def test_liquidation_margin_cushion_veto(risk_mgr, base_portfolio_data):
+    """
+    P1 Audit Finding 2:
+    Verifies that if SL is too close to liquidation price (distance to liq < 1.40x distance to SL),
+    the trade is vetoed with LIQUIDATION_RISK.
+    """
+    ceo_decision = {"symbol": "BTC-USD", "decision": "LONG", "conviction": 80, "trade_action": "ENTER"}
+    portfolio = dict(base_portfolio_data, total_usd=1000.0, available_margin=1000.0)
+    # High maintenance margin requirement (e.g. mmf = 0.40) and wide stop pull liquidation price within 1.40x of SL
+    market = {
+        "price_data": {"current_price": 60000.0},
+        "indicators": {"atr_14": 18000.0},  # Wide SL
+        "derivatives_data": {
+            "strict_metadata": True,
+            "size_increment": 0.001,
+            "price_increment": 1.0,
+            "taker_fee_pct": 0.0005,
+            "maintenance_margin_pct": 0.40  # 40% maintenance margin forces distance_to_liq < 1.40x distance_to_sl
+        }
+    }
+    verdict = await risk_mgr.analyze(ceo_decision, portfolio, market)
+    assert verdict["approved"] is False
+    assert verdict["veto_category"] == "LIQUIDATION_RISK"
+
+
+@pytest.mark.asyncio
+async def test_drawdown_discrepancy_and_strict_fail_closed(risk_mgr, base_portfolio_data):
+    """
+    P2 Audit Finding 9:
+    Verifies that contradictory drawdown data adopts conservative implied loss,
+    and missing drawdown data in strict health mode blocks execution.
+    """
+    ceo_decision = {"symbol": "BTC-USD", "decision": "LONG", "conviction": 80, "trade_action": "ENTER"}
+    market = {
+        "price_data": {"current_price": 60000.0},
+        "indicators": {"atr_14": 500.0},
+        "derivatives_data": {
+            "strict_metadata": True,
+            "size_increment": 0.001,
+            "price_increment": 1.0,
+            "taker_fee_pct": 0.0005
+        }
+    }
+
+    # Case 1: Contradictory reporting (daily_drawdown reports 0.0, but daily_pnl_pct reports -7.0% >= 6% limit)
+    portfolio_contra = dict(
+        base_portfolio_data,
+        total_usd=1000.0,
+        available_margin=1000.0,
+        daily_drawdown_pct=0.0,
+        daily_pnl_pct=-7.0  # -7% breaches 6% max daily drawdown limit
+    )
+    verdict_dd = await risk_mgr.analyze(ceo_decision, portfolio_contra, market, effective_profile="BALANCED")
+    assert verdict_dd["approved"] is False
+    assert verdict_dd["veto_category"] == "MAX_DAILY_DRAWDOWN"
+
+    # Case 2: Missing drawdown fields in strict mode
+    portfolio_missing = dict(
+        base_portfolio_data,
+        total_usd=1000.0,
+        available_margin=1000.0,
+        strict_portfolio_health=True
+    )
+    # Ensure all drawdown fields are absent
+    portfolio_missing.pop("daily_drawdown_pct", None)
+    portfolio_missing.pop("daily_pnl_pct", None)
+    portfolio_missing.pop("daily_pnl_usd", None)
+
+    verdict_missing = await risk_mgr.analyze(ceo_decision, portfolio_missing, market)
+    assert verdict_missing["approved"] is False
+    assert verdict_missing["veto_category"] == "MISSING_PORTFOLIO_HEALTH"
+
+
+
 
 
 

@@ -19,6 +19,22 @@ def _extract_cand_field(cand: Any, key: str, default: Any = None) -> Any:
         return cand.get(key, default)
     return default
 
+def _is_finite_positive(val: Any) -> bool:
+    """Returns True iff val is a finite float strictly greater than zero."""
+    try:
+        f = float(val)
+        return math.isfinite(f) and f > 0.0
+    except (TypeError, ValueError):
+        return False
+
+def _is_finite_non_negative(val: Any) -> bool:
+    """Returns True iff val is a finite float greater than or equal to zero."""
+    try:
+        f = float(val)
+        return math.isfinite(f) and f >= 0.0
+    except (TypeError, ValueError):
+        return False
+
 class RiskManager(BaseAgent):
     """
     Gatekeeper agent responsible for capital preservation, risk profiles, and position sizing.
@@ -165,22 +181,29 @@ class RiskManager(BaseAgent):
 
         return 1.0, "NORMAL"
 
-    def _calculate_kelly_multiplier(self, win_rate: float, realized_rr: float, total_trades: int) -> float:
+    def _calculate_kelly_multiplier(
+        self,
+        win_rate: float,
+        payoff_ratio: float = 0.0,
+        total_trades: int = 0,
+        realized_rr: Optional[float] = None
+    ) -> float:
         """
-        Calculates Fractional (Half) Kelly sizing multiplier.
+        Calculates Fractional (Half) Kelly sizing multiplier based on HISTORICAL track record.
         f* = (p * b - (1 - p)) / b
         where:
-          p = win rate (0.0 to 1.0)
-          b = realized reward-to-risk ratio
+          p = historical win rate (0.0 to 1.0)
+          b = historical payoff ratio (average win / average loss)
         Clamped to [0.50, 1.00] as asymmetric downside damping only.
         Does NOT boost above 1.00 to prevent overleveraging on short-term sample clustering.
-        Only activated when total_trades >= 15.
+        Only activated when total_trades >= 15 and b > 0.
         """
-        if total_trades < 15 or realized_rr <= 0 or win_rate <= 0:
+        b = payoff_ratio if payoff_ratio > 0 else (realized_rr or 0.0)
+        if total_trades < 15 or b <= 0 or win_rate <= 0:
             return 1.0
         
         q = 1.0 - win_rate
-        f_star = (win_rate * realized_rr - q) / realized_rr
+        f_star = (win_rate * b - q) / b
         
         # Asymmetric downside damping with continuous calibration:
         # Instead of a discrete binary step jump between 0.50 and 1.00 at f* = 0,
@@ -270,34 +293,47 @@ class RiskManager(BaseAgent):
         price_data = market_data.get("price_data", {})
         if not isinstance(price_data, dict):
             price_data = {}
-        current_price = float(price_data.get("current_price", 0.0) or 0.0)
+        raw_price = price_data.get("current_price", 0.0)
         
         indicators = market_data.get("indicators", {})
         if not isinstance(indicators, dict):
             indicators = {}
-        atr_14 = float(indicators.get("atr_14", 0) or 0)
+        raw_atr = indicators.get("atr_14", 0.0)
         
-        total_balance = float(portfolio_data.get("total_usd", portfolio_data.get("current_balance", 0.0)) or 0.0)
-        available_margin = float(portfolio_data.get("available_margin", total_balance))
-        max_leverage = profile_rules.get("max_leverage", 10.0)
-        max_notional_usd = total_balance * max_leverage
+        raw_total_balance = portfolio_data.get("total_usd", portfolio_data.get("current_balance", 0.0))
+        raw_avail_margin = portfolio_data.get("available_margin", raw_total_balance)
         
-        # ═══ Stage 1: Deterministic Guard & Static Input Checks ═══
+        # ═══ Stage 1: Deterministic Guard & Early Numeric Sanitization (P2) ═══
         if hasattr(ceo_decision, "is_actionable") and not getattr(ceo_decision, "is_actionable", True):
             veto_cat = getattr(ceo_decision, "rejection_tag", None) or "GUARD_VETO"
             veto_reason = getattr(ceo_decision, "guard_reason", "") or f"Blocked by Deterministic Guard: {veto_cat}"
             self.logger.warning(f"[{self.name}] 🚫 DETERMINISTIC GUARD VETO: {veto_reason}")
             return self._build_veto_result(veto_cat, veto_reason, trade_action)
-        elif current_price <= 0:
-            self.logger.warning(f"[{self.name}] ❌ INVALID PRICE: current_price is {current_price}. Blocking trade.")
-            return self._build_veto_result("INVALID_PRICE", f"Missing or non-positive current price ({current_price}).", trade_action)
-        elif atr_14 <= 0:
-            self.logger.warning(f"[{self.name}] ❌ INVALID ATR: atr_14 is {atr_14}. Blocking trade to prevent corrupted risk sizing.")
-            return self._build_veto_result("INVALID_ATR", "Missing or zero ATR_14 data.", trade_action)
-        elif total_balance <= 0:
-            self.logger.warning(f"[{self.name}] ❌ INSUFFICIENT BALANCE: Total balance is {total_balance}. Blocking trade.")
-            return self._build_veto_result("INSUFFICIENT_BALANCE", f"Total balance is non-positive (${total_balance:.2f}).", trade_action)
-        elif trade_action == "WAIT_FOR_PULLBACK":
+            
+        if not _is_finite_positive(raw_price):
+            self.logger.warning(f"[{self.name}] ❌ INVALID PRICE: current_price is {raw_price}. Blocking trade.")
+            return self._build_veto_result("INVALID_PRICE", f"Missing, non-positive or non-finite current price ({raw_price}).", trade_action)
+        current_price = float(raw_price)
+            
+        if not _is_finite_positive(raw_atr):
+            self.logger.warning(f"[{self.name}] ❌ INVALID ATR: atr_14 is {raw_atr}. Blocking trade to prevent corrupted risk sizing.")
+            return self._build_veto_result("INVALID_ATR", f"Missing, non-positive or non-finite ATR_14 data ({raw_atr}).", trade_action)
+        atr_14 = float(raw_atr)
+            
+        if not _is_finite_positive(raw_total_balance):
+            self.logger.warning(f"[{self.name}] ❌ INSUFFICIENT BALANCE: Total balance is {raw_total_balance}. Blocking trade.")
+            return self._build_veto_result("INSUFFICIENT_BALANCE", f"Total balance is non-positive or non-finite (${raw_total_balance}).", trade_action)
+        total_balance = float(raw_total_balance)
+            
+        if not _is_finite_non_negative(raw_avail_margin):
+            self.logger.warning(f"[{self.name}] ❌ INVALID MARGIN: Available margin is {raw_avail_margin}. Blocking trade.")
+            return self._build_veto_result("INSUFFICIENT_BALANCE", f"Available margin is non-finite or invalid ({raw_avail_margin}).", trade_action)
+        available_margin = float(raw_avail_margin)
+        
+        max_leverage = profile_rules.get("max_leverage", 10.0)
+        max_notional_usd = total_balance * max_leverage
+
+        if trade_action == "WAIT_FOR_PULLBACK":
             msg = "CEO recommended WAIT_FOR_PULLBACK (Overheated market condition). Blocking trade execution."
             self.logger.warning(f"[{self.name}] 🚫 WAIT_FOR_PULLBACK VETO: {msg}")
             return self._build_veto_result("WAIT_FOR_PULLBACK", msg, "WAIT_FOR_PULLBACK")
@@ -308,39 +344,89 @@ class RiskManager(BaseAgent):
 
         # ═══ Stage 2: Portfolio Health & Defense-in-Depth Gates ═══
 
-        # Gate 2.1: Max Daily Drawdown Veto Gate
+        # Gate 2.1: Max Daily Drawdown & Subaccount Health Veto Gate (P1 Finding 2 & P2 Finding 9)
+        # 1. Check Subaccount Health (Nado Protocol Health model)
+        maint_health_usd = portfolio_data.get("maintenance_health_usd")
+        if maint_health_usd is not None and float(maint_health_usd) < 0.0:
+            msg = f"Subaccount maintenance margin health is negative (${float(maint_health_usd):.2f}). Liquidations imminent. Halting new trades."
+            self.logger.critical(f"[{self.name}] 🚨 SUBACCOUNT_HEALTH_CRITICAL VETO: {msg}")
+            return self._build_veto_result("SUBACCOUNT_HEALTH_CRITICAL", msg, trade_action)
+
         max_daily_dd = profile_rules.get("max_daily_drawdown_pct", 0.06)
         raw_dd = portfolio_data.get("daily_drawdown_pct")
-        if raw_dd is not None:
-            dd_val = float(raw_dd or 0.0)
-            daily_drawdown_pct = dd_val / 100.0 if dd_val > 1.0 else dd_val
+        raw_pnl_pct = portfolio_data.get("daily_pnl_pct")
+        raw_pnl_usd = portfolio_data.get("daily_pnl_usd")
+
+        if raw_dd is None and raw_pnl_pct is None and raw_pnl_usd is None:
+            if portfolio_data.get("strict_portfolio_health", False):
+                msg = "Portfolio drawdown data is completely missing in strict health mode. Blocking trades."
+                self.logger.warning(f"[{self.name}] 🚫 MISSING_PORTFOLIO_HEALTH VETO: {msg}")
+                return self._build_veto_result("MISSING_PORTFOLIO_HEALTH", msg, trade_action)
+            daily_drawdown_pct = 0.0
         else:
-            raw_pnl_pct = portfolio_data.get("daily_pnl_pct")
+            if raw_dd is not None:
+                dd_val = float(raw_dd or 0.0)
+                daily_drawdown_pct = dd_val / 100.0 if dd_val > 1.0 else dd_val
+            else:
+                daily_drawdown_pct = 0.0
+
+            # Derive implied drawdown from daily_pnl_pct or daily_pnl_usd
+            implied_dd = 0.0
             if raw_pnl_pct is not None:
                 pnl_val = float(raw_pnl_pct or 0.0)
                 pnl_pct_dec = pnl_val / 100.0 if abs(pnl_val) > 1.0 else pnl_val
-                daily_drawdown_pct = max(0.0, -pnl_pct_dec) if pnl_pct_dec < 0 else 0.0
-            else:
-                raw_pnl_usd = portfolio_data.get("daily_pnl_usd")
-                if raw_pnl_usd is not None and total_balance > 0:
-                    pnl_usd = float(raw_pnl_usd or 0.0)
-                    daily_drawdown_pct = max(0.0, -pnl_usd / total_balance) if pnl_usd < 0 else 0.0
-                else:
-                    daily_drawdown_pct = 0.0
+                implied_dd = max(0.0, -pnl_pct_dec) if pnl_pct_dec < 0 else 0.0
+            elif raw_pnl_usd is not None and total_balance > 0:
+                pnl_usd = float(raw_pnl_usd or 0.0)
+                implied_dd = max(0.0, -pnl_usd / total_balance) if pnl_usd < 0 else 0.0
+
+            # Contradiction guard: if drawdown reports 0 (or low) but PnL reflects significant loss,
+            # always adopt the conservative larger drawdown
+            if implied_dd > daily_drawdown_pct:
+                if (implied_dd - daily_drawdown_pct) > 0.02 and raw_dd is not None:
+                    self.logger.warning(
+                        f"[{self.name}] ⚠️ Drawdown discrepancy detected: reported {daily_drawdown_pct*100:.2f}%, "
+                        f"but PnL implies {implied_dd*100:.2f}%. Enforcing conservative implied drawdown."
+                    )
+                daily_drawdown_pct = implied_dd
+
+        if not _is_finite_non_negative(daily_drawdown_pct):
+            msg = f"Daily drawdown data is corrupted or non-finite ({daily_drawdown_pct}). Blocking trades."
+            self.logger.warning(f"[{self.name}] 🚫 PORTFOLIO_HEALTH_CORRUPTED VETO: {msg}")
+            return self._build_veto_result("PORTFOLIO_HEALTH_CORRUPTED", msg, trade_action)
 
         if daily_drawdown_pct >= max_daily_dd:
             msg = f"Daily drawdown limit reached ({daily_drawdown_pct*100:.2f}% >= {max_daily_dd*100:.2f}% limit). Trading halted to protect capital."
             self.logger.warning(f"[{self.name}] 🚨 MAX_DAILY_DRAWDOWN VETO: {msg}")
             return self._build_veto_result("MAX_DAILY_DRAWDOWN", msg, trade_action)
 
-        # Gate 2.0: Unresolved Risk Breach Incident Veto
-        # If any active position is marked RISK_BREACH_UNRESOLVED, freeze all new entries immediately!
+        # Gate 2.0: Unresolved Risk Breach Incident Veto & Open Position Normalization
         active_positions = portfolio_data.get("active_positions", {})
         if not isinstance(active_positions, (dict, list)):
             active_positions = {}
-        pos_items = active_positions.values() if isinstance(active_positions, dict) else active_positions
-        for pos in pos_items:
-            if isinstance(pos, dict) and pos.get("protection_state") == "RISK_BREACH_UNRESOLVED":
+        raw_pos_items = active_positions.values() if isinstance(active_positions, dict) else active_positions
+        
+        # Deduplicate positions by object identity and canonical asset base
+        unique_positions = []
+        seen_pos_ids = set()
+        seen_pos_bases = set()
+        for pos in raw_pos_items:
+            if isinstance(pos, dict):
+                p_id = id(pos)
+                if p_id in seen_pos_ids:
+                    continue
+                seen_pos_ids.add(p_id)
+                p_sym = str(pos.get("symbol", "")).replace('/', '-').strip().upper()
+                p_base = p_sym.split('-')[0] if p_sym else ""
+                if p_base and p_base in seen_pos_bases:
+                    continue
+                if p_base:
+                    seen_pos_bases.add(p_base)
+                unique_positions.append(pos)
+
+        # Gate 2.0: Unresolved Risk Breach Incident Veto
+        for pos in unique_positions:
+            if pos.get("protection_state") == "RISK_BREACH_UNRESOLVED" or pos.get("requires_reconciliation"):
                 sym_breach = pos.get("symbol", "UNKNOWN")
                 msg = f"Critical risk incident unresolved on {sym_breach}! New trades strictly blocked until capital is safe."
                 log_fn = getattr(self.logger, "critical", self.logger.error)
@@ -349,7 +435,7 @@ class RiskManager(BaseAgent):
 
         # Gate 2.2: Maximum Concurrent Positions Veto Gate
         max_positions = profile_rules.get("max_concurrent_positions", getattr(config, "MAX_CONCURRENT_POSITIONS", 3))
-        num_active = len(active_positions)
+        num_active = len(unique_positions)
         if num_active >= max_positions:
             msg = f"Maximum concurrent positions reached ({num_active} >= {max_positions} limit)."
             self.logger.warning(f"[{self.name}] 🚫 MAX_CONCURRENT_POSITIONS VETO: {msg}")
@@ -359,13 +445,11 @@ class RiskManager(BaseAgent):
         # Prevents opening all positions in the same direction when market lacks a clear macro trend.
         if macro_regime in ["RANGE_CHOPPY", "TRANSITION", "HIGH_VOLATILITY"]:
             same_dir_count = 0
-            pos_list = list(active_positions.values()) if isinstance(active_positions, dict) else (active_positions if isinstance(active_positions, list) else [])
-            for p in pos_list:
-                if isinstance(p, dict):
-                    p_dir = str(p.get("direction", p.get("side", ""))).upper()
-                    if (decision == "LONG" and ("LONG" in p_dir or "BUY" in p_dir)) or \
-                       (decision == "SHORT" and ("SHORT" in p_dir or "SELL" in p_dir)):
-                        same_dir_count += 1
+            for p in unique_positions:
+                p_dir = str(p.get("direction", p.get("side", ""))).upper()
+                if (decision == "LONG" and ("LONG" in p_dir or "BUY" in p_dir)) or \
+                   (decision == "SHORT" and ("SHORT" in p_dir or "SELL" in p_dir)):
+                    same_dir_count += 1
             if same_dir_count >= 2:
                 msg = f"Directional cluster limit reached: {same_dir_count} active {decision} positions already open in {macro_regime} regime."
                 self.logger.warning(f"[{self.name}] 🚫 DIRECTIONAL_CLUSTER_CAP VETO: {msg}")
@@ -385,32 +469,60 @@ class RiskManager(BaseAgent):
                 active_keys = set()
                 
             active_bases = {k.replace('/', '-').split('-')[0].upper() for k in active_keys if k}
-            if base_sym in active_bases or canonical_sym in active_keys or clean_sym in active_keys:
+            if base_sym in active_bases or canonical_sym in active_keys or clean_sym in active_keys or base_sym in seen_pos_bases:
                 msg = f"Position for {symbol} ({canonical_sym}) is already active. Duplicate entries prohibited."
                 self.logger.warning(f"[{self.name}] 🚫 ALREADY_OPEN VETO: {msg}")
                 return self._build_veto_result("ALREADY_OPEN", msg, trade_action)
 
-        # Gate 2.4: Total Portfolio Open Risk Budget Cap
+        # Gate 2.4: Total Portfolio Open Risk Budget Cap & Open Positions Validation (P1)
         MAX_TOTAL_PORTFOLIO_RISK_PCT = profile_rules.get("portfolio_risk_cap", 0.03)
         max_portfolio_risk_usd = total_balance * MAX_TOTAL_PORTFOLIO_RISK_PCT
         
         existing_risk_usd = 0.0
-        pos_items = active_positions.values() if isinstance(active_positions, dict) else active_positions
-        for pos in pos_items:
-            if isinstance(pos, dict):
-                entry = float(pos.get("entry_price", 0) or 0)
-                sl = float(pos.get("sl_price", 0) or 0)
-                amount = abs(float(pos.get("amount", 0) or 0))
+        est_exit_fee_rate = float(market_data.get("derivatives_data", {}).get("taker_fee_pct") or 0.0005)
+        
+        for pos in unique_positions:
+            pos_sym = str(pos.get("symbol", "")).replace('/', '-').strip().upper() or "UNKNOWN"
+            
+            # 1. State integrity check
+            if pos.get("requires_reconciliation") or pos.get("protection_state") in ["RISK_BREACH_UNRESOLVED", "DESYNC", "UNKNOWN"]:
+                msg = f"Active position {pos_sym} has unconfirmed protection or desynchronized state ({pos.get('protection_state')}). New trades blocked."
+                self.logger.critical(f"[{self.name}] 🚨 RISK_BREACH_UNRESOLVED VETO: {msg}")
+                return self._build_veto_result("RISK_BREACH_UNRESOLVED", msg, trade_action)
                 
-                if amount > 0:
-                    if entry > 0 and sl > 0:
-                        pos_risk = amount * abs(entry - sl)
-                    else:
-                        pos_risk = float(pos.get("size_usd", amount * entry) or 0)
-                else:
-                    pos_risk = 0.0
-                    
-                existing_risk_usd += pos_risk
+            # 2. Extract position size (support both contracts and amount)
+            raw_size = pos.get("contracts", pos.get("amount", pos.get("base_amount", 0.0)))
+            if not _is_finite_non_negative(raw_size):
+                msg = f"Active position {pos_sym} has invalid or non-finite size ({raw_size}). State desynchronized."
+                self.logger.warning(f"[{self.name}] 🚫 PORTFOLIO_STATE_DESYNC VETO: {msg}")
+                return self._build_veto_result("PORTFOLIO_STATE_DESYNC", msg, trade_action)
+                
+            size = abs(float(raw_size))
+            if size <= 1e-7:
+                # Closed or negligible dust position
+                continue
+                
+            # 3. Validate entry price
+            raw_entry = pos.get("entry_price", 0.0)
+            if not _is_finite_positive(raw_entry):
+                msg = f"Active position {pos_sym} has invalid or non-finite entry price ({raw_entry}). State desynchronized."
+                self.logger.warning(f"[{self.name}] 🚫 PORTFOLIO_STATE_DESYNC VETO: {msg}")
+                return self._build_veto_result("PORTFOLIO_STATE_DESYNC", msg, trade_action)
+            entry = float(raw_entry)
+            
+            # 4. Validate stop-loss: MUST be strictly positive and finite
+            raw_sl = pos.get("sl_price", 0.0)
+            if not _is_finite_positive(raw_sl):
+                msg = f"Active position {pos_sym} has missing, non-positive or non-finite stop-loss ({raw_sl}). Cannot reliably bound open risk."
+                self.logger.warning(f"[{self.name}] 🚫 UNBOUNDED_OPEN_POSITION_RISK VETO: {msg}")
+                return self._build_veto_result("UNBOUNDED_OPEN_POSITION_RISK", msg, trade_action)
+            sl = float(raw_sl)
+            
+            # 5. Calculate verified risk to stop: price movement loss + round-trip exit fee
+            pos_price_risk = size * abs(entry - sl)
+            pos_fee_risk = size * sl * est_exit_fee_rate
+            pos_risk = pos_price_risk + pos_fee_risk
+            existing_risk_usd += pos_risk
                 
         remaining_risk_budget_usd = max(0.0, max_portfolio_risk_usd - existing_risk_usd)
         if remaining_risk_budget_usd < (total_balance * 0.002):
@@ -503,6 +615,26 @@ class RiskManager(BaseAgent):
         distance_to_sl = abs(execution_entry - sl_price)
         distance_to_tp = abs(tp_price - execution_entry)
 
+        # Strict directional alignment check against expected execution entry (P1 Finding 3)
+        if decision == "LONG":
+            if sl_price >= execution_entry:
+                msg = f"LONG SL ({sl_price:.4f}) is at or above expected execution entry ({execution_entry:.4f}) after slippage."
+                self.logger.warning(f"[{self.name}] ❌ INVALID_PRICE_LEVELS VETO: {msg}")
+                return self._build_veto_result("INVALID_PRICE_LEVELS", msg, trade_action)
+            if tp_price <= execution_entry:
+                msg = f"LONG TP ({tp_price:.4f}) is at or below expected execution entry ({execution_entry:.4f}) after slippage."
+                self.logger.warning(f"[{self.name}] ❌ INVALID_PRICE_LEVELS VETO: {msg}")
+                return self._build_veto_result("INVALID_PRICE_LEVELS", msg, trade_action)
+        elif decision == "SHORT":
+            if sl_price <= execution_entry:
+                msg = f"SHORT SL ({sl_price:.4f}) is at or below expected execution entry ({execution_entry:.4f}) after slippage."
+                self.logger.warning(f"[{self.name}] ❌ INVALID_PRICE_LEVELS VETO: {msg}")
+                return self._build_veto_result("INVALID_PRICE_LEVELS", msg, trade_action)
+            if tp_price >= execution_entry:
+                msg = f"SHORT TP ({tp_price:.4f}) is at or above expected execution entry ({execution_entry:.4f}) after slippage."
+                self.logger.warning(f"[{self.name}] ❌ INVALID_PRICE_LEVELS VETO: {msg}")
+                return self._build_veto_result("INVALID_PRICE_LEVELS", msg, trade_action)
+
         # Slippage edge check for Mean Reversion: ensure expected execution entry doesn't consume all profit
         if strategy_mode == "MEAN_REVERSION":
             if decision == "LONG" and tp_price <= execution_entry:
@@ -519,8 +651,19 @@ class RiskManager(BaseAgent):
         if not isinstance(derivatives_data, dict):
             derivatives_data = {}
         fee_pct = float(derivatives_data.get("taker_fee_pct") or 0.0005) * 2 # Open + Close
-        funding_rate = float(derivatives_data.get("funding_rate") or 0.0001)
-        funding_cost_pct = funding_rate if decision == "LONG" else -funding_rate
+
+        # Strategy-dependent holding hours
+        if strategy_mode == "VOLATILITY_MOMENTUM":
+            holding_hours = 1.0
+        elif strategy_mode == "MEAN_REVERSION":
+            holding_hours = 2.0
+        else:
+            holding_hours = 4.0
+
+        # Preserve genuine 0.0 funding without overriding with non-zero defaults (P1 Finding 4)
+        raw_fr = derivatives_data.get("funding_rate_hourly", derivatives_data.get("funding_rate"))
+        funding_rate_hourly = float(raw_fr) if (raw_fr is not None and str(raw_fr).strip() != "") else 0.0
+        funding_cost_pct = (funding_rate_hourly if decision == "LONG" else -funding_rate_hourly) * holding_hours
         
         unit_entry_fee = execution_entry * (fee_pct / 2)
         unit_tp_exit_fee = tp_price * (fee_pct / 2)
@@ -528,42 +671,61 @@ class RiskManager(BaseAgent):
         unit_funding_cost = execution_entry * funding_cost_pct
         
         unit_net_profit = distance_to_tp - unit_entry_fee - unit_tp_exit_fee - unit_funding_cost
-        unit_net_loss = distance_to_sl + unit_entry_fee + unit_sl_exit_fee + unit_funding_cost
-        realized_rr = unit_net_profit / unit_net_loss if unit_net_loss > 0 else 0.0
+        unit_net_loss = distance_to_sl + unit_entry_fee + unit_sl_exit_fee + max(0.0, unit_funding_cost)
+        candidate_net_rr = unit_net_profit / unit_net_loss if unit_net_loss > 0 else 0.0
+        realized_rr = candidate_net_rr  # Backward compatibility alias
 
-        # Strict Risk/Reward Floor Validation (UNIVERSAL — applies to ALL strategy modes):
-        # min_rr_required is loaded from profile rules and MUST be enforced here.
-        if realized_rr < min_rr_required:
-            msg = (f"{strategy_mode} net RR ({realized_rr:.2f}) is below minimum required "
-                   f"{min_rr_required:.2f}:1 for {profile_name} profile "
-                   f"(after slippage and fees). "
-                   f"TP dist={distance_to_tp:.4f}, SL dist={distance_to_sl:.4f}, "
-                   f"fees={unit_entry_fee + unit_tp_exit_fee:.4f}")
+        # Universal Net Profit Floor Check
+        if unit_net_profit <= 0:
+            msg = (f"Candidate trade has non-positive net profit (${unit_net_profit:.4f}) "
+                   f"after expected slippage, round-trip fees (${unit_entry_fee + unit_tp_exit_fee:.4f}), "
+                   f"and holding funding (${unit_funding_cost:.4f}).")
             self.logger.warning(f"[{self.name}] ❌ POOR_RISK_REWARD VETO: {msg}")
             return self._build_veto_result("POOR_RISK_REWARD", msg, trade_action)
 
-        # Expectancy Gate with Hysteresis (N >= 30 trades)
+        # Strict Risk/Reward Floor Validation (UNIVERSAL — applies to ALL strategy modes):
+        # min_rr_required is loaded from profile rules and MUST be enforced here.
+        if candidate_net_rr < min_rr_required:
+            msg = (f"{strategy_mode} net RR ({candidate_net_rr:.2f}) is below minimum required "
+                   f"{min_rr_required:.2f}:1 for {profile_name} profile "
+                   f"(after slippage and fees). "
+                   f"TP dist={distance_to_tp:.4f}, SL dist={distance_to_sl:.4f}, "
+                   f"fees={unit_entry_fee + unit_tp_exit_fee:.4f}, funding={unit_funding_cost:.4f}")
+            self.logger.warning(f"[{self.name}] ❌ POOR_RISK_REWARD VETO: {msg}")
+            return self._build_veto_result("POOR_RISK_REWARD", msg, trade_action)
+
+        # Expectancy Gate with Hysteresis (N >= 30 trades evaluated on HISTORICAL closed trades) (P1 Finding 1)
         win_count = int(portfolio_data.get("win_count", 0) or 0)
         loss_count = int(portfolio_data.get("loss_count", 0) or 0)
         total_trades = win_count + loss_count
         win_rate = (win_count / total_trades) if total_trades > 0 else 0.0
         expectancy_penalty_active = getattr(self, "_expectancy_penalty_active", False)
         
-        if total_trades >= 30:
-            expected_r = (win_rate * realized_rr) - (1.0 - win_rate)
+        hist_payoff = float(portfolio_data.get("historical_payoff_ratio", 0.0) or portfolio_data.get("historical_avg_rr", 0.0) or 0.0)
+        if hist_payoff <= 0.0:
+            avg_w = float(portfolio_data.get("avg_win_usd", 0.0) or 0.0)
+            avg_l = float(portfolio_data.get("avg_loss_usd", 0.0) or 0.0)
+            if avg_w > 0 and avg_l > 0:
+                hist_payoff = avg_w / avg_l
+            elif total_trades >= 15:
+                hist_payoff = 1.0  # Neutral fallback if historical PnL ratio is absent
+        
+        if total_trades >= 30 and hist_payoff > 0:
+            historical_expected_r = (win_rate * hist_payoff) - (1.0 - win_rate)
             
             # Hysteresis: trigger at E < -0.10R, clear at E > +0.05R
-            if not expectancy_penalty_active and expected_r < -0.10:
+            if not expectancy_penalty_active and historical_expected_r < -0.10:
                 self._expectancy_penalty_active = True
                 expectancy_penalty_active = True
-            elif expectancy_penalty_active and expected_r > 0.05:
+            elif expectancy_penalty_active and historical_expected_r > 0.05:
                 self._expectancy_penalty_active = False
                 expectancy_penalty_active = False
                 
             if expectancy_penalty_active:
                 penalty_factor = 0.75
                 self.logger.warning(
-                    f"[{self.name}] ⚠️ EXPECTANCY GATE ACTIVE: Realized Expected R is {expected_r:.2f}R (< -0.10R threshold on {total_trades} trades). "
+                    f"[{self.name}] ⚠️ EXPECTANCY GATE ACTIVE: Historical strategy expectancy is {historical_expected_r:.2f}R "
+                    f"(< -0.10R threshold on {total_trades} trades with b_hist={hist_payoff:.2f}). "
                     f"WR: {win_rate*100:.1f}%. Applying risk penalty (x{penalty_factor}) and raising min_conviction."
                 )
                 min_conviction = min(95, min_conviction + 5)
@@ -595,8 +757,8 @@ class RiskManager(BaseAgent):
         if dd_mult < 1.0:
             self.logger.warning(f"[{self.name}] {dd_msg}")
 
-        # 3. Fractional (Half) Kelly Multiplier (Active at N >= 15 trades)
-        kelly_mult = self._calculate_kelly_multiplier(win_rate, realized_rr, total_trades) if total_trades >= 15 else 1.0
+        # 3. Fractional (Half) Kelly Multiplier (Active at N >= 15 trades using historical payoff ratio)
+        kelly_mult = self._calculate_kelly_multiplier(win_rate, hist_payoff, total_trades) if total_trades >= 15 else 1.0
 
         # 4. Conviction and Action Multipliers (Signal Edge)
         conf_mult = self._get_conviction_multiplier(min_conviction, conviction)
@@ -675,9 +837,10 @@ class RiskManager(BaseAgent):
             risk_amount_usd = min(risk_amount_usd, remaining_risk_budget_usd)
 
         taker_fee_pct = float(derivatives_data.get("taker_fee_pct") or 0.0005)
-        # Unit loss per contract = price distance to SL + round-trip taker fees
+        # Unit loss per contract = price distance to SL + round-trip taker fees + adverse funding
         fee_loss_per_contract = (execution_entry + sl_price) * taker_fee_pct if (execution_entry > 0 and sl_price > 0) else 0.0
-        effective_loss_per_contract = distance_to_sl + fee_loss_per_contract
+        adverse_funding_per_contract = max(0.0, unit_funding_cost)
+        effective_loss_per_contract = distance_to_sl + fee_loss_per_contract + adverse_funding_per_contract
 
         if effective_loss_per_contract > 0:
             contracts = risk_amount_usd / effective_loss_per_contract
@@ -781,11 +944,24 @@ class RiskManager(BaseAgent):
             msg = f"Liquidation precedence violation: SL ({sl_price}) is beyond or equal to liquidation price ({liq_price:.4f})."
             self.logger.warning(f"[{self.name}] ❌ LIQUIDATION_RISK VETO: {msg}")
             return self._build_veto_result("LIQUIDATION_RISK", msg, trade_action)
+
+        # Strict Margin Cushion Guard: Distance to liquidation must be at least 1.40x distance to SL (P1 Finding 2)
+        # Ensures that SL triggers with sufficient safety margin before maintenance margin exhaustion
+        distance_to_liq = abs(execution_entry - liq_price)
+        if distance_to_sl > 0 and distance_to_liq < (1.40 * distance_to_sl):
+            cushion_ratio = distance_to_liq / distance_to_sl
+            msg = (
+                f"Insufficient liquidation cushion: distance to liq ({distance_to_liq:.4f}) "
+                f"is only {cushion_ratio:.2f}x distance to SL ({distance_to_sl:.4f}), "
+                f"below required 1.40x safety margin buffer (L={effective_leverage}x, MMF={mmf*100:.1f}%)."
+            )
+            self.logger.warning(f"[{self.name}] ❌ LIQUIDATION_RISK VETO: {msg}")
+            return self._build_veto_result("LIQUIDATION_RISK", msg, trade_action)
         
         self.logger.info(
             f"[{self.name}] Final Effective Leverage: {effective_leverage}x "
             f"(Profile Max: {max_leverage}x, Volatility Max: {vol_max_leverage}x, "
-            f"Liq Safe Max: {liq_safe_ceiling:.0f}x, Required: {required_leverage:.1f}x, Liq Price: {liq_price:.4f})"
+            f"Liq Safe Max: {liq_safe_ceiling:.0f}x, Required: {required_leverage:.1f}x, Liq Price: {liq_price:.4f}, Cushion: {distance_to_liq/distance_to_sl:.2f}x)"
         )
 
         # ═══ Stage 8: Rounding, Increments & Exchange Sanity ═══
@@ -849,15 +1025,27 @@ class RiskManager(BaseAgent):
             self.logger.warning(f"[{self.name}] ❌ INSUFFICIENT MARGIN VETO: {msg}")
             return self._build_veto_result("INSUFFICIENT_BALANCE", msg, trade_action)
 
-        risk_amount_usd = round(risk_amount_usd, 2)
+        # Re-anchor risk_amount_usd to actual rounded contracts
+        actual_planned_risk_usd = contracts * effective_loss_per_contract
+        risk_amount_usd = round(min(risk_amount_usd, actual_planned_risk_usd), 2)
         sl_price = round(sl_price, 6)
         tp_price = round(tp_price, 6)
         rr_ratio = round(realized_rr, 2)
 
-        # Unified Loss Estimation & Verification (P0-3 & P1-2)
+        # Unified Loss Estimation & Verification (P0-3 & P1-2 & P1-3)
         from core.risk_calculator import estimate_total_loss
         taker_fee_pct = float(derivatives_data.get("taker_fee_pct") or 0.0005)
         slippage_stress = float(derivatives_data.get("slippage_stress_pct") or expected_slippage_pct)
+        funding_rate_hourly = float(derivatives_data.get("funding_rate_hourly") or derivatives_data.get("funding_rate") or 0.0)
+        
+        # Strategy-dependent holding hours
+        if strategy_mode == "VOLATILITY_MOMENTUM":
+            holding_hours = 1.0
+        elif strategy_mode == "MEAN_REVERSION":
+            holding_hours = 2.0
+        else:
+            holding_hours = 4.0
+
         try:
             loss_calc = estimate_total_loss(
                 contracts=contracts,
@@ -865,6 +1053,8 @@ class RiskManager(BaseAgent):
                 sl_price=sl_price,
                 taker_fee_pct=taker_fee_pct,
                 slippage_stress_pct=slippage_stress,
+                funding_rate_hourly=funding_rate_hourly,
+                holding_hours=holding_hours,
                 approved_risk=risk_amount_usd
             )
         except ValueError as val_err:
@@ -885,18 +1075,19 @@ class RiskManager(BaseAgent):
             return self._build_veto_result("EXCESSIVE_RISK", msg, trade_action)
 
         # 2. Stress Loss Veto Gate (Adverse slippage + holding funding stress)
-        # Bounded by 150% of approved risk budget + $0.20 dust floor
-        max_allowed_stress_loss = (risk_amount_usd * 1.50) + 0.20
+        # Bounded by 130% of approved risk budget + $0.15 dust floor (P1 Finding 5)
+        max_allowed_stress_loss = (risk_amount_usd * 1.30) + 0.15
         if loss_calc.total_stress_loss_usd > max_allowed_stress_loss:
             msg = (
                 f"Total stress loss (${loss_calc.total_stress_loss_usd:.2f}, "
                 f"slippage=${loss_calc.slippage_stress_usd:.2f}, funding=${loss_calc.funding_loss_usd:.2f}) "
-                f"exceeds stress risk ceiling (${max_allowed_stress_loss:.2f})."
+                f"exceeds stress risk ceiling (${max_allowed_stress_loss:.2f}, budget=${risk_amount_usd:.2f})."
             )
             self.logger.warning(f"[{self.name}] ❌ EXCESSIVE_STRESS_RISK VETO: {msg}")
             return self._build_veto_result("EXCESSIVE_STRESS_RISK", msg, trade_action)
 
         final_reasoning = f"Math calculated based on {profile_name} profile. SL={sl_price}, TP={tp_price}, RR={rr_ratio}"
+        planned_price_risk_usd = round(contracts * distance_to_sl, 2)
         return {
             "approved": True,
             "veto_category": None,
@@ -905,6 +1096,7 @@ class RiskManager(BaseAgent):
             "risk_amount_usd": risk_amount_usd,
             "approved_risk_usd": risk_amount_usd,
             "planned_risk_usd": risk_amount_usd,
+            "planned_price_risk_usd": planned_price_risk_usd,
             "base_risk_pct": base_risk,
             "final_risk_pct": dynamic_risk_pct,
             "cohort": cohort,
@@ -913,6 +1105,10 @@ class RiskManager(BaseAgent):
             "total_expected_loss_usd": loss_calc.total_expected_loss_usd,
             "total_stress_loss_usd": loss_calc.total_stress_loss_usd,
             "max_tolerated_risk_usd": loss_calc.max_tolerated_risk_usd,
+            "max_allowed_stress_loss_usd": round(max_allowed_stress_loss, 2),
+            "funding_rate_hourly": funding_rate_hourly,
+            "holding_hours": holding_hours,
+            "slippage_stress_pct": slippage_stress,
             "notional_size_usd": notional_usd,
             "margin_usd": margin_usd,
             "leverage": effective_leverage,
@@ -926,7 +1122,10 @@ class RiskManager(BaseAgent):
             "stop_loss_price": sl_price,
             "stop_loss_pct": round(abs(sl_price - execution_entry) / execution_entry * 100, 2) if execution_entry > 0 else 0,
             "risk_reward_ratio": rr_ratio,
+            "candidate_net_rr": round(candidate_net_rr, 2),
+            "historical_payoff_ratio": round(hist_payoff, 2),
             "liquidation_price": liq_price,
+            "maintenance_margin_pct": mmf,
             "position_size_pct": margin_pct,
         }
 

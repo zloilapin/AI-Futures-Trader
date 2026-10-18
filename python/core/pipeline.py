@@ -790,7 +790,10 @@ class TradingPipeline:
                             base_risk_pct=float(risk_verdict.get("base_risk_pct", 0.0)),
                             final_risk_pct=float(risk_verdict.get("final_risk_pct", 0.0)),
                             cohort=risk_verdict.get("cohort", "UNKNOWN"),
-                            applied_multipliers=risk_verdict.get("applied_multipliers", {})
+                            applied_multipliers=risk_verdict.get("applied_multipliers", {}),
+                            funding_rate_hourly=float(risk_verdict.get("funding_rate_hourly", 0.0)),
+                            holding_hours=float(risk_verdict.get("holding_hours", 4.0)),
+                            slippage_stress_pct=float(risk_verdict.get("slippage_stress_pct", 0.001))
                         )
                     except Exception as e:
                         self.services.logger.error(f"[Stage 5] Unexpected error placing order on exchange for {symbol}: {e}", exc_info=True)
@@ -844,6 +847,9 @@ class TradingPipeline:
                                                 fill_price=actual_fill_price,
                                                 sl_price=sl_p,
                                                 taker_fee_pct=taker_fee_val,
+                                                slippage_stress_pct=float(risk_verdict.get("slippage_stress_pct", 0.001)),
+                                                funding_rate_hourly=float(risk_verdict.get("funding_rate_hourly", 0.0)),
+                                                holding_hours=float(risk_verdict.get("holding_hours", 4.0)),
                                                 approved_risk=approved_risk
                                             )
                                             total_actual_loss_usd = loss_calc.total_expected_loss_usd
