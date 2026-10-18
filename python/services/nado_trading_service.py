@@ -1390,7 +1390,7 @@ class NadoTradingService(BaseTradingService):
         excluded_digests: Optional[Set[str]] = None,
         target_digest: Optional[str] = None,
         limit: int = 50,
-        allow_missing_timestamp: bool = False
+        allow_missing_timestamp: bool = True
     ) -> Dict[str, Any]:
         """
         Queries subaccount historical orders to aggregate matching fills for a closing event.
@@ -1486,11 +1486,11 @@ class NadoTradingService(BaseTradingService):
                     try:
                         order_ts_sec = float(ts) / 1000.0 if len(str(ts)) > 10 else float(ts)
                     except (ValueError, TypeError):
-                        logger.warning(f"[NadoTradingService] ⚠️ Skipping unparseable order timestamp: {ts}")
+                        logger.debug(f"[NadoTradingService] Skipping unparseable order timestamp: {ts}")
                         continue
-                elif (allow_missing_timestamp or target_digest) and has_valid_digest:
-                    # Nado Indexer historical orders frequently omit the timestamp field.
-                    # When explicitly permitted (or target_digest uniquely matches), use event temporal context.
+                elif allow_missing_timestamp and has_valid_digest:
+                    # Nado Indexer historical orders do not populate timestamp on fills.
+                    # Use event temporal context to evaluate candidate.
                     if close_timestamp and close_timestamp > 0:
                         order_ts_sec = float(close_timestamp)
                     elif min_timestamp is not None and max_timestamp is not None:
@@ -1498,7 +1498,7 @@ class NadoTradingService(BaseTradingService):
                     else:
                         order_ts_sec = float(ref_time)
                 else:
-                    logger.warning("[NadoTradingService] ⚠️ Skipping historical order without timestamp in reconciliation.")
+                    logger.debug("[NadoTradingService] Skipping order without timestamp in reconciliation.")
                     continue
 
                 # Explicit timestamp window filtering
@@ -1706,11 +1706,23 @@ class NadoTradingService(BaseTradingService):
                 if not subaccount or product_id is None:
                     continue
 
+                # Auto-prune foreign or mock test subaccounts that don't match active wallet
+                if self.default_subaccount_id and subaccount != self.default_subaccount_id:
+                    logger.info(f"[NadoTradingService] 🧹 Pruned orphan pending reconciliation for {symbol} (subaccount mismatch: {subaccount}).")
+                    keys_to_remove.append(symbol)
+                    continue
+
                 # Track attempts & age
                 attempts = pending.get("attempts", 0) + 1
                 pending["attempts"] = attempts
                 pending["last_attempt_at"] = now
                 detected_at = float(pending.get("detected_at") or pending.get("closed_at") or now)
+
+                # Auto-retire stale pending trades after 60 failed audit cycles (~30 min)
+                if attempts > 60:
+                    logger.warning(f"[NadoTradingService] 🛑 Retiring pending reconciliation for {symbol} after {attempts} failed attempts.")
+                    keys_to_remove.append(symbol)
+                    continue
 
                 # Alert if pending too long (> 2 hours or >= 20 attempts)
                 if attempts == 20 or (attempts > 20 and attempts % 20 == 0):

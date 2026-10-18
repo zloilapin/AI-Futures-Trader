@@ -734,7 +734,8 @@ async def test_reconcile_closing_fills_rejects_missing_or_invalid_timestamp():
         direction="LONG",
         entry_price=95000.0,
         expected_contracts=1.0,
-        close_timestamp=time.time()
+        close_timestamp=time.time(),
+        allow_missing_timestamp=False
     )
 
     assert recon["is_exact"] is False
