@@ -408,7 +408,8 @@ class NadoTradingService(BaseTradingService):
         applied_multipliers: Optional[Dict[str, Any]] = None,
         funding_rate_hourly: float = 0.0,
         holding_hours: float = 4.0,
-        slippage_stress_pct: Optional[float] = None
+        slippage_stress_pct: Optional[float] = None,
+        limit_price: Optional[float] = None
     ) -> bool:
         """Submits an EIP-712 signed order to Nado Gateway."""
         self.last_execution_status = "PENDING"
@@ -417,6 +418,21 @@ class NadoTradingService(BaseTradingService):
             logger.error(f"[NadoTradingService] Cannot open {direction} on {symbol} - SDK not connected.")
             self.last_execution_status = "SDK_DISCONNECTED"
             return False
+
+        # P1-4: Reset per-attempt execution status and details
+        self.last_execution_status = "PENDING"
+        self.last_execution_details = {}
+
+        # Guard: Unresolved risk breach in portfolio blocks all new trades (P1 / Item 3.A)
+        for pos_k, pos_v in self.active_positions.items():
+            if isinstance(pos_v, dict) and pos_v.get("protection_state") == "RISK_BREACH_UNRESOLVED":
+                logger.critical(
+                    f"[NadoTradingService] 🛑 Refusing to open new position on {symbol}: "
+                    f"portfolio contains unresolved risk breach on {pos_k}! Resolve risk breach first."
+                )
+                self.last_execution_status = "RISK_BREACH_UNRESOLVED"
+                self.last_execution_details = {"reason": "PORTFOLIO_HAS_UNRESOLVED_RISK_BREACH", "breached_symbol": pos_k}
+                return False
 
         clean_sym = symbol.replace('/', '-').strip().upper()
         base_sym = clean_sym.split('-')[0]
@@ -437,10 +453,20 @@ class NadoTradingService(BaseTradingService):
             self.last_execution_status = "REJECTED_BY_EXCHANGE"
             self.last_execution_details = {"reason": f"Invalid entry_price ({entry_price})"}
             return False
-        if not math.isfinite(sl_price) or sl_price < 0:
-            logger.error(f"[NadoTradingService] ❌ Refusing execution: invalid sl_price ({sl_price}).")
-            self.last_execution_status = "REJECTED_BY_EXCHANGE"
-            self.last_execution_details = {"reason": f"Invalid sl_price ({sl_price})"}
+        if not math.isfinite(sl_price) or sl_price <= 0:
+            logger.error(f"[NadoTradingService] ❌ Refusing execution without valid positive Stop Loss (sl_price={sl_price}).")
+            self.last_execution_status = "ABORTED_INVALID_STOP"
+            self.last_execution_details = {"reason": "MISSING_OR_INVALID_SL", "sl_price": sl_price}
+            return False
+        if approved_risk_usd is None or not math.isfinite(float(approved_risk_usd)) or float(approved_risk_usd) <= 0:
+            logger.error(f"[NadoTradingService] ❌ Refusing execution without valid approved risk budget (approved_risk_usd={approved_risk_usd}).")
+            self.last_execution_status = "INVALID_RISK_PARAMETERS"
+            self.last_execution_details = {"reason": "MISSING_OR_INVALID_APPROVED_RISK", "approved_risk_usd": approved_risk_usd}
+            return False
+        if (contracts is None or contracts <= 0) and (notional_usd is None or notional_usd <= 0):
+            logger.error(f"[NadoTradingService] ❌ Refusing execution without valid size (contracts={contracts}, notional={notional_usd}).")
+            self.last_execution_status = "INVALID_SIZE"
+            self.last_execution_details = {"reason": "INVALID_CONTRACTS", "contracts": contracts}
             return False
         if not math.isfinite(tp_price) or tp_price < 0:
             logger.error(f"[NadoTradingService] ❌ Refusing execution: invalid tp_price ({tp_price}).")
@@ -451,10 +477,6 @@ class NadoTradingService(BaseTradingService):
         logger.info(f"[NadoTradingService] 🚀 Routing {direction} {symbol} to Nado DEX...")
         
         actual_entry_price = entry_price
-        
-        # P1-4: Reset per-attempt execution status and details
-        self.last_execution_status = "PENDING"
-        self.last_execution_details = {}
         
         try:
             import time
@@ -500,18 +522,22 @@ class NadoTradingService(BaseTradingService):
             slip_buffer = float(max_slippage_pct) if max_slippage_pct is not None and max_slippage_pct > 0 else 0.002
             slip_buffer = min(0.005, max(0.0005, slip_buffer))
             
-            if dir_clean == "LONG":
-                limit_price = entry_price * (1.0 + slip_buffer)
+            if limit_price is not None and float(limit_price) > 0 and math.isfinite(float(limit_price)):
+                raw_limit = float(limit_price)
+            elif dir_clean == "LONG":
+                raw_limit = entry_price * (1.0 + slip_buffer)
             elif dir_clean == "SHORT":
-                limit_price = entry_price * (1.0 - slip_buffer)
-                amount_x18 = -amount_x18
+                raw_limit = entry_price * (1.0 - slip_buffer)
             else:
                 logger.error(f"[NadoTradingService] ❌ Refusing execution: invalid direction '{direction}'. Only LONG or SHORT allowed!")
                 self.last_execution_status = "REJECTED_BY_EXCHANGE"
                 self.last_execution_details = {"reason": f"Invalid direction '{direction}'"}
                 return False
+
+            if dir_clean == "SHORT":
+                amount_x18 = -amount_x18
                 
-            price_x18 = int(Decimal(str(round(limit_price, 8))) * Decimal(10**18))
+            price_x18 = int(Decimal(str(round(raw_limit, 8))) * Decimal(10**18))
             
             # Align to size and price increments
             abs_amount_x18 = abs(amount_x18)
@@ -519,6 +545,7 @@ class NadoTradingService(BaseTradingService):
             amount_x18 = abs_amount_x18 if amount_x18 >= 0 else -abs_amount_x18
             
             price_x18 = (price_x18 // price_increment) * price_increment
+            final_limit_price = float(Decimal(price_x18) / Decimal(10**18))
             
             if amount_x18 == 0:
                 logger.error(f"[NadoTradingService] ❌ Order amount is zero after step size alignment.")
@@ -560,56 +587,73 @@ class NadoTradingService(BaseTradingService):
                 return False
 
             # Unified Pre-Dispatch Risk Invariant Verification:
-            # Check worst-case execution price (limit_price) and stop loss against approved_risk_usd
-            if sl_price > 0 and approved_risk_usd > 0 and final_contracts > 0:
-                from core.risk_calculator import estimate_total_loss, calculate_max_allowed_stress_loss
-                try:
-                    pre_loss_calc = estimate_total_loss(
-                        contracts=final_contracts,
-                        fill_price=limit_price,
-                        sl_price=sl_price,
-                        taker_fee_pct=taker_fee_pct,
-                        slippage_stress_pct=slippage_stress_pct if slippage_stress_pct is not None else slip_buffer,
-                        funding_rate_hourly=funding_rate_hourly,
-                        holding_hours=holding_hours,
-                        approved_risk=approved_risk_usd
+            # Enforce strictly positive, finite Stop Loss, approved risk budget, and contracts before dispatch (P1-2)
+            if sl_price is None or not math.isfinite(float(sl_price)) or float(sl_price) <= 0:
+                logger.error(f"[NadoTradingService] ❌ Refusing execution without valid positive Stop Loss (sl_price={sl_price}).")
+                self.last_execution_status = "ABORTED_INVALID_STOP"
+                self.last_execution_details = {"reason": "MISSING_OR_INVALID_SL", "sl_price": sl_price}
+                return False
+
+            if approved_risk_usd is None or not math.isfinite(float(approved_risk_usd)) or float(approved_risk_usd) <= 0:
+                logger.error(f"[NadoTradingService] ❌ Refusing execution without valid approved risk budget (approved_risk_usd={approved_risk_usd}).")
+                self.last_execution_status = "INVALID_RISK_PARAMETERS"
+                self.last_execution_details = {"reason": "MISSING_OR_INVALID_APPROVED_RISK", "approved_risk_usd": approved_risk_usd}
+                return False
+
+            if final_contracts <= 0 or not math.isfinite(float(final_contracts)):
+                logger.error(f"[NadoTradingService] ❌ Refusing execution without valid positive contracts (contracts={final_contracts}).")
+                self.last_execution_status = "INVALID_SIZE"
+                self.last_execution_details = {"reason": "INVALID_CONTRACTS", "contracts": final_contracts}
+                return False
+
+            from core.risk_calculator import estimate_total_loss, calculate_max_allowed_stress_loss
+            try:
+                pre_loss_calc = estimate_total_loss(
+                    contracts=final_contracts,
+                    fill_price=final_limit_price,
+                    sl_price=float(sl_price),
+                    taker_fee_pct=taker_fee_pct,
+                    slippage_stress_pct=slippage_stress_pct if slippage_stress_pct is not None else slip_buffer,
+                    funding_rate_hourly=funding_rate_hourly,
+                    holding_hours=holding_hours,
+                    approved_risk=float(approved_risk_usd)
+                )
+                pre_max_stress = calculate_max_allowed_stress_loss(float(approved_risk_usd))
+                if pre_loss_calc.total_expected_loss_usd > pre_loss_calc.max_tolerated_risk_usd:
+                    logger.error(
+                        f"[NadoTradingService] ❌ PRE-DISPATCH RISK BREACH: Expected loss at limit price "
+                        f"(${pre_loss_calc.total_expected_loss_usd:.2f}) exceeds approved risk threshold "
+                        f"(${pre_loss_calc.max_tolerated_risk_usd:.2f}, approved=${approved_risk_usd:.2f}). "
+                        f"Aborting before sending order to sequencer."
                     )
-                    pre_max_stress = calculate_max_allowed_stress_loss(approved_risk_usd)
-                    if pre_loss_calc.total_expected_loss_usd > pre_loss_calc.max_tolerated_risk_usd:
-                        logger.error(
-                            f"[NadoTradingService] ❌ PRE-DISPATCH RISK BREACH: Expected loss at limit price "
-                            f"(${pre_loss_calc.total_expected_loss_usd:.2f}) exceeds approved risk threshold "
-                            f"(${pre_loss_calc.max_tolerated_risk_usd:.2f}, approved=${approved_risk_usd:.2f}). "
-                            f"Aborting before sending order to sequencer."
-                        )
-                        self.last_execution_status = "PRE_DISPATCH_RISK_BREACH"
-                        self.last_execution_details = {
-                            "reason": "PRE_DISPATCH_RISK_BREACH",
-                            "expected_loss": pre_loss_calc.total_expected_loss_usd,
-                            "max_tolerated": pre_loss_calc.max_tolerated_risk_usd,
-                            "approved_risk": approved_risk_usd
-                        }
-                        return False
-                    if pre_loss_calc.total_stress_loss_usd > pre_max_stress:
-                        logger.error(
-                            f"[NadoTradingService] ❌ PRE-DISPATCH STRESS RISK BREACH: Stress loss at limit price "
-                            f"(${pre_loss_calc.total_stress_loss_usd:.2f}) exceeds approved stress ceiling "
-                            f"(${pre_max_stress:.2f}, approved=${approved_risk_usd:.2f}). "
-                            f"Aborting before sending order to sequencer."
-                        )
-                        self.last_execution_status = "PRE_DISPATCH_STRESS_BREACH"
-                        self.last_execution_details = {
-                            "reason": "PRE_DISPATCH_STRESS_BREACH",
-                            "stress_loss": pre_loss_calc.total_stress_loss_usd,
-                            "max_allowed_stress": pre_max_stress,
-                            "approved_risk": approved_risk_usd
-                        }
-                        return False
-                except ValueError as pre_err:
-                    logger.error(f"[NadoTradingService] ❌ Pre-dispatch risk calculator error: {pre_err}")
-                    self.last_execution_status = "INVALID_RISK_PARAMETERS"
-                    self.last_execution_details = {"reason": str(pre_err)}
+                    self.last_execution_status = "PRE_DISPATCH_RISK_BREACH"
+                    self.last_execution_details = {
+                        "reason": "PRE_DISPATCH_RISK_BREACH",
+                        "expected_loss": pre_loss_calc.total_expected_loss_usd,
+                        "max_tolerated": pre_loss_calc.max_tolerated_risk_usd,
+                        "approved_risk": approved_risk_usd
+                    }
                     return False
+                if pre_loss_calc.total_stress_loss_usd > pre_max_stress:
+                    logger.error(
+                        f"[NadoTradingService] ❌ PRE-DISPATCH STRESS RISK BREACH: Stress loss at limit price "
+                        f"(${pre_loss_calc.total_stress_loss_usd:.2f}) exceeds approved stress ceiling "
+                        f"(${pre_max_stress:.2f}, approved=${approved_risk_usd:.2f}). "
+                        f"Aborting before sending order to sequencer."
+                    )
+                    self.last_execution_status = "PRE_DISPATCH_STRESS_BREACH"
+                    self.last_execution_details = {
+                        "reason": "PRE_DISPATCH_STRESS_BREACH",
+                        "stress_loss": pre_loss_calc.total_stress_loss_usd,
+                        "max_allowed_stress": pre_max_stress,
+                        "approved_risk": approved_risk_usd
+                    }
+                    return False
+            except ValueError as pre_err:
+                logger.error(f"[NadoTradingService] ❌ Pre-dispatch risk calculator error: {pre_err}")
+                self.last_execution_status = "INVALID_RISK_PARAMETERS"
+                self.last_execution_details = {"reason": str(pre_err)}
+                return False
                 
             # Expiration
             try:

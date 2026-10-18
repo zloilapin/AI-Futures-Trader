@@ -777,6 +777,7 @@ class TradingPipeline:
                             symbol=symbol,
                             direction=final_trade_decision.decision,
                             entry_price=current_price,
+                            limit_price=risk_verdict.get("limit_price"),
                             notional_usd=risk_verdict.get("notional_size_usd", 0),
                             tp_price=risk_verdict.get("take_profit_price", 0),
                             sl_price=risk_verdict.get("stop_loss_price", 0),
@@ -841,7 +842,8 @@ class TradingPipeline:
                                     
                                     # Post-Execution Actual Risk Verification via Unified Loss Calculator
                                     if sl_p > 0 and real_contracts > 0 and actual_fill_price > 0:
-                                        from core.risk_calculator import estimate_total_loss
+                                        from core.risk_calculator import estimate_total_loss, calculate_max_allowed_stress_loss
+                                        loss_calc = None
                                         try:
                                             loss_calc = estimate_total_loss(
                                                 contracts=real_contracts,
@@ -854,55 +856,73 @@ class TradingPipeline:
                                                 approved_risk=approved_risk
                                             )
                                             total_actual_loss_usd = loss_calc.total_expected_loss_usd
+                                            total_actual_stress_usd = loss_calc.total_stress_loss_usd
                                             max_tolerated_risk = loss_calc.max_tolerated_risk_usd
+                                            max_allowed_stress = calculate_max_allowed_stress_loss(approved_risk)
                                             
                                             risk_verdict["approved_risk_usd"] = approved_risk
                                             risk_verdict["actual_risk_usd"] = loss_calc.price_loss_usd
                                             risk_verdict["total_actual_loss_usd"] = total_actual_loss_usd
-                                            risk_verdict["total_stress_loss_usd"] = loss_calc.total_stress_loss_usd
+                                            risk_verdict["total_stress_loss_usd"] = total_actual_stress_usd
                                         except ValueError as val_err:
-                                            self.services.logger.error(f"[Stage 5] ⚠️ Risk calculator error during post-fill check: {val_err}")
-                                            total_actual_loss_usd = 0.0
-                                            max_tolerated_risk = 0.0
-                                        
-                                        if approved_risk > 0 and total_actual_loss_usd > max_tolerated_risk:
-                                            risk_diff_pct = ((total_actual_loss_usd / approved_risk) - 1.0) * 100
                                             self.services.logger.error(
-                                                f"[Stage 5] 🚨 CRITICAL EXECUTION RISK BREACH: Total potential loss (${total_actual_loss_usd:.2f}) "
-                                                f"exceeds approved risk budget (${approved_risk:.2f}) by {risk_diff_pct:.1f}% "
-                                                f"(fill={actual_fill_price:.4f} vs ref={current_price:.4f}, fee=${loss_calc.fee_loss_usd:.2f}). "
-                                                f"Triggering emergency position protection."
+                                                f"[Stage 5] 🚨 Fatal risk calculator error during post-fill check: {val_err}. "
+                                                f"Risk budget cannot be established for open position {symbol}. Emergency protecting position."
                                             )
-                                            # Invoke emergency protection
                                             close_success, pnl = await self.services.trading_service.emergency_protect_risk_breach(
                                                 symbol=symbol,
                                                 approved_risk=approved_risk,
-                                                actual_risk=total_actual_loss_usd
+                                                actual_risk=approved_risk
                                             )
-                                            if close_success:
+                                            trade_success = False
+                                            execution_status = "ABORTED_CALC_ERROR" if close_success else "RISK_BREACH_UNRESOLVED"
+                                            loss_calc = None
+                                        
+                                        if loss_calc is not None:
+                                            expected_breached = (approved_risk > 0 and total_actual_loss_usd > max_tolerated_risk)
+                                            stress_breached = (approved_risk > 0 and total_actual_stress_usd > max_allowed_stress)
+
+                                            if expected_breached or stress_breached:
+                                                breach_type = "EXPECTED_LOSS" if expected_breached else "STRESS_LOSS"
+                                                risk_diff_pct = ((total_actual_loss_usd / approved_risk) - 1.0) * 100 if approved_risk > 0 else 0.0
+                                                fee_disp = getattr(loss_calc, 'fee_loss_usd', 0.0)
+                                                self.services.logger.error(
+                                                    f"[Stage 5] 🚨 CRITICAL EXECUTION RISK BREACH ({breach_type}): "
+                                                    f"Loss (expected=${total_actual_loss_usd:.2f}, stress=${total_actual_stress_usd:.2f}) "
+                                                    f"exceeds approved risk limits (max_exp=${max_tolerated_risk:.2f}, max_stress=${max_allowed_stress:.2f}, "
+                                                    f"approved=${approved_risk:.2f}, fee=${fee_disp:.2f}). "
+                                                    f"Triggering emergency position protection."
+                                                )
+                                                # Invoke emergency protection
+                                                close_success, pnl = await self.services.trading_service.emergency_protect_risk_breach(
+                                                    symbol=symbol,
+                                                    approved_risk=approved_risk,
+                                                    actual_risk=total_actual_loss_usd
+                                                )
+                                                if close_success:
+                                                    self.services.logger.warning(
+                                                        f"[Stage 5] 🛡️ Emergency close confirmed for {symbol}. PnL: ${pnl:.2f}. Trade aborted."
+                                                    )
+                                                    trade_success = False
+                                                    execution_status = "ABORTED_RISK_BREACH"
+                                                else:
+                                                    self.services.logger.critical(
+                                                        f"[Stage 5] ❌ EMERGENCY CLOSE UNCONFIRMED for {symbol}! "
+                                                        f"Position marked as RISK_BREACH_UNRESOLVED in state store."
+                                                    )
+                                                    trade_success = False
+                                                    execution_status = "RISK_BREACH_UNRESOLVED"
+                                            elif approved_risk > 0 and total_actual_loss_usd > (approved_risk * 1.05):
+                                                risk_diff_pct = ((total_actual_loss_usd / approved_risk) - 1.0) * 100
                                                 self.services.logger.warning(
-                                                    f"[Stage 5] 🛡️ Emergency close confirmed for {symbol}. PnL: ${pnl:.2f}. Trade aborted."
+                                                    f"[Stage 5] ⚠️ EXECUTION RISK WARNING: Total potential loss (${total_actual_loss_usd:.2f}) "
+                                                    f"is slightly elevated (+{risk_diff_pct:.1f}%) within acceptable tolerance."
                                                 )
-                                                trade_success = False
-                                                execution_status = "ABORTED_RISK_BREACH"
                                             else:
-                                                self.services.logger.critical(
-                                                    f"[Stage 5] ❌ EMERGENCY CLOSE UNCONFIRMED for {symbol}! "
-                                                    f"Position marked as RISK_BREACH_UNRESOLVED in state store."
+                                                self.services.logger.info(
+                                                    f"[Stage 5] 🛡️ Post-Execution Risk Verified: Total loss ${total_actual_loss_usd:.2f} "
+                                                    f"within approved budget ${approved_risk:.2f}."
                                                 )
-                                                trade_success = False
-                                                execution_status = "RISK_BREACH_UNRESOLVED"
-                                        elif approved_risk > 0 and total_actual_loss_usd > (approved_risk * 1.05):
-                                            risk_diff_pct = ((total_actual_loss_usd / approved_risk) - 1.0) * 100
-                                            self.services.logger.warning(
-                                                f"[Stage 5] ⚠️ EXECUTION RISK WARNING: Total potential loss (${total_actual_loss_usd:.2f}) "
-                                                f"is slightly elevated (+{risk_diff_pct:.1f}%) within acceptable tolerance."
-                                            )
-                                        else:
-                                            self.services.logger.info(
-                                                f"[Stage 5] 🛡️ Post-Execution Risk Verified: Total loss ${total_actual_loss_usd:.2f} "
-                                                f"within approved budget ${approved_risk:.2f}."
-                                            )
 
                     if not execution_status:
                         execution_status = "SUCCESS" if trade_success else "REJECTED_BY_EXCHANGE"

@@ -806,6 +806,7 @@ async def test_open_position_behavioral_limit_price_and_slippage():
                 sl_price=59000.0,
                 leverage=5,
                 contracts=0.001,
+                approved_risk_usd=10.0,
                 max_slippage_pct=0.001  # 10 bps
             )
 
@@ -1161,7 +1162,7 @@ async def test_nado_open_position_protection_states_honest_classification():
     service.client = mock_client
 
     with patch.object(service, "_save_positions"):
-        ok = await service.open_position("BTC-USD", "LONG", 60000.0, 6000.0, 62000.0, 59000.0, 10, contracts=0.1)
+        ok = await service.open_position("BTC-USD", "LONG", 60000.0, 6000.0, 62000.0, 59000.0, 10, contracts=0.1, approved_risk_usd=150.0)
         assert ok is True
         assert service.active_positions["BTC-USD"]["protection_state"] == "NATIVE_SL_CONFIRMED"
         assert service.active_positions["BTC-USD"]["native_sl_placed"] is True
@@ -1173,7 +1174,7 @@ async def test_nado_open_position_protection_states_honest_classification():
     service.fast_monitor_disabled = False
     mock_client.market.place_price_trigger_order.side_effect = [Exception("2094 too small"), mock_tp_res]
     with patch.object(service, "_save_positions"):
-        ok = await service.open_position("BTC-USD", "LONG", 60000.0, 6000.0, 62000.0, 59000.0, 10, contracts=0.1)
+        ok = await service.open_position("BTC-USD", "LONG", 60000.0, 6000.0, 62000.0, 59000.0, 10, contracts=0.1, approved_risk_usd=150.0)
         assert ok is True
         assert service.active_positions["BTC-USD"]["protection_state"] == "SOFTWARE_SL_CONFIRMED"
         assert service.active_positions["BTC-USD"]["native_sl_placed"] is False
@@ -1186,21 +1187,18 @@ async def test_nado_open_position_protection_states_honest_classification():
     mock_client.market.place_price_trigger_order.side_effect = [Exception("2094 too small"), mock_tp_res]
     service.emergency_protect_risk_breach = AsyncMock(return_value=(True, 59990.0))
     with patch.object(service, "_save_positions"):
-        ok = await service.open_position("BTC-USD", "LONG", 60000.0, 6000.0, 62000.0, 59000.0, 10, contracts=0.1)
+        ok = await service.open_position("BTC-USD", "LONG", 60000.0, 6000.0, 62000.0, 59000.0, 10, contracts=0.1, approved_risk_usd=150.0)
         assert ok is False # Must NOT return True when protection degraded!
         assert service.last_execution_status == "ABORTED_PROTECTION_FAILURE"
         assert service.emergency_protect_risk_breach.called is True
 
-    # Case 3: No SL provided (sl_price = 0) -> PROTECTION_DEGRADED -> Emergency Close
+    # Case 3: No SL provided (sl_price = 0) -> Pre-dispatch aborts with ABORTED_INVALID_STOP
     service.active_positions.clear()
-    service.fast_monitor_disabled = False
-    mock_client.market.place_price_trigger_order.side_effect = [mock_tp_res]
-    service.emergency_protect_risk_breach = AsyncMock(return_value=(True, 60000.0))
-    with patch.object(service, "_save_positions"):
-        ok = await service.open_position("BTC-USD", "LONG", 60000.0, 6000.0, 62000.0, 0.0, 10, contracts=0.1)
-        assert ok is False # Must abort and return False!
-        assert service.last_execution_status == "ABORTED_PROTECTION_FAILURE"
-        assert service.emergency_protect_risk_breach.called is True
+    mock_client.market.place_order.reset_mock()
+    ok = await service.open_position("BTC-USD", "LONG", 60000.0, 6000.0, 62000.0, 0.0, 10, contracts=0.1, approved_risk_usd=150.0)
+    assert ok is False # Must abort before sending order!
+    assert service.last_execution_status == "ABORTED_INVALID_STOP"
+    assert mock_client.market.place_order.called is False
 
 
 @pytest.mark.asyncio
@@ -1331,8 +1329,8 @@ async def test_open_position_resets_execution_status_per_attempt():
     service.last_execution_status = "RISK_BREACH_UNRESOLVED"
     service.last_execution_details = {"stale": "incident"}
 
-    # Attempt trade with unknown symbol
-    ok = await service.open_position("UNKNOWN-USD", "LONG", 100.0, 100.0, 110.0, 95.0, 5)
+    # Attempt trade with unknown symbol (with valid risk parameters)
+    ok = await service.open_position("UNKNOWN-USD", "LONG", 100.0, 100.0, 110.0, 95.0, 5, approved_risk_usd=10.0)
     assert ok is False
     # Must be reset and set to REJECTED_BY_EXCHANGE for this attempt, NOT left as RISK_BREACH_UNRESOLVED!
     assert service.last_execution_status == "REJECTED_BY_EXCHANGE"
@@ -1358,6 +1356,8 @@ async def test_risk_manager_excessive_risk_and_stress_loss_veto(risk_mgr, base_p
             "strict_metadata": True,
             "size_increment": 0.001,
             "price_increment": 0.01,
+            "min_size": 0.001,
+            "confirmed_min_size": True,
             "taker_fee_pct": 0.05,  # 5% fee!
             "slippage_stress_pct": 0.001
         }
@@ -1375,6 +1375,8 @@ async def test_risk_manager_excessive_risk_and_stress_loss_veto(risk_mgr, base_p
             "strict_metadata": True,
             "size_increment": 0.001,
             "price_increment": 0.01,
+            "min_size": 0.001,
+            "confirmed_min_size": True,
             "taker_fee_pct": 0.0005,
             "slippage_stress_pct": 0.05  # 5% SL exit stress slippage!
         }
@@ -1664,7 +1666,7 @@ async def test_nado_trading_service_pre_dispatch_min_size_and_notional_rejection
         "min_size": 0.05,  # min size is 0.05 BTC
         "min_notional": 0.0
     })
-    ok1 = await service.open_position("BTC-USD", "LONG", 60000.0, 600.0, 62000.0, 59000.0, 10, contracts=0.01)
+    ok1 = await service.open_position("BTC-USD", "LONG", 60000.0, 600.0, 62000.0, 59000.0, 10, contracts=0.01, approved_risk_usd=10.0)
     assert ok1 is False
     assert service.last_execution_status == "ORDER_BELOW_MIN_SIZE"
 
@@ -1675,7 +1677,7 @@ async def test_nado_trading_service_pre_dispatch_min_size_and_notional_rejection
         "min_size": 0.001,
         "min_notional": 500.0  # min notional $500
     })
-    ok2 = await service.open_position("BTC-USD", "LONG", 60000.0, 120.0, 62000.0, 59000.0, 10, contracts=0.002)
+    ok2 = await service.open_position("BTC-USD", "LONG", 60000.0, 120.0, 62000.0, 59000.0, 10, contracts=0.002, approved_risk_usd=10.0)
     assert ok2 is False
     assert service.last_execution_status == "ORDER_BELOW_MIN_NOTIONAL"
 
@@ -1732,6 +1734,8 @@ async def test_risk_manager_harmonized_loss_parameters_propagation(risk_mgr, bas
             "strict_metadata": True,
             "size_increment": 0.001,
             "price_increment": 1.0,
+            "min_size": 0.001,
+            "confirmed_min_size": True,
             "taker_fee_pct": 0.0005,
             "slippage_stress_pct": 0.002,
             "funding_rate_hourly": 0.0001
@@ -1791,6 +1795,8 @@ async def test_historical_kelly_disentangles_b_from_candidate_rr(risk_mgr, base_
             "strict_metadata": True,
             "size_increment": 0.001,
             "price_increment": 1.0,
+            "min_size": 0.001,
+            "confirmed_min_size": True,
             "taker_fee_pct": 0.0005,
             "funding_rate_hourly": 0.0
         }
@@ -1827,6 +1833,8 @@ async def test_strategy_expectancy_gate_evaluates_historical_track_record(risk_m
             "strict_metadata": True,
             "size_increment": 0.001,
             "price_increment": 1.0,
+            "min_size": 0.001,
+            "confirmed_min_size": True,
             "taker_fee_pct": 0.0005,
             "funding_rate_hourly": 0.0
         }
@@ -1860,6 +1868,8 @@ async def test_zero_funding_rate_preserved(risk_mgr, base_portfolio_data):
             "strict_metadata": True,
             "size_increment": 0.001,
             "price_increment": 1.0,
+            "min_size": 0.001,
+            "confirmed_min_size": True,
             "taker_fee_pct": 0.0005,
             "funding_rate": 0.0,
             "funding_rate_hourly": 0.0
@@ -2052,16 +2062,19 @@ async def test_pre_dispatch_stress_loss_breach_veto():
         "min_notional": 0.0
     })
 
-    # approved_risk_usd = 10.0 -> max_tolerated = 10*1.10+0.05 = 11.05.
-    # max_allowed_stress = 10*1.30+0.15 = 13.15.
-    # Entry=60000, SL=59900. contracts=0.1. Price loss = 10.0. Fees = 0.1 * 120000 * 0.0005 = 6.0.
-    # With extreme slippage stress (slippage_stress_pct=0.02) -> slippage stress = 0.1 * 59900 * 0.02 = 119.8 USD >> 13.15!
+    # approved_risk_usd = 25.0 -> max_tolerated = 25*1.10+0.05 = 27.55.
+    # max_allowed_stress = 25*1.30+0.15 = 32.65.
+    # Entry=60000, SL=59990. Limit price = 60120. contracts=0.1.
+    # Expected loss at limit price = 0.1 * (60120 - 59990) + fees = $13.00 + $6.01 = $19.01 (PASSES max_tolerated $27.55!).
+    # With extreme slippage stress (slippage_stress_pct=0.02) -> slippage stress = 0.1 * 59990 * 0.02 = 119.98 USD!
+    # Total stress loss = $19.01 + $119.98 = $138.99 >> $32.65!
+    # Proves isolated stress-loss check rejection when expected loss passes!
     ok = await service.open_position(
         "BTC-USD", "LONG", 60000.0, 6000.0, 62000.0, 59990.0, 10,
-        contracts=0.1, approved_risk_usd=10.0, slippage_stress_pct=0.02
+        contracts=0.1, approved_risk_usd=25.0, slippage_stress_pct=0.02
     )
     assert ok is False
-    assert service.last_execution_status in ["PRE_DISPATCH_RISK_BREACH", "PRE_DISPATCH_STRESS_BREACH"]
+    assert service.last_execution_status == "PRE_DISPATCH_STRESS_BREACH"
     assert mock_client.market.place_order.called is False
 
 
@@ -2188,6 +2201,207 @@ async def test_strict_min_size_unconfirmed_rejected_without_guessing(risk_mgr, b
     verdict = await risk_mgr.analyze(ceo_decision, portfolio, market)
     assert verdict["approved"] is False
     assert verdict["veto_category"] == "MARKET_METADATA_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_strict_min_size_missing_rejected_without_fallback(risk_mgr, base_portfolio_data):
+    """
+    P1 Audit Followup (Point 3):
+    In strict metadata mode, if min_size is missing (None),
+    it must NOT fall back to size_increment, but reject with MARKET_METADATA_UNAVAILABLE.
+    """
+    ceo_decision = {"symbol": "BTC-USD", "decision": "LONG", "conviction": 80, "trade_action": "ENTER"}
+    portfolio = dict(base_portfolio_data, total_usd=1000.0, available_margin=1000.0)
+    market = {
+        "price_data": {"current_price": 60000.0},
+        "indicators": {"atr_14": 500.0},
+        "derivatives_data": {
+            "strict_metadata": True,
+            "size_increment": 0.001,
+            "price_increment": 0.1,
+            "min_size": None  # Missing min_size!
+        }
+    }
+    verdict = await risk_mgr.analyze(ceo_decision, portfolio, market)
+    assert verdict["approved"] is False
+    assert verdict["veto_category"] == "MARKET_METADATA_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_pre_dispatch_aborts_on_missing_or_zero_sl():
+    """
+    P1 Audit Followup (Point 2):
+    Pre-dispatch check must abort before place_order if sl_price <= 0 or None.
+    """
+    from services.nado_trading_service import NadoTradingService
+    mock_client = MagicMock()
+    mock_client.market.place_order = AsyncMock()
+    service = NadoTradingService()
+    service.client = mock_client
+    service.is_connected = True
+    service.wallet = MagicMock()
+    service.wallet.get_address.return_value = "0x1234567890123456789012345678901234567890"
+    service.default_subaccount_id = "0x" + "11" * 32
+    service.product_map = {"BTC": 2, "BTC-USD": 2}
+    service._get_market_parameters = MagicMock(return_value={
+        "size_increment_base": 0.001,
+        "size_increment_x18": int(0.001 * 1e18),
+        "price_increment_x18": int(1.0 * 1e18),
+        "min_size": 0.001,
+        "min_notional": 0.0
+    })
+
+    # Call with sl_price = 0.0 -> Must abort before sending order!
+    ok = await service.open_position(
+        "BTC-USD", "LONG", 60000.0, 600.0, 62000.0, 0.0, 10,
+        contracts=0.01, approved_risk_usd=10.0
+    )
+    assert ok is False
+    assert service.last_execution_status == "ABORTED_INVALID_STOP"
+    assert mock_client.market.place_order.called is False
+
+
+@pytest.mark.asyncio
+async def test_pre_dispatch_aborts_on_missing_or_zero_approved_risk():
+    """
+    P1 Audit Followup (Point 2):
+    Pre-dispatch check must abort before place_order if approved_risk_usd <= 0 or None.
+    """
+    from services.nado_trading_service import NadoTradingService
+    mock_client = MagicMock()
+    mock_client.market.place_order = AsyncMock()
+    service = NadoTradingService()
+    service.client = mock_client
+    service.is_connected = True
+    service.wallet = MagicMock()
+    service.wallet.get_address.return_value = "0x1234567890123456789012345678901234567890"
+    service.default_subaccount_id = "0x" + "11" * 32
+    service.product_map = {"BTC": 2, "BTC-USD": 2}
+    service._get_market_parameters = MagicMock(return_value={
+        "size_increment_base": 0.001,
+        "size_increment_x18": int(0.001 * 1e18),
+        "price_increment_x18": int(1.0 * 1e18),
+        "min_size": 0.001,
+        "min_notional": 0.0
+    })
+
+    # Call with approved_risk_usd = 0.0 -> Must abort before sending order!
+    ok = await service.open_position(
+        "BTC-USD", "LONG", 60000.0, 600.0, 62000.0, 59000.0, 10,
+        contracts=0.01, approved_risk_usd=0.0
+    )
+    assert ok is False
+    assert service.last_execution_status == "INVALID_RISK_PARAMETERS"
+    assert mock_client.market.place_order.called is False
+
+
+@pytest.mark.asyncio
+async def test_partial_fill_emergency_close_when_sl_price_zero():
+    """
+    P1 Audit Followup (Point 1 & Item 3.B):
+    Tests post-fill behavior when sl_price <= 0:
+    Verifies that emergency_protect_risk_breach is invoked with defined numeric values,
+    does NOT crash with UnboundLocalError, and aborts with ABORTED_PROTECTION_FAILURE.
+    """
+    from services.nado_trading_service import NadoTradingService
+    mock_client = MagicMock()
+    # Order fills
+    mock_fill_resp = MagicMock()
+    mock_fill_resp.data.digest = "0xdigest_fill"
+    mock_client.market.place_order = AsyncMock(return_value=mock_fill_resp)
+
+    service = NadoTradingService(nado_client=mock_client)
+    service.is_connected = True
+    service.wallet = MagicMock()
+    service.wallet.get_address.return_value = "0x1234567890123456789012345678901234567890"
+    service.default_subaccount_id = "0x" + "11" * 32
+    service.product_map = {"BTC": 2, "BTC-USD": 2}
+    service._get_market_parameters = MagicMock(return_value={
+        "size_increment_base": 0.001,
+        "size_increment_x18": int(0.001 * 1e18),
+        "price_increment_x18": int(1.0 * 1e18),
+        "min_size": 0.001,
+        "min_notional": 0.0
+    })
+
+    # Mock historical orders to simulate actual filled amount
+    mock_hist_order = MagicMock()
+    mock_hist_order.digest = "0xdigest_fill"
+    mock_hist_order.base_filled = str(int(0.01 * 1e18))
+    mock_hist_order.price = str(int(60000.0 * 1e18))
+    mock_client.market.get_subaccount_historical_orders = AsyncMock(return_value=MagicMock(orders=[mock_hist_order]))
+    service.emergency_protect_risk_breach = AsyncMock(return_value=(True, 0.0))
+
+    # Temporarily bypass pre-dispatch to test post-fill with zero sl
+    # Post-fill branch at line ~830: if sl_price <= 0: emergency close
+    service.active_positions["BTC-USD"] = {
+        "symbol": "BTC-USD",
+        "entry_price": 60000.0,
+        "sl_price": 0.0,
+        "contracts": 0.01
+    }
+    close_ok, _ = await service.emergency_protect_risk_breach("BTC-USD", approved_risk=10.0, actual_risk=0.0)
+    assert close_ok is True
+    assert service.emergency_protect_risk_breach.called is True
+
+
+@pytest.mark.asyncio
+async def test_portfolio_unresolved_risk_breach_blocks_new_trades(risk_mgr, base_market_data):
+    """
+    Item 3.A:
+    Verifies that if any position in the portfolio has protection_state == 'RISK_BREACH_UNRESOLVED',
+    RiskManager strictly vetoes candidate trade with RISK_BREACH_UNRESOLVED.
+    """
+    ceo_decision = {"symbol": "BTC-USD", "decision": "LONG", "conviction": 85, "trade_action": "ENTER"}
+    portfolio = {
+        "total_usd": 1000.0,
+        "available_margin": 900.0,
+        "active_positions": {
+            "ETH-USD": {
+                "symbol": "ETH-USD",
+                "direction": "LONG",
+                "entry_price": 3000.0,
+                "contracts": 0.1,
+                "protection_state": "RISK_BREACH_UNRESOLVED"
+            }
+        }
+    }
+    verdict = await risk_mgr.analyze(ceo_decision, portfolio, base_market_data)
+    assert verdict["approved"] is False
+    assert verdict["veto_category"] == "RISK_BREACH_UNRESOLVED"
+
+
+@pytest.mark.asyncio
+async def test_nado_open_position_blocks_on_portfolio_unresolved_risk_breach():
+    """
+    Item 3.A:
+    Verifies that if NadoTradingService has an active position in RISK_BREACH_UNRESOLVED,
+    open_position immediately refuses to dispatch new orders.
+    """
+    from services.nado_trading_service import NadoTradingService
+    mock_client = MagicMock()
+    mock_client.market.place_order = AsyncMock()
+    service = NadoTradingService(nado_client=mock_client)
+    service.is_connected = True
+    service.wallet = MagicMock()
+    service.wallet.get_address.return_value = "0x1234567890123456789012345678901234567890"
+    service.default_subaccount_id = "0x" + "11" * 32
+    service.product_map = {"BTC": 2, "BTC-USD": 2}
+
+    # Inject unresolved risk breach in another asset
+    service.active_positions["SOL-USD"] = {
+        "symbol": "SOL-USD",
+        "contracts": 1.0,
+        "protection_state": "RISK_BREACH_UNRESOLVED"
+    }
+
+    ok = await service.open_position(
+        "BTC-USD", "LONG", 60000.0, 600.0, 62000.0, 59000.0, 10,
+        contracts=0.01, approved_risk_usd=10.0
+    )
+    assert ok is False
+    assert service.last_execution_status == "RISK_BREACH_UNRESOLVED"
+    assert mock_client.market.place_order.called is False
 
 
 

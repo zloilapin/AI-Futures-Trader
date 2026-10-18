@@ -1078,7 +1078,10 @@ class RiskManager(BaseAgent):
                 if min_size <= 0.0 or (size_increment > 0 and min_size < size_increment) or is_dummy_default:
                     min_size = size_increment
         else:
-            # If min_size is not explicitly configured, default to product size_increment
+            if is_strict_metadata:
+                msg = f"Market metadata incomplete: missing min_size parameter for {symbol}. Refusing trade in strict mode."
+                self.logger.warning(f"[{self.name}] 🚫 MARKET_METADATA_UNAVAILABLE VETO: {msg}")
+                return self._build_veto_result("MARKET_METADATA_UNAVAILABLE", msg, trade_action)
             min_size = size_increment
         
         if notional_usd <= 0 or contracts <= 0:
@@ -1120,8 +1123,8 @@ class RiskManager(BaseAgent):
             self.logger.warning(f"[{self.name}] ❌ POOR_RISK_REWARD VETO: {msg}")
             return self._build_veto_result("POOR_RISK_REWARD", msg, trade_action)
 
-        # Unified Loss Estimation & Verification (P0-3 & P1-2 & P1-3)
-        from core.risk_calculator import estimate_total_loss
+        # Unified Loss Estimation & Verification (P0-3 & P1-2 & P1-3 & P1-4)
+        from core.risk_calculator import estimate_total_loss, calculate_max_tolerated_risk, calculate_max_allowed_stress_loss
         taker_fee_pct = float(derivatives_data.get("taker_fee_pct") or 0.0005)
         slippage_stress = float(derivatives_data.get("slippage_stress_pct") or expected_slippage_pct)
         
@@ -1156,8 +1159,8 @@ class RiskManager(BaseAgent):
             return self._build_veto_result("DATA_INVALID", msg, trade_action)
 
         # 1. Total Expected Loss Veto Gate (Price loss + round-trip taker fees)
-        # Bounded by approved risk budget with 5% tolerance + $0.05 dust floor
-        max_allowed_expected_loss = (risk_amount_usd * 1.05) + 0.05
+        # Uniform centralized tolerance policy (Point 4)
+        max_allowed_expected_loss = calculate_max_tolerated_risk(risk_amount_usd)
         if loss_calc.total_expected_loss_usd > max_allowed_expected_loss:
             msg = (
                 f"Total expected loss (${loss_calc.total_expected_loss_usd:.2f}, "
@@ -1168,8 +1171,8 @@ class RiskManager(BaseAgent):
             return self._build_veto_result("EXCESSIVE_RISK", msg, trade_action)
 
         # 2. Stress Loss Veto Gate (Adverse slippage + holding funding stress)
-        # Bounded by 130% of approved risk budget + $0.15 dust floor (P1 Finding 5)
-        max_allowed_stress_loss = (risk_amount_usd * 1.30) + 0.15
+        # Uniform centralized stress risk ceiling (Point 4)
+        max_allowed_stress_loss = calculate_max_allowed_stress_loss(risk_amount_usd)
         if loss_calc.total_stress_loss_usd > max_allowed_stress_loss:
             msg = (
                 f"Total stress loss (${loss_calc.total_stress_loss_usd:.2f}, "
