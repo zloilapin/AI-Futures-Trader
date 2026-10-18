@@ -353,7 +353,8 @@ class TradingPipeline:
                         stage="DATA_GUARD",
                         final_action="REJECTED",
                         rejection_tag="DATA_INVALID",
-                        rejection_reason=dq_reason
+                        rejection_reason=dq_reason,
+                        market_data=market_data
                     )
                     continue
 
@@ -378,7 +379,8 @@ class TradingPipeline:
                         stage="SCANNER",
                         final_action="REJECTED",
                         rejection_tag=scan_result.get('status', 'SCANNER_BLOCKED'),
-                        rejection_reason=scanner_reason
+                        rejection_reason=scanner_reason,
+                        market_data=market_data
                     )
                     continue
 
@@ -436,7 +438,8 @@ class TradingPipeline:
                         final_action="REJECTED",
                         rejection_tag="AGENT_ERROR",
                         rejection_reason=f"Insufficient valid analysts ({len(valid_reports)}/5)",
-                        analyst_reports=valid_reports
+                        analyst_reports=valid_reports,
+                        market_data=market_data
                     )
                     continue
 
@@ -479,7 +482,8 @@ class TradingPipeline:
                         rejection_tag="NO_SIGNAL",
                         rejection_reason=strategy_profile.reasoning,
                         strategy_profile=strategy_profile,
-                        analyst_reports=valid_reports
+                        analyst_reports=valid_reports,
+                        market_data=market_data
                     )
                     continue
 
@@ -673,7 +677,9 @@ class TradingPipeline:
                             "debate_status": debate_status
                         },
                         ceo_verdict=ceo_verdict,
-                        final_trade_decision=final_trade_decision
+                        final_trade_decision=final_trade_decision,
+                        market_data=market_data,
+                        min_conviction=min_conv
                     )
                     continue
 
@@ -722,7 +728,9 @@ class TradingPipeline:
                                     "debate_status": debate_status
                                 },
                                 ceo_verdict=ceo_verdict,
-                                final_trade_decision=final_trade_decision
+                                final_trade_decision=final_trade_decision,
+                                market_data=market_data,
+                                min_conviction=min_conv
                             )
                             continue
                     
@@ -930,7 +938,9 @@ class TradingPipeline:
                         risk_verdict=risk_verdict,
                         execution_status=execution_status,
                         trade_success=trade_success,
-                        actual_fill_price=actual_fill_price
+                        actual_fill_price=actual_fill_price,
+                        market_data=market_data,
+                        min_conviction=min_conv
                     )
                 else:
                     self.services.logger.error(f"❌ Status: VETOED BY RISK MANAGER ({risk_verdict.get('reasoning')})")
@@ -960,7 +970,9 @@ class TradingPipeline:
                         },
                         ceo_verdict=ceo_verdict,
                         final_trade_decision=final_trade_decision,
-                        risk_verdict=risk_verdict
+                        risk_verdict=risk_verdict,
+                        market_data=market_data,
+                        min_conviction=min_conv
                     )
 
                 # СТАДИЯ 6: ТЕЛЕГРАМ
@@ -1322,7 +1334,10 @@ class TradingPipeline:
         risk_verdict: Optional[Dict[str, Any]] = None,
         execution_status: Optional[str] = None,
         trade_success: Optional[bool] = None,
-        actual_fill_price: Optional[float] = None
+        actual_fill_price: Optional[float] = None,
+        market_data: Optional[Dict[str, Any]] = None,
+        min_conviction: Optional[int] = None,
+        candidate_id: Optional[str] = None
     ):
         """
         Builds and logs a structured Decision Pipeline Snapshot to diagnostics tracker.
@@ -1330,9 +1345,13 @@ class TradingPipeline:
         """
         now_ts = time.time()
         iso_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        resolved_candidate_id = candidate_id or f"{symbol}:{cycle_number}"
+        resolved_min_conv = min_conviction or (getattr(final_trade_decision, "min_conviction", None) if final_trade_decision else None)
+
         snapshot = {
             "timestamp": now_ts,
             "iso_time": iso_str,
+            "candidate_id": resolved_candidate_id,
             "cycle_number": cycle_number,
             "symbol": symbol,
             "macro_regime": macro_regime,
@@ -1341,7 +1360,25 @@ class TradingPipeline:
             "final_action": final_action,
             "rejection_tag": rejection_tag,
             "rejection_reason": rejection_reason,
+            "min_conviction": resolved_min_conv
         }
+
+        if market_data and isinstance(market_data, dict):
+            indicators = market_data.get("indicators") or {}
+            price_data = market_data.get("price_data") or {}
+            derivatives = market_data.get("derivatives_data") or {}
+            raw_bb = indicators.get("bb_position_pct") if "bb_position_pct" in indicators else indicators.get("bb_pos")
+            snapshot["market_guard_inputs"] = {
+                "current_price": float(price_data.get("current_price") or market_data.get("current_price") or 0.0),
+                "donchian_high": float(indicators.get("donchian_high") or 0.0),
+                "donchian_low": float(indicators.get("donchian_low") or 0.0),
+                "volume_spike_pct": float(indicators.get("volume_spike_pct") or 0.0),
+                "atr_pct": float(indicators.get("atr_pct") or 0.0),
+                "bb_position_pct": float(raw_bb if raw_bb is not None else 50.0),
+                "ema_20": float(indicators.get("ema_20") or 0.0),
+                "funding_rate": float(derivatives.get("funding_rate") or 0.0),
+                "is_pullback_retest": bool(market_data.get("is_pullback_retest", False))
+            }
         if strategy_profile:
             snapshot["router"] = {
                 "strategy_mode": getattr(strategy_profile, "strategy_mode", None),

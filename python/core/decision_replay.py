@@ -30,6 +30,16 @@ class MockRiskRules:
         return {"min_conviction": min_conv}
 
 
+class CapturedRiskRules:
+    """Replays using the exact captured min_conviction threshold from the candidate snapshot."""
+    def __init__(self, min_conviction: int = 75):
+        self.min_conviction = min_conviction
+        self.MIN_CONVICTION_TO_TRADE = min_conviction
+
+    def _get_profile_rules(self, profile: str, strategy_mode: str) -> Dict[str, Any]:
+        return {"min_conviction": self.min_conviction}
+
+
 class DecisionReplayEngine:
     """
     Offline telemetry replay and analysis utility for the AI-Futures-Trader decision block.
@@ -92,16 +102,19 @@ class DecisionReplayEngine:
 
     def compute_funnel(self, snapshots: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         """
-        Computes aggregate decision funnel metrics across all candidates.
+        Computes aggregate decision funnel metrics deduplicated by candidate_id.
+        Prevents multi-stage logging of the same candidate from inflating the denominator (Audit Point 4).
         """
         if snapshots is None:
             snapshots = self.load_snapshots()
 
-        total = len(snapshots)
-        if total == 0:
+        total_records = len(snapshots)
+        if total_records == 0:
             return {
+                "total_records": 0,
                 "total_candidates": 0,
                 "stages": {},
+                "stage_dropoff": {},
                 "actions": {},
                 "rejection_tags": {},
                 "strategies": {},
@@ -109,40 +122,81 @@ class DecisionReplayEngine:
                 "conversion_rate_pct": 0.0
             }
 
-        stages = Counter(s.get("stage", "UNKNOWN") for s in snapshots)
-        actions = Counter(s.get("final_action", "UNKNOWN") for s in snapshots)
-        rejection_tags = Counter(s.get("rejection_tag") for s in snapshots if s.get("rejection_tag"))
+        # Group snapshots by stable candidate_id
+        candidates: Dict[str, List[Dict[str, Any]]] = {}
+        for s in snapshots:
+            c_id = s.get("candidate_id") or f"{s.get('symbol', 'UNKNOWN')}:{s.get('cycle_number', '0')}"
+            if c_id not in candidates:
+                candidates[c_id] = []
+            candidates[c_id].append(s)
 
-        # Strategy breakdown & conversion
+        total_candidates = len(candidates)
+
+        actions = Counter()
+        rejection_tags = Counter()
+        stage_dropoff = Counter()
+        stages_reached = Counter()
+
         strategies: Dict[str, Dict[str, int]] = {}
         risk_penalty_sums = Counter()
         risk_penalty_counts = 0
 
-        for s in snapshots:
-            r = s.get("router", {})
-            strat = r.get("strategy_mode", "UNROUTED")
+        for c_id, snaps in candidates.items():
+            # Chronological order
+            snaps_sorted = sorted(snaps, key=lambda x: x.get("timestamp", 0))
+            terminal_snap = snaps_sorted[-1]
+
+            # Track stages this candidate participated in
+            seen_stages = set()
+            for s in snaps_sorted:
+                st = s.get("stage", "UNKNOWN")
+                if st not in seen_stages:
+                    stages_reached[st] += 1
+                    seen_stages.add(st)
+
+            # Determine terminal candidate outcome
+            has_executed = any(s.get("final_action") == "EXECUTED" for s in snaps_sorted)
+            if has_executed:
+                cand_action = "EXECUTED"
+            else:
+                cand_action = terminal_snap.get("final_action", "UNKNOWN")
+
+            actions[cand_action] += 1
+            if cand_action != "EXECUTED":
+                stage_dropoff[terminal_snap.get("stage", "UNKNOWN")] += 1
+                if terminal_snap.get("rejection_tag"):
+                    rejection_tags[terminal_snap.get("rejection_tag")] += 1
+
+            # Strategy association from latest available router decision
+            strat = "UNROUTED"
+            for s in reversed(snaps_sorted):
+                r_mode = s.get("router", {}).get("strategy_mode")
+                if r_mode:
+                    strat = r_mode
+                    break
+
             if strat not in strategies:
                 strategies[strat] = {"total": 0, "executed": 0, "pullback_wait": 0, "rejected": 0}
             strategies[strat]["total"] += 1
-            
-            action = s.get("final_action")
-            if action == "EXECUTED":
+            if cand_action == "EXECUTED":
                 strategies[strat]["executed"] += 1
-            elif action == "WAIT_FOR_PULLBACK":
+            elif cand_action == "WAIT_FOR_PULLBACK":
                 strategies[strat]["pullback_wait"] += 1
             else:
                 strategies[strat]["rejected"] += 1
 
-            ceo = s.get("ceo", {})
-            breakdown = ceo.get("risk_breakdown", {})
-            if breakdown and isinstance(breakdown, dict):
-                risk_penalty_counts += 1
-                for cat, val in breakdown.items():
-                    if isinstance(val, (int, float)):
-                        risk_penalty_sums[cat] += val
+            # Penalties: record from the latest snapshot that has risk_breakdown
+            for s in reversed(snaps_sorted):
+                breakdown = s.get("ceo", {}).get("risk_breakdown")
+                if breakdown and isinstance(breakdown, dict):
+                    risk_penalty_counts += 1
+                    for cat, val in breakdown.items():
+                        if isinstance(val, (int, float)):
+                            risk_penalty_sums[cat] += val
+                    break
 
         executed_count = actions.get("EXECUTED", 0)
-        conversion_rate = round(executed_count / total * 100, 2) if total > 0 else 0.0
+        conversion_rate = round(executed_count / total_candidates * 100, 2) if total_candidates > 0 else 0.0
 
         avg_penalties = {}
         if risk_penalty_counts > 0:
@@ -150,8 +204,10 @@ class DecisionReplayEngine:
                 avg_penalties[cat] = round(total_val / risk_penalty_counts, 2)
 
         return {
-            "total_candidates": total,
-            "stages": dict(stages),
+            "total_records": total_records,
+            "total_candidates": total_candidates,
+            "stages": dict(stages_reached),
+            "stage_dropoff": dict(stage_dropoff),
             "actions": dict(actions),
             "rejection_tags": dict(rejection_tags),
             "strategies": strategies,
@@ -162,6 +218,7 @@ class DecisionReplayEngine:
     def format_report(self, funnel: Dict[str, Any]) -> str:
         """Formats funnel metrics into a readable report."""
         total = funnel.get("total_candidates", 0)
+        records = funnel.get("total_records", total)
         if total == 0:
             return "📭 No decision snapshots recorded yet in log."
 
@@ -170,12 +227,13 @@ class DecisionReplayEngine:
             "📊 DECISION PIPELINE FUNNEL & TELEMETRY REPORT",
             "============================================================",
             f"Total Candidates Scanned: {total}",
+            f"Total Telemetry Records:  {records}",
             f"Total Trades Executed:    {funnel.get('actions', {}).get('EXECUTED', 0)} ({funnel.get('conversion_rate_pct', 0.0)}%)",
             f"Waiting for Pullback:     {funnel.get('actions', {}).get('WAIT_FOR_PULLBACK', 0)}",
             f"Rejected / Vetoed:        {funnel.get('actions', {}).get('REJECTED', 0)}",
             f"Execution Failures:       {funnel.get('actions', {}).get('EXECUTION_FAILED', 0)}",
             "",
-            "🔻 FUNNEL STAGE DROP-OFF (Where candidates exited):",
+            "🔻 FUNNEL STAGE DROP-OFF (Where unique candidates exited):",
             "------------------------------------------------------------"
         ]
 
@@ -191,10 +249,11 @@ class DecisionReplayEngine:
         ]
 
         for code, label in stage_order:
-            cnt = funnel.get("stages", {}).get(code, 0)
-            pct = round(cnt / total * 100, 1) if total > 0 else 0.0
+            drop_cnt = funnel.get("stage_dropoff", {}).get(code, 0)
+            reach_cnt = funnel.get("stages", {}).get(code, 0)
+            pct = round(drop_cnt / total * 100, 1) if total > 0 else 0.0
             bar = "█" * int(pct // 5)
-            lines.append(f"  {label:<32}: {cnt:>4} ({pct:>5.1f}%) {bar}")
+            lines.append(f"  {label:<32}: Exited {drop_cnt:>3} ({pct:>5.1f}%) [Reached: {reach_cnt:>3}] {bar}")
 
         lines.extend([
             "",
@@ -210,7 +269,7 @@ class DecisionReplayEngine:
 
         lines.extend([
             "",
-            "🧭 STRATEGY CONVERSION BREAKDOWN:",
+            "🧭 STRATEGY CONVERSION BREAKDOWN (Unique Candidates):",
             "------------------------------------------------------------"
         ])
         for strat, data in funnel.get("strategies", {}).items():
@@ -235,7 +294,8 @@ class DecisionReplayEngine:
     def replay_guard_decision(
         self,
         snapshot: Dict[str, Any],
-        risk_manager: Optional[Any] = None
+        risk_manager: Optional[Any] = None,
+        strict: bool = False
     ) -> Tuple[bool, str, Dict[str, Any]]:
         """
         Replays DeterministicGuard offline using snapshot input data.
@@ -258,16 +318,51 @@ class DecisionReplayEngine:
         )
 
         ceo_data = snapshot.get("ceo", {})
+        debate_data = snapshot.get("debate", {})
         ceo_proposal = {
             "decision": ceo_data.get("decision", "HOLD"),
             "conviction": ceo_data.get("conviction", 0),
             "directional_confidence": ceo_data.get("directional_confidence", 0),
             "entry_quality": ceo_data.get("entry_quality", 0),
-            "reasoning_en": ceo_data.get("reasoning", "")
+            "trade_action": guard_data.get("action", "HOLD"),
+            "reasoning_en": ceo_data.get("reasoning", ""),
+            "debate_status": debate_data.get("debate_status") or ceo_data.get("debate_status", "COMPLETE"),
+            "bull_status": debate_data.get("bull_status") or ceo_data.get("bull_status", "OK"),
+            "bear_status": debate_data.get("bear_status") or ceo_data.get("bear_status", "OK"),
+            "disputed_arbitration": ceo_data.get("disputed_arbitration", False)
         }
 
+        # Reconstruct market_data from market_guard_inputs if available
+        mgi = snapshot.get("market_guard_inputs")
+        reconstructed_market_data = None
+        if mgi and isinstance(mgi, dict):
+            reconstructed_market_data = {
+                "price_data": {"current_price": mgi.get("current_price", 0.0)},
+                "current_price": mgi.get("current_price", 0.0),
+                "indicators": {
+                    "donchian_high": mgi.get("donchian_high", 0.0),
+                    "donchian_low": mgi.get("donchian_low", 0.0),
+                    "volume_spike_pct": mgi.get("volume_spike_pct", 0.0),
+                    "atr_pct": mgi.get("atr_pct", 0.0),
+                    "bb_position_pct": mgi.get("bb_position_pct", 50.0),
+                    "ema_20": mgi.get("ema_20", 0.0)
+                },
+                "derivatives_data": {
+                    "funding_rate": mgi.get("funding_rate", 0.0)
+                },
+                "is_pullback_retest": mgi.get("is_pullback_retest", False)
+            }
+        elif strict or (strategy_mode in ["BREAKOUT", "VOLATILITY_MOMENTUM"] and mgi is None):
+            # Audit Point 3: When strict replay is enabled or breakout indicators are absent, report INCOMPLETE_REPLAY
+            return False, "INCOMPLETE_REPLAY: missing market_guard_inputs in snapshot", {"status": "INCOMPLETE_REPLAY"}
+
         profile = snapshot.get("trading_profile", "BALANCED")
-        rm = risk_manager or MockRiskRules()
+        if risk_manager:
+            rm = risk_manager
+        elif snapshot.get("min_conviction") is not None:
+            rm = CapturedRiskRules(min_conviction=int(snapshot["min_conviction"]))
+        else:
+            rm = MockRiskRules()
 
         # Offline evaluate
         replayed_decision: FinalTradeDecision = DeterministicGuard.evaluate(
@@ -275,6 +370,7 @@ class DecisionReplayEngine:
             ceo_proposal=ceo_proposal,
             profile=profile,
             risk_manager=rm,
+            market_data=reconstructed_market_data,
             symbol=snapshot.get("symbol", "")
         )
 

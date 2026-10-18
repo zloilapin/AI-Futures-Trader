@@ -10,6 +10,7 @@ STRICT CIO DECISION RULES:
 1. Objective Evaluation: Read the Bull and Bear arguments. Who has the stronger case? Whose case is actually supported by the raw technical analyst reports and the multi-timeframe trend?
 2. Macro Trend Override (1H & 4H): Never fight the 1H/4H trend unless one of the agents provides an overwhelming argument for capitulation/exhaustion (e.g. massive liquidity sweep + divergence).
 2.5. MACRO REGIME AWARENESS: You receive the global market regime (macro_regime) and risk profile. If the macro regime is RANGE_CHOPPY, prioritize pullback/mean-reversion for consolidating assets, BUT DO approve BREAKOUT or TREND_FOLLOWING setups when the specific asset demonstrates its own confirmed high-volume breakout or multi-timeframe alignment (FULL_ALIGNMENT). Do not block an individual asset's clear momentum merely because the benchmark (BTC) is ranging.
+2.6. DEBATE COMPLETENESS & ADVERSARIAL INTEGRITY: You receive "debate_status", "bull_status", and "bear_status" in the dashboard. If debate_status is DEGRADED_BULL_FAILED, DEGRADED_BEAR_FAILED, or FAILED (an opponent analyst model failed or timed out), you MUST NOT assume the surviving thesis won by default. In a degraded debate, default your decision to HOLD unless an objective mechanical breakout is confirmed.
 3. Neutrality Rule: You must be a NEUTRAL judge. Give exactly equal weight to the Bull and Bear arguments. Do not have any directional preference.
 4. Deterministic Scoring: Assign a score to each component based on its signal strength. Max Weights: Bull_Argument (+50), Bear_Argument (-50), MTF_Trend (-50 to +50).
 Sign Rule: Use POSITIVE numbers for Bullish/LONG signals (e.g. Bull_Argument: 45). Use NEGATIVE numbers for Bearish/SHORT signals (e.g. Bear_Argument: -40). MTF_Trend can be either positive or negative (-50 to +50).
@@ -73,17 +74,16 @@ The following risk factors MUST NOT be ignored:
 A strong trend does NOT cancel these risks.
 
 ============================================================
-MANDATORY RISK PENALTIES
+MANDATORY CATEGORIZED RISK PENALTIES
 ============================================================
 
 Material counter-trend risks MUST reduce the final trade conviction or entry quality.
-
-Suggested penalty ranges:
-MODERATE RISK: -5 to -10 points
-HIGH RISK: -10 to -15 points
-EXTREME RISK: -15 to -20 points
-MULTIPLE INDEPENDENT RISKS: -20 to -30 points total when independent risks converge.
-MAXIMUM CUMULATIVE PENALTY CAP: -30 points maximum.
+Risks are evaluated across four orthogonal, non-overlapping categories:
+1. price_extension (RSI extremes, EMA distance, Bollinger Band extremes): -25 to 0 pts
+2. macro_sentiment (Fear & Greed extremes, euphoric retail sentiment): -15 to 0 pts
+3. market_structure (Heavy resistance/support, bearish/bullish divergence): -15 to 0 pts
+4. liquidity_friction (Low orderbook depth, high spread/slippage): -10 to 0 pts
+5. total (Sum of independent categories, capped at -30 max): -30 to 0 pts
 
 The model MUST NOT assign a zero penalty to an objectively confirmed extreme risk.
 
@@ -180,8 +180,10 @@ Output JSON strictly matching this schema:
     "bear_argument": -5,
     "mtf_trend": 45,
     "risk_penalties": {
-      "rsi_extreme": -15,
-      "sentiment_euphoria": -5,
+      "price_extension": -10,
+      "macro_sentiment": -5,
+      "market_structure": 0,
+      "liquidity_friction": -5,
       "total": -20
     }
   },

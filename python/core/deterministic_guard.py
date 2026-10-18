@@ -120,6 +120,30 @@ class DeterministicGuard:
             if logger:
                 logger.info(f"[System_Core] {retest_msg}")
 
+        # 2.7. Debate Completeness Guard: Block regular entries when analytical debate is degraded
+        debate_status = ceo_proposal.get("debate_status", "COMPLETE")
+        if debate_status in ["DEGRADED_BULL_FAILED", "DEGRADED_BEAR_FAILED", "FAILED"] and decision in ["LONG", "SHORT"]:
+            # If the debate is degraded due to LLM analyst failure, ordinary trades are blocked
+            # Only allowed if there is a mathematically confirmed breakout with volume spike
+            if not is_confirmed_breakout:
+                guard_msg = f"🛡️ [Debate Guard] Дебаты оппонентов неполные ({debate_status}). Вход заблокирован детерминированным гардом (требуется полноценный двусторонний анализ)."
+                print(guard_msg)
+                if logger:
+                    logger.warning(f"[Pipeline] {guard_msg}")
+                decision = "HOLD"
+                conviction = 0
+                trade_action = "HOLD"
+                guard_status = "BLOCKED"
+                rejection_tag = "INCOMPLETE_DEBATE"
+                guard_reason = guard_msg
+                reasoning_en = f"{reasoning_en}\n\n{guard_msg}".strip()
+            else:
+                bypass_msg = f"⚠️ [Debate Guard Bypass] Неполные дебаты ({debate_status}), но подтверждён механический импульсный прорыв ({breakout_reason}). Вход разрешён по правилу исключения Breakout."
+                print(bypass_msg)
+                if logger:
+                    logger.warning(f"[Pipeline] {bypass_msg}")
+                reasoning_en = f"{reasoning_en}\n\n{bypass_msg}".strip()
+
         # 3. Actionability, Conviction & Pullback Checks
         is_actionable = True
         if decision not in ["LONG", "SHORT"]:

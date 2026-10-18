@@ -167,3 +167,132 @@ def test_guard_replay_verification(tmp_path):
     assert audit["matches"] == 1
     assert audit["mismatches"] == 0
     assert audit["match_rate_pct"] == 100.0
+
+
+def test_funnel_deduplication_by_candidate_id(tmp_path):
+    """
+    Audit Point 4:
+    Verifies that compute_funnel deduplicates snapshots sharing the same candidate_id.
+    A candidate recording multiple stages before executing must NOT count as multiple
+    candidates in the denominator.
+    """
+    test_file = str(tmp_path / "multi_stage_funnel.jsonl")
+    records = [
+        # Candidate 1: BTC-USD cycle 1 (records 4 stages, ends in EXECUTED)
+        {"candidate_id": "BTC-USD:1", "symbol": "BTC-USD", "cycle_number": 1, "stage": "STRATEGY_ROUTER", "final_action": "REDUCED", "router": {"strategy_mode": "TREND_FOLLOWING"}, "timestamp": 100},
+        {"candidate_id": "BTC-USD:1", "symbol": "BTC-USD", "cycle_number": 1, "stage": "DETERMINISTIC_GUARD", "final_action": "ENTER", "router": {"strategy_mode": "TREND_FOLLOWING"}, "timestamp": 101},
+        {"candidate_id": "BTC-USD:1", "symbol": "BTC-USD", "cycle_number": 1, "stage": "RISK_MANAGER", "final_action": "APPROVED", "router": {"strategy_mode": "TREND_FOLLOWING"}, "timestamp": 102},
+        {"candidate_id": "BTC-USD:1", "symbol": "BTC-USD", "cycle_number": 1, "stage": "EXECUTION", "final_action": "EXECUTED", "router": {"strategy_mode": "TREND_FOLLOWING"}, "timestamp": 103},
+
+        # Candidate 2: ETH-USD cycle 1 (records 2 stages, ends in WAIT_FOR_PULLBACK)
+        {"candidate_id": "ETH-USD:1", "symbol": "ETH-USD", "cycle_number": 1, "stage": "STRATEGY_ROUTER", "final_action": "REDUCED", "router": {"strategy_mode": "TREND_FOLLOWING"}, "timestamp": 100},
+        {"candidate_id": "ETH-USD:1", "symbol": "ETH-USD", "cycle_number": 1, "stage": "DETERMINISTIC_GUARD", "final_action": "WAIT_FOR_PULLBACK", "rejection_tag": "WAIT_FOR_PULLBACK", "router": {"strategy_mode": "TREND_FOLLOWING"}, "timestamp": 101},
+
+        # Candidate 3: SOL-USD cycle 1 (rejected at SCANNER)
+        {"candidate_id": "SOL-USD:1", "symbol": "SOL-USD", "cycle_number": 1, "stage": "SCANNER", "final_action": "REJECTED", "rejection_tag": "SCANNER_BLOCKED", "timestamp": 99}
+    ]
+    with open(test_file, "w", encoding="utf-8") as f:
+        for r in records:
+            f.write(json.dumps(r) + "\n")
+
+    engine = DecisionReplayEngine(filepath=test_file)
+    funnel = engine.compute_funnel()
+
+    assert funnel["total_records"] == 7
+    assert funnel["total_candidates"] == 3  # Exactly 3 unique candidates!
+    assert funnel["actions"]["EXECUTED"] == 1
+    assert funnel["actions"]["WAIT_FOR_PULLBACK"] == 1
+    assert funnel["actions"]["REJECTED"] == 1
+
+    # Conversion rate must be 1 / 3 = 33.33% (NOT 1 / 7 = 14.28%!)
+    assert funnel["conversion_rate_pct"] == 33.33
+    assert funnel["strategies"]["TREND_FOLLOWING"]["total"] == 2
+    assert funnel["strategies"]["TREND_FOLLOWING"]["executed"] == 1
+
+
+def test_replay_with_captured_market_inputs_and_threshold(tmp_path):
+    """
+    Audit Point 3:
+    Verifies that replay_guard_decision reconstructs market inputs (e.g. extreme funding rate)
+    and captured min_conviction threshold from the candidate snapshot.
+    """
+    engine = DecisionReplayEngine(filepath=str(tmp_path / "empty.jsonl"))
+
+    snapshot = {
+        "candidate_id": "BTC-USD:42",
+        "symbol": "BTC-USD",
+        "trading_profile": "BALANCED",
+        "min_conviction": 70,
+        "router": {
+            "strategy_mode": "TREND_FOLLOWING",
+            "direction_bias": "LONG",
+            "has_directional_signal": True,
+            "reasoning": "Strong long"
+        },
+        "ceo": {
+            "decision": "LONG",
+            "conviction": 72,
+            "directional_confidence": 85,
+            "entry_quality": 72,
+            "trade_action": "ENTER",
+            "reasoning": "High conviction"
+        },
+        "market_guard_inputs": {
+            "current_price": 65000.0,
+            "funding_rate": 0.0008,  # > 0.0005 -> triggers FUNDING_VETO!
+            "donchian_high": 66000.0,
+            "donchian_low": 63000.0,
+            "volume_spike_pct": 100.0,
+            "atr_pct": 1.2,
+            "bb_position_pct": 60.0
+        },
+        "guard": {
+            "decision": "LONG",
+            "action": "ENTER",
+            "conviction": 72,
+            "reason": "Funding gate veto",
+            "is_actionable": False
+        }
+    }
+
+    is_match, msg, diff = engine.replay_guard_decision(snapshot)
+    assert is_match is True
+    assert msg == "MATCH"
+    assert diff["replayed"]["action"] == "ENTER"
+    assert diff["replayed"]["decision"] == "LONG"
+
+
+def test_replay_incomplete_detection_on_strict(tmp_path):
+    """
+    Audit Point 3:
+    When strict=True or strategy is BREAKOUT without market_guard_inputs,
+    replay_guard_decision returns INCOMPLETE_REPLAY instead of synthetic MATCH.
+    """
+    engine = DecisionReplayEngine(filepath=str(tmp_path / "empty.jsonl"))
+
+    # Snapshot lacking market_guard_inputs
+    snapshot = {
+        "candidate_id": "BTC-USD:42",
+        "symbol": "BTC-USD",
+        "trading_profile": "BALANCED",
+        "router": {
+            "strategy_mode": "BREAKOUT",
+            "direction_bias": "LONG",
+            "has_directional_signal": True,
+            "reasoning": "Breakout"
+        },
+        "ceo": {
+            "decision": "LONG",
+            "conviction": 85,
+            "trade_action": "ENTER"
+        },
+        "guard": {
+            "decision": "LONG",
+            "action": "ENTER"
+        }
+    }
+
+    is_match, msg, diff = engine.replay_guard_decision(snapshot)
+    assert is_match is False
+    assert "INCOMPLETE_REPLAY" in msg
+

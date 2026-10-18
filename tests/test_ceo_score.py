@@ -338,3 +338,135 @@ def test_categorized_risk_penalties_anti_double_counting():
     assert result["trade_action"] in ["WAIT_FOR_PULLBACK", "HOLD"]
 
 
+def test_mtf_conflict_zero_contribution():
+    """
+    Audit Point 1:
+    Verifies that when 1H and 4H timeframes conflict (e.g. 1H Bullish vs 4H Bearish),
+    the MTF contribution is strictly 0.0 points.
+    LLM's positive mtf_trend (+30) must NOT override the conflict and turn it into BULLISH!
+    """
+    ceo = get_mock_ceo()
+    market_context = {
+        "multi_timeframe_context": {
+            "tf_1h": {"trend": "bullish"},
+            "tf_4h": {"trend": "bearish"}
+        }
+    }
+    # Bull 45, Bear 0, LLM mtf_trend 30
+    breakdown = {
+        "bull_argument": 45,
+        "bear_argument": 0,
+        "mtf_trend": 30
+    }
+    result = ceo._validate_and_compute_score("LONG", breakdown, market_context=market_context)
+
+    # MTF must be 0, so directional confidence is ONLY from bull_argument (45)
+    # If the bug was present, it would be 45 + 30 = 75!
+    assert result["directional_confidence"] == 45
+    assert result["trade_action"] == "HOLD"  # 45 < 60 directional confidence -> trade_action HOLD
+
+
+def test_mtf_unknown_fallback_to_llm():
+    """
+    Audit Point 1:
+    When timeframe data is UNKNOWN (no 1H or 4H data in market context),
+    fallback to explicit sign of LLM's mtf_trend is allowed.
+    """
+    ceo = get_mock_ceo()
+    market_context = {}  # Empty context -> UNKNOWN
+    breakdown = {
+        "bull_argument": 40,
+        "bear_argument": 0,
+        "mtf_trend": 30
+    }
+    result = ceo._validate_and_compute_score("LONG", breakdown, market_context=market_context)
+    assert result["directional_confidence"] == 70  # 40 + 30
+
+
+def test_risk_penalties_legacy_total_dict():
+    """
+    Audit Point 5:
+    When LLM provides a dictionary with only {"total": -20} without categorized keys,
+    the penalty must NOT be dropped to 0!
+    """
+    ceo = get_mock_ceo()
+    breakdown = {
+        "bull_argument": 45,
+        "bear_argument": 0,
+        "mtf_trend": 40,
+        "risk_penalties": {
+            "total": -20
+        }
+    }
+    result = ceo._validate_and_compute_score("LONG", breakdown, market_context={})
+    assert result["risk_penalties"] == -20
+    assert result["entry_quality"] == 85 - 20  # 65
+    assert result["risk_breakdown"]["total"] == -20
+
+
+def test_risk_penalties_anti_double_counting_with_explicit_total():
+    """
+    Audit Point 5:
+    When LLM provides both individual orthogonal categories AND an explicit total,
+    anti-double-counting ensures they are not summed twice.
+    """
+    ceo = get_mock_ceo()
+    breakdown = {
+        "bull_argument": 45,
+        "bear_argument": 0,
+        "mtf_trend": 40,
+        "risk_penalties": {
+            "price_extension": -10,
+            "macro_sentiment": -5,
+            "total": -15
+        }
+    }
+    result = ceo._validate_and_compute_score("LONG", breakdown, market_context={})
+    # Must NOT sum -15 (categories) + -15 (total) = -30
+    assert result["risk_penalties"] == -15
+    assert result["risk_breakdown"]["total"] == -15
+
+
+def test_debate_completeness_guard_veto():
+    """
+    Audit Point 2:
+    When debate_status != 'COMPLETE' (e.g. DEGRADED_BULL_FAILED or DEGRADED_BEAR_FAILED),
+    DeterministicGuard must deterministically veto ordinary trades to HOLD (tag: INCOMPLETE_DEBATE),
+    preventing trade entry on one-sided analytical failure.
+    """
+    from core.deterministic_guard import DeterministicGuard
+    from core.strategy_router import StrategyProfile
+    from agents.risk_manager import RiskManager
+
+    strat_profile = StrategyProfile(
+        has_directional_signal=True,
+        strategy_mode="TREND_FOLLOWING",
+        direction_bias="LONG",
+        reasoning="Trend test"
+    )
+    ceo_proposal = {
+        "decision": "LONG",
+        "conviction": 85,
+        "directional_confidence": 85,
+        "entry_quality": 85,
+        "trade_action": "ENTER",
+        "debate_status": "DEGRADED_BEAR_FAILED"  # Bear agent crashed
+    }
+    rm = MagicMock()
+    rm._get_profile_rules.return_value = {"min_conviction": 75}
+
+    decision = DeterministicGuard.evaluate(
+        strategy_profile=strat_profile,
+        ceo_proposal=ceo_proposal,
+        profile="BALANCED",
+        risk_manager=rm,
+        symbol="BTC-USD"
+    )
+
+    assert decision.decision == "HOLD"
+    assert decision.trade_action == "HOLD"
+    assert decision.rejection_tag == "INCOMPLETE_DEBATE"
+    assert decision.is_actionable is False
+
+
+

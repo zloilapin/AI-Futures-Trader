@@ -184,8 +184,10 @@ Provide a JSON strictly matching this schema:
     "bear_argument": -5,
     "mtf_trend": 15,
     "risk_penalties": {{
-      "rsi_extreme": 0,
-      "sentiment_euphoria": 0,
+      "price_extension": 0,
+      "macro_sentiment": 0,
+      "market_structure": 0,
+      "liquidity_friction": 0,
       "total": 0
     }}
   }},
@@ -328,6 +330,7 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
             "entry_quality": entry_quality,
             "risk_score": risk_score,
             "risk_penalties": total_penalty,
+            "risk_breakdown": score_res.get("risk_breakdown", {}),
             "trade_action": trade_action,
             "reasoning_en": reasoning,
             "reasoning_ru": llm_response.get("reasoning_ru", ""),
@@ -336,7 +339,10 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
             "hold_category": final_hold_category if decision == "HOLD" else "NONE",
             "primary_conviction": primary_conviction,
             "escalated": escalated,
-            "disputed_arbitration": disputed_arbitration
+            "disputed_arbitration": disputed_arbitration,
+            "debate_status": data.get("debate_status", "COMPLETE"),
+            "bull_status": data.get("bull_status", "OK"),
+            "bear_status": data.get("bear_status", "OK")
         }
 
     def _determine_hold_category(self, analyst_reports: list, conviction: int) -> str:
@@ -731,13 +737,34 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
         cat_liquidity = max(-10, llm_liq)
 
         # Orthogonal aggregation: sum independent categories
-        # Orthogonal aggregation: sum independent categories
         raw_categorized_sum = cat_price_extension + cat_macro_sentiment + cat_market_structure + cat_liquidity
 
+        category_keys = [
+            "rsi_extreme", "rsi_penalty", "overextended", "price_extension", "overbought", "oversold",
+            "sentiment_euphoria", "sentiment_fear", "macro_sentiment", "sentiment", "fear_greed",
+            "resistance", "support", "divergence", "structure", "market_structure",
+            "liquidity", "spread", "slippage", "orderbook", "liquidity_friction"
+        ]
+        has_recognized_components = any(k in llm_pen_dict for k in category_keys)
+
         final_penalty = raw_categorized_sum
-        if llm_penalty < 0 and not llm_pen_dict:
-            # If LLM gave a legacy flat number
-            final_penalty = min(final_penalty, llm_penalty)
+        if has_recognized_components:
+            # If explicit total was also passed in dictionary alongside categories, ensure anti-double-counting
+            if "total" in llm_pen_dict:
+                try:
+                    explicit_total = -abs(int(float(llm_pen_dict["total"])))
+                    # Take the more severe between categorized sum and explicit total without summing them twice
+                    final_penalty = min(final_penalty, explicit_total)
+                except (ValueError, TypeError):
+                    pass
+        else:
+            # Legacy or flat total compatibility path:
+            # When LLM provided only a flat penalty or an unsegmented 'total' key
+            if llm_penalty < 0:
+                final_penalty = min(final_penalty, llm_penalty)
+                # Map into structure for clean breakdown telemetry
+                if cat_price_extension == 0 and cat_macro_sentiment == 0 and cat_market_structure == 0 and cat_liquidity == 0:
+                    cat_market_structure = final_penalty
 
         # Cap cumulative penalties:
         # If pure unit test with capped LLM breakdown (-30 cap) and no market context:
@@ -804,41 +831,70 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
 
         # Deterministic Sign Assignment & Direction Separation:
         # Check actual observed MTF trend alignment from 1H and 4H timeframes.
-        # DO NOT allow proposed strategy direction_bias to overwrite real MTF market structure!
+        # DO NOT allow proposed strategy direction_bias or LLM score sign to overwrite real MTF market structure!
+        mtf_status = "UNKNOWN"
         observed_mtf_bias = "NEUTRAL"
         if market_context and isinstance(market_context, dict):
             mtf_ctx = market_context.get("multi_timeframe_context", {})
             if isinstance(mtf_ctx, dict):
                 tf_1h = mtf_ctx.get("tf_1h", {}) if isinstance(mtf_ctx.get("tf_1h"), dict) else {}
                 tf_4h = mtf_ctx.get("tf_4h", {}) if isinstance(mtf_ctx.get("tf_4h"), dict) else {}
-                t1 = str((tf_1h.get("trend") if isinstance(tf_1h, dict) else None) or mtf_ctx.get("trend_1h") or "").lower()
-                t4 = str((tf_4h.get("trend") if isinstance(tf_4h, dict) else None) or mtf_ctx.get("trend_4h") or "").lower()
+                t1 = str((tf_1h.get("trend") if isinstance(tf_1h, dict) else None) or mtf_ctx.get("trend_1h") or "").strip().lower()
+                t4 = str((tf_4h.get("trend") if isinstance(tf_4h, dict) else None) or mtf_ctx.get("trend_4h") or "").strip().lower()
 
                 is_bull_1h = t1 in ["bullish", "bull", "up"]
                 is_bear_1h = t1 in ["bearish", "bear", "down"]
                 is_bull_4h = t4 in ["bullish", "bull", "up"]
                 is_bear_4h = t4 in ["bearish", "bear", "down"]
+                has_1h = bool(t1)
+                has_4h = bool(t4)
 
-                # Handle timeframe alignment vs conflict
-                if (is_bull_1h and is_bear_4h) or (is_bear_1h and is_bull_4h):
-                    # 1H and 4H conflict: MTF trend is NOT a unified confirmation
-                    observed_mtf_bias = "NEUTRAL"
-                elif (is_bull_1h and is_bull_4h) or (is_bull_1h and not is_bear_4h) or (is_bull_4h and not is_bear_1h):
-                    if not (is_bear_1h or is_bear_4h):
-                        observed_mtf_bias = "BULLISH"
-                elif (is_bear_1h and is_bear_4h) or (is_bear_1h and not is_bull_4h) or (is_bear_4h and not is_bull_1h):
-                    if not (is_bull_1h or is_bull_4h):
-                        observed_mtf_bias = "BEARISH"
+                if has_1h or has_4h:
+                    # Handle timeframe alignment vs conflict
+                    if (is_bull_1h and is_bear_4h) or (is_bear_1h and is_bull_4h):
+                        # 1H and 4H conflict: MTF trend is in CONFLICT, zero confirmation
+                        mtf_status = "CONFLICT"
+                        observed_mtf_bias = "NEUTRAL"
+                    elif (is_bull_1h and is_bull_4h) or (is_bull_1h and not is_bear_4h and not is_bull_4h) or (is_bull_4h and not is_bear_1h and not is_bull_1h):
+                        if not (is_bear_1h or is_bear_4h):
+                            mtf_status = "ALIGNED_BULLISH"
+                            observed_mtf_bias = "BULLISH"
+                        else:
+                            mtf_status = "CONFLICT"
+                            observed_mtf_bias = "NEUTRAL"
+                    elif (is_bear_1h and is_bear_4h) or (is_bear_1h and not is_bull_4h and not is_bear_4h) or (is_bear_4h and not is_bull_1h and not is_bear_1h):
+                        if not (is_bull_1h or is_bull_4h):
+                            mtf_status = "ALIGNED_BEARISH"
+                            observed_mtf_bias = "BEARISH"
+                        else:
+                            mtf_status = "CONFLICT"
+                            observed_mtf_bias = "NEUTRAL"
+                    else:
+                        mtf_status = "NEUTRAL_CHOP"
+                        observed_mtf_bias = "NEUTRAL"
+                else:
+                    mtf_status = "UNKNOWN"
 
-        # If observed_mtf_bias is still neutral, determine strictly by explicit sign of LLM's mtf_trend score
-        if observed_mtf_bias == "NEUTRAL":
+        # Safe Fallback Handling:
+        # If CONFLICT or NEUTRAL_CHOP: MTF contribution is strictly 0.0 (LLM cannot override conflict)
+        if mtf_status in ["CONFLICT", "NEUTRAL_CHOP"]:
+            raw_mtf = 0.0
+            bull_mtf_contrib = 0.0
+            bear_mtf_contrib = 0.0
+        elif mtf_status == "UNKNOWN":
+            # ONLY when objective market context is missing/unknown, allow fallback to explicit LLM sign
             if raw_mtf_signed > 0:
                 observed_mtf_bias = "BULLISH"
             elif raw_mtf_signed < 0:
                 observed_mtf_bias = "BEARISH"
-
-        bull_mtf_contrib = raw_mtf if observed_mtf_bias == "BULLISH" else 0.0
-        bear_mtf_contrib = raw_mtf if observed_mtf_bias == "BEARISH" else 0.0
+            else:
+                observed_mtf_bias = "NEUTRAL"
+            bull_mtf_contrib = raw_mtf if observed_mtf_bias == "BULLISH" else 0.0
+            bear_mtf_contrib = raw_mtf if observed_mtf_bias == "BEARISH" else 0.0
+        else:
+            # ALIGNED_BULLISH or ALIGNED_BEARISH
+            bull_mtf_contrib = raw_mtf if observed_mtf_bias == "BULLISH" else 0.0
+            bear_mtf_contrib = raw_mtf if observed_mtf_bias == "BEARISH" else 0.0
 
         total_bull = raw_bull + bull_mtf_contrib
         total_bear = raw_bear + bear_mtf_contrib
