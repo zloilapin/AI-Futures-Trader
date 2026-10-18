@@ -751,6 +751,7 @@ class TradingPipeline:
                     
                 self.services.logger.info(f"[Stage 5] Risk Manager (Macro Profile: {profile}, Candidate Profile: {effective_asset_profile}, Regime: {detected_regime}) проверяет параметры сделки для {symbol}...")
                 portfolio_data["active_positions"] = self.services.trading_service.active_positions
+                portfolio_data["pending_reconciliations"] = getattr(self.services.trading_service, "pending_reconciliations", {})
                 portfolio_data["strict_portfolio_health"] = True
                 risk_verdict = await self.agents.risk.analyze(
                     final_trade_decision, 

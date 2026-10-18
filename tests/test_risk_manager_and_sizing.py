@@ -1654,6 +1654,8 @@ async def test_nado_trading_service_pre_dispatch_min_size_and_notional_rejection
     from unittest.mock import MagicMock
 
     service = NadoTradingService()
+    service.active_positions.clear()
+    service.pending_reconciliations.clear()
     service.is_connected = True
     service.client = MagicMock()
     service._market_cache = {2: MagicMock()}
@@ -1693,6 +1695,8 @@ async def test_nado_trading_service_pre_dispatch_risk_breach_veto():
     from unittest.mock import MagicMock
 
     service = NadoTradingService()
+    service.active_positions.clear()
+    service.pending_reconciliations.clear()
     service.is_connected = True
     mock_client = MagicMock()
     service.client = mock_client
@@ -1997,6 +2001,8 @@ async def test_partial_fill_emergency_protect_defined_vars_and_no_unbound_error(
     """
     from services.nado_trading_service import NadoTradingService
     service = NadoTradingService()
+    service.active_positions.clear()
+    service.pending_reconciliations.clear()
     service.is_connected = True
     mock_client = MagicMock()
     service.client = mock_client
@@ -2050,6 +2056,8 @@ async def test_pre_dispatch_stress_loss_breach_veto():
     """
     from services.nado_trading_service import NadoTradingService
     service = NadoTradingService()
+    service.active_positions.clear()
+    service.pending_reconciliations.clear()
     service.is_connected = True
     mock_client = MagicMock()
     service.client = mock_client
@@ -2237,6 +2245,8 @@ async def test_pre_dispatch_aborts_on_missing_or_zero_sl():
     mock_client = MagicMock()
     mock_client.market.place_order = AsyncMock()
     service = NadoTradingService()
+    service.active_positions.clear()
+    service.pending_reconciliations.clear()
     service.client = mock_client
     service.is_connected = True
     service.wallet = MagicMock()
@@ -2271,6 +2281,8 @@ async def test_pre_dispatch_aborts_on_missing_or_zero_approved_risk():
     mock_client = MagicMock()
     mock_client.market.place_order = AsyncMock()
     service = NadoTradingService()
+    service.active_positions.clear()
+    service.pending_reconciliations.clear()
     service.client = mock_client
     service.is_connected = True
     service.wallet = MagicMock()
@@ -2296,26 +2308,175 @@ async def test_pre_dispatch_aborts_on_missing_or_zero_approved_risk():
 
 
 @pytest.mark.asyncio
-async def test_partial_fill_emergency_close_when_sl_price_zero():
+async def test_protective_limit_price_rounding_short_and_long():
     """
-    P1 Audit Followup (Point 1 & Item 3.B):
-    Tests post-fill behavior when sl_price <= 0:
-    Verifies that emergency_protect_risk_breach is invoked with defined numeric values,
-    does NOT crash with UnboundLocalError, and aborts with ABORTED_PROTECTION_FAILURE.
+    P1 Audit Requirement (Point 1):
+    Protective rounding of limit price based on trade direction:
+    - LONG: round DOWN (floor) to price_increment so buy limit never exceeds allowed max.
+    - SHORT: round UP (ceil) to price_increment so sell limit never drops below allowed min.
     """
     from services.nado_trading_service import NadoTradingService
     mock_client = MagicMock()
-    # Order fills
-    mock_fill_resp = MagicMock()
-    mock_fill_resp.data.digest = "0xdigest_fill"
-    mock_client.market.place_order = AsyncMock(return_value=mock_fill_resp)
+    captured_orders = []
+    
+    def capture_order(params):
+        captured_orders.append(params.order)
+        res = MagicMock()
+        res.data.digest = f"0xdigest_{len(captured_orders)}"
+        return res
 
-    service = NadoTradingService(nado_client=mock_client)
+    mock_client.market.place_order.side_effect = capture_order
+    # Mock instant fill
+    mock_hist = MagicMock()
+    mock_hist.orders = [MagicMock(base_filled=str(int(0.01 * 1e18)), quote_filled=str(int(600.0 * 1e18)))]
+    mock_client.market.get_historical_orders_by_digest.return_value = mock_hist
+    mock_trigger_res = MagicMock()
+    mock_trigger_res.data.digest = "0xtrigger"
+    mock_client.market.place_price_trigger_order.return_value = mock_trigger_res
+
+    service = NadoTradingService()
+    service.active_positions.clear()
+    service.pending_reconciliations.clear()
+    service.client = mock_client
     service.is_connected = True
     service.wallet = MagicMock()
     service.wallet.get_address.return_value = "0x1234567890123456789012345678901234567890"
     service.default_subaccount_id = "0x" + "11" * 32
     service.product_map = {"BTC": 2, "BTC-USD": 2}
+    service._market_cache = {2: MagicMock()}
+    service._get_market_parameters = MagicMock(return_value={
+        "size_increment_base": 0.001,
+        "size_increment_x18": int(0.001 * 1e18),
+        "price_increment_x18": int(1.0 * 1e18),  # Tick size is $1.00
+        "min_size": 0.001,
+        "min_notional": 0.0
+    })
+
+    with patch.object(service, "_save_positions"):
+        # 1. SHORT with fractional limit price $59,970.50 (raw_limit = 59970.50)
+        # Ceiling rounding must yield $59,971.00 (>= 59970.50), never selling cheaper than permitted!
+        captured_orders.clear()
+        ok_short = await service.open_position(
+            symbol="BTC-USD", direction="SHORT", entry_price=60000.0,
+            notional_usd=600.0, tp_price=57000.0, sl_price=61000.0, leverage=10,
+            contracts=0.01, limit_price=59970.50, approved_risk_usd=20.0
+        )
+        assert ok_short is True
+        assert len(captured_orders) == 1
+        short_price_x18 = captured_orders[0].priceX18
+        assert short_price_x18 == 59971 * 10**18  # Ceil rounded: $59,971.00 >= $59,970.50!
+
+        # 2. LONG with fractional limit price $60,029.50 (raw_limit = 60029.50)
+        # Floor rounding must yield $60,029.00 (<= 60029.50), never buying more expensive than permitted!
+        service.active_positions.clear()
+        captured_orders.clear()
+        ok_long = await service.open_position(
+            symbol="BTC-USD", direction="LONG", entry_price=60000.0,
+            notional_usd=600.0, tp_price=63000.0, sl_price=59000.0, leverage=10,
+            contracts=0.01, limit_price=60029.50, approved_risk_usd=20.0
+        )
+        assert ok_long is True
+        assert len(captured_orders) == 1
+        long_price_x18 = captured_orders[0].priceX18
+        assert long_price_x18 == 60029 * 10**18  # Floor rounded: $60,029.00 <= $60,029.50!
+
+
+@pytest.mark.asyncio
+async def test_open_position_sl_tp_geometry_validation():
+    """
+    P1 Audit Requirement (Point 2):
+    Validates strict geometry invariants for SL and TP relative to direction and entry/limit prices:
+    - LONG: requires 0 < SL < Entry and TP > Entry
+    - SHORT: requires SL > Entry and 0 < TP < Entry
+    Any geometry violation must abort with INVALID_STOP_GEOMETRY or INVALID_TP_GEOMETRY before place_order!
+    """
+    from services.nado_trading_service import NadoTradingService
+    mock_client = MagicMock()
+    mock_client.market.place_order = AsyncMock()
+
+    service = NadoTradingService()
+    service.active_positions.clear()
+    service.pending_reconciliations.clear()
+    service.client = mock_client
+    service.is_connected = True
+    service.wallet = MagicMock()
+    service.wallet.get_address.return_value = "0x1234567890123456789012345678901234567890"
+    service.default_subaccount_id = "0x" + "11" * 32
+    service.product_map = {"BTC": 2, "BTC-USD": 2}
+
+    # Case 1: LONG with SL above entry (entry=60000, sl=60500) -> Inverted Stop!
+    ok1 = await service.open_position(
+        "BTC-USD", "LONG", 60000.0, 600.0, 62000.0, 60500.0, 10,
+        contracts=0.01, approved_risk_usd=20.0
+    )
+    assert ok1 is False
+    assert service.last_execution_status == "INVALID_STOP_GEOMETRY"
+    assert mock_client.market.place_order.called is False
+
+    # Case 2: LONG with TP below entry (entry=60000, tp=59000) -> Inverted TP!
+    ok2 = await service.open_position(
+        "BTC-USD", "LONG", 60000.0, 600.0, 59000.0, 59500.0, 10,
+        contracts=0.01, approved_risk_usd=20.0
+    )
+    assert ok2 is False
+    assert service.last_execution_status == "INVALID_TP_GEOMETRY"
+    assert mock_client.market.place_order.called is False
+
+    # Case 3: SHORT with SL below entry (entry=60000, sl=59500) -> Inverted Stop!
+    ok3 = await service.open_position(
+        "BTC-USD", "SHORT", 60000.0, 600.0, 58000.0, 59500.0, 10,
+        contracts=0.01, approved_risk_usd=20.0
+    )
+    assert ok3 is False
+    assert service.last_execution_status == "INVALID_STOP_GEOMETRY"
+    assert mock_client.market.place_order.called is False
+
+    # Case 4: SHORT with TP above entry (entry=60000, tp=61000) -> Inverted TP!
+    ok4 = await service.open_position(
+        "BTC-USD", "SHORT", 60000.0, 600.0, 61000.0, 60500.0, 10,
+        contracts=0.01, approved_risk_usd=20.0
+    )
+    assert ok4 is False
+    assert service.last_execution_status == "INVALID_TP_GEOMETRY"
+    assert mock_client.market.place_order.called is False
+
+
+@pytest.mark.asyncio
+async def test_real_partial_fill_execution_path_and_emergency_close():
+    """
+    P1/P2 Audit Requirement (Point 3):
+    Real end-to-end simulation of partial fill execution path through open_position():
+    1. Order is placed and accepted by exchange sequencer.
+    2. Sequencer reports partial fill (e.g. 0.04 BTC filled out of 0.10 BTC requested = 40% < 95%).
+    3. Service detects partial fill, registers position, and triggers emergency close on actual contracts.
+    4. Confirms honest status classification: ABORTED_PARTIAL_FILL on close success,
+       or RISK_BREACH_UNRESOLVED if emergency close fails/indexer lags.
+    """
+    from services.nado_trading_service import NadoTradingService
+    mock_client = MagicMock()
+    mock_fill_resp = MagicMock()
+    mock_fill_resp.data.digest = "0xreal_order_digest"
+    mock_client.market.place_order = MagicMock(return_value=mock_fill_resp)
+
+    # Historical orders reports 0.04 BTC filled out of 0.10 BTC (40% partial fill)
+    mock_hist_order = MagicMock()
+    mock_hist_order.digest = "0xreal_order_digest"
+    mock_hist_order.base_filled = str(int(0.04 * 1e18))
+    mock_hist_order.quote_filled = str(int(2400.0 * 1e18))  # filled at 60000.0
+    mock_client.market.get_historical_orders_by_digest = MagicMock(
+        return_value=MagicMock(orders=[mock_hist_order])
+    )
+
+    service = NadoTradingService()
+    service.active_positions.clear()
+    service.pending_reconciliations.clear()
+    service.client = mock_client
+    service.is_connected = True
+    service.wallet = MagicMock()
+    service.wallet.get_address.return_value = "0x1234567890123456789012345678901234567890"
+    service.default_subaccount_id = "0x" + "11" * 32
+    service.product_map = {"BTC": 2, "BTC-USD": 2}
+    service._market_cache = {2: MagicMock()}
     service._get_market_parameters = MagicMock(return_value={
         "size_increment_base": 0.001,
         "size_increment_x18": int(0.001 * 1e18),
@@ -2324,25 +2485,130 @@ async def test_partial_fill_emergency_close_when_sl_price_zero():
         "min_notional": 0.0
     })
 
-    # Mock historical orders to simulate actual filled amount
-    mock_hist_order = MagicMock()
-    mock_hist_order.digest = "0xdigest_fill"
-    mock_hist_order.base_filled = str(int(0.01 * 1e18))
-    mock_hist_order.price = str(int(60000.0 * 1e18))
-    mock_client.market.get_subaccount_historical_orders = AsyncMock(return_value=MagicMock(orders=[mock_hist_order]))
-    service.emergency_protect_risk_breach = AsyncMock(return_value=(True, 0.0))
-
-    # Temporarily bypass pre-dispatch to test post-fill with zero sl
-    # Post-fill branch at line ~830: if sl_price <= 0: emergency close
-    service.active_positions["BTC-USD"] = {
-        "symbol": "BTC-USD",
-        "entry_price": 60000.0,
-        "sl_price": 0.0,
-        "contracts": 0.01
-    }
-    close_ok, _ = await service.emergency_protect_risk_breach("BTC-USD", approved_risk=10.0, actual_risk=0.0)
-    assert close_ok is True
+    # Scenario A: Emergency close succeeds
+    service.emergency_protect_risk_breach = AsyncMock(return_value=(True, -5.0))
+    with patch("asyncio.sleep", AsyncMock()), patch.object(service, "_save_positions"):
+        ok_a = await service.open_position(
+            "BTC-USD", "LONG", 60000.0, 6000.0, 62000.0, 59000.0, 10,
+            contracts=0.10, approved_risk_usd=150.0
+        )
+    assert ok_a is False
+    assert service.last_execution_status == "ABORTED_PARTIAL_FILL"
+    assert service.last_execution_details["actual_base_amount"] == 0.04
     assert service.emergency_protect_risk_breach.called is True
+
+    # Scenario B: Emergency close fails / unconfirmed -> RISK_BREACH_UNRESOLVED
+    service.active_positions.clear()
+    service.emergency_protect_risk_breach = AsyncMock(return_value=(False, 0.0))
+    with patch("asyncio.sleep", AsyncMock()), patch.object(service, "_save_positions"):
+        ok_b = await service.open_position(
+            "BTC-USD", "LONG", 60000.0, 6000.0, 62000.0, 59000.0, 10,
+            contracts=0.10, approved_risk_usd=150.0
+        )
+    assert ok_b is False
+    assert service.last_execution_status == "RISK_BREACH_UNRESOLVED"
+
+
+@pytest.mark.asyncio
+async def test_real_post_fill_calculator_error_fails_closed():
+    """
+    P1/P2 Audit Requirement (Point 3):
+    Verifies that if estimate_total_loss raises ValueError after a real fill,
+    open_position() does not crash with UnboundLocalError, immediately triggers
+    emergency_protect_risk_breach, and fails closed with ABORTED_CALC_ERROR.
+    """
+    from services.nado_trading_service import NadoTradingService
+    mock_client = MagicMock()
+    mock_fill_resp = MagicMock()
+    mock_fill_resp.data.digest = "0xcalc_err_order"
+    mock_client.market.place_order = MagicMock(return_value=mock_fill_resp)
+
+    # 100% fill (0.10 BTC)
+    mock_hist_order = MagicMock()
+    mock_hist_order.digest = "0xcalc_err_order"
+    mock_hist_order.base_filled = str(int(0.10 * 1e18))
+    mock_hist_order.quote_filled = str(int(6000.0 * 1e18))
+    mock_client.market.get_historical_orders_by_digest = MagicMock(
+        return_value=MagicMock(orders=[mock_hist_order])
+    )
+
+    service = NadoTradingService()
+    service.active_positions.clear()
+    service.pending_reconciliations.clear()
+    service.client = mock_client
+    service.is_connected = True
+    service.wallet = MagicMock()
+    service.wallet.get_address.return_value = "0x1234567890123456789012345678901234567890"
+    service.default_subaccount_id = "0x" + "11" * 32
+    service.product_map = {"BTC": 2, "BTC-USD": 2}
+    service._market_cache = {2: MagicMock()}
+    service._get_market_parameters = MagicMock(return_value={
+        "size_increment_base": 0.001,
+        "size_increment_x18": int(0.001 * 1e18),
+        "price_increment_x18": int(1.0 * 1e18),
+        "min_size": 0.001,
+        "min_notional": 0.0
+    })
+
+    service.emergency_protect_risk_breach = AsyncMock(return_value=(True, -2.0))
+
+    # Pre-dispatch succeeds, but post-fill check encounters corrupted data -> ValueError
+    from core import risk_calculator
+    orig_estimate = risk_calculator.estimate_total_loss
+    call_count = [0]
+
+    def faulty_estimate(**kwargs):
+        call_count[0] += 1
+        if call_count[0] > 1:  # Second call is post-fill
+            raise ValueError("Corrupted tick prices post-fill")
+        return orig_estimate(**kwargs)
+
+    with patch("core.risk_calculator.estimate_total_loss", side_effect=faulty_estimate):
+        with patch("asyncio.sleep", AsyncMock()), patch.object(service, "_save_positions"):
+            ok = await service.open_position(
+                "BTC-USD", "LONG", 60000.0, 6000.0, 62000.0, 59000.0, 10,
+                contracts=0.10, approved_risk_usd=150.0
+            )
+
+    assert ok is False
+    assert service.last_execution_status == "ABORTED_CALC_ERROR"
+    assert service.emergency_protect_risk_breach.called is True
+
+
+@pytest.mark.asyncio
+async def test_open_position_blocks_on_pending_reconciliation_incident():
+    """
+    P2 Audit Requirement (Point 4):
+    Verifies that if pending_reconciliations contains an unresolved incident,
+    open_position() immediately refuses to dispatch new orders before network calls.
+    """
+    from services.nado_trading_service import NadoTradingService
+    mock_client = MagicMock()
+    mock_client.market.place_order = AsyncMock()
+
+    service = NadoTradingService()
+    service.active_positions.clear()
+    service.pending_reconciliations.clear()
+    service.client = mock_client
+    service.is_connected = True
+    service.wallet = MagicMock()
+    service.wallet.get_address.return_value = "0x1234567890123456789012345678901234567890"
+    service.default_subaccount_id = "0x" + "11" * 32
+    service.product_map = {"BTC": 2, "BTC-USD": 2}
+
+    # Inject unresolved incident in pending_reconciliations
+    service.pending_reconciliations["BTC-USD"] = {
+        "status": "PENDING_ORDER_RECONCILIATION",
+        "symbol": "BTC-USD"
+    }
+
+    ok = await service.open_position(
+        "BTC-USD", "LONG", 60000.0, 600.0, 62000.0, 59000.0, 10,
+        contracts=0.01, approved_risk_usd=10.0
+    )
+    assert ok is False
+    assert service.last_execution_status == "RISK_BREACH_UNRESOLVED"
+    assert mock_client.market.place_order.called is False
 
 
 @pytest.mark.asyncio
@@ -2382,6 +2648,8 @@ async def test_nado_open_position_blocks_on_portfolio_unresolved_risk_breach():
     mock_client = MagicMock()
     mock_client.market.place_order = AsyncMock()
     service = NadoTradingService(nado_client=mock_client)
+    service.active_positions.clear()
+    service.pending_reconciliations.clear()
     service.is_connected = True
     service.wallet = MagicMock()
     service.wallet.get_address.return_value = "0x1234567890123456789012345678901234567890"

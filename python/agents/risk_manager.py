@@ -478,6 +478,21 @@ class RiskManager(BaseAgent):
                 log_fn(f"[{self.name}] 🚨 RISK_BREACH_UNRESOLVED VETO: {msg}")
                 return self._build_veto_result("RISK_BREACH_UNRESOLVED", msg, trade_action)
 
+        pending_recs = portfolio_data.get("pending_reconciliations") or {}
+        if isinstance(pending_recs, dict):
+            for rec_k, rec_v in pending_recs.items():
+                if isinstance(rec_v, dict):
+                    rec_status = rec_v.get("status")
+                    rec_prot = rec_v.get("protection_state")
+                    rec_reason = rec_v.get("reason")
+                    if (rec_status in ["PENDING_ORDER_RECONCILIATION", "RISK_BREACH_UNRESOLVED"] or
+                        rec_prot == "RISK_BREACH_UNRESOLVED" or
+                        rec_reason in ["RISK_BREACH", "RISK_BREACH_UNRESOLVED"]):
+                        msg = f"Critical risk incident pending reconciliation on {rec_k}! New trades strictly blocked."
+                        log_fn = getattr(self.logger, "critical", self.logger.error)
+                        log_fn(f"[{self.name}] 🚨 RISK_BREACH_UNRESOLVED VETO: {msg}")
+                        return self._build_veto_result("RISK_BREACH_UNRESOLVED", msg, trade_action)
+
         # Gate 2.2: Maximum Concurrent Positions Veto Gate
         max_positions = profile_rules.get("max_concurrent_positions", getattr(config, "MAX_CONCURRENT_POSITIONS", 3))
         num_active = len(unique_positions)

@@ -423,16 +423,35 @@ class NadoTradingService(BaseTradingService):
         self.last_execution_status = "PENDING"
         self.last_execution_details = {}
 
-        # Guard: Unresolved risk breach in portfolio blocks all new trades (P1 / Item 3.A)
+        # Guard: Unresolved risk breach in portfolio or pending reconciliations blocks all new trades (P1 / Item 3.A & Audit P2)
         for pos_k, pos_v in self.active_positions.items():
-            if isinstance(pos_v, dict) and pos_v.get("protection_state") == "RISK_BREACH_UNRESOLVED":
-                logger.critical(
-                    f"[NadoTradingService] 🛑 Refusing to open new position on {symbol}: "
-                    f"portfolio contains unresolved risk breach on {pos_k}! Resolve risk breach first."
-                )
-                self.last_execution_status = "RISK_BREACH_UNRESOLVED"
-                self.last_execution_details = {"reason": "PORTFOLIO_HAS_UNRESOLVED_RISK_BREACH", "breached_symbol": pos_k}
-                return False
+            if isinstance(pos_v, dict):
+                prot_state = pos_v.get("protection_state")
+                if prot_state == "RISK_BREACH_UNRESOLVED" or pos_v.get("requires_reconciliation"):
+                    logger.critical(
+                        f"[NadoTradingService] 🛑 Refusing to open new position on {symbol}: "
+                        f"portfolio contains unresolved risk breach on {pos_k} (state={prot_state})! Resolve risk breach first."
+                    )
+                    self.last_execution_status = "RISK_BREACH_UNRESOLVED"
+                    self.last_execution_details = {"reason": "PORTFOLIO_HAS_UNRESOLVED_RISK_BREACH", "breached_symbol": pos_k, "state": prot_state}
+                    return False
+
+        pending_recs = getattr(self, "pending_reconciliations", {}) or {}
+        for rec_k, rec_v in pending_recs.items():
+            if isinstance(rec_v, dict):
+                rec_status = rec_v.get("status")
+                rec_prot = rec_v.get("protection_state")
+                rec_reason = rec_v.get("reason")
+                if (rec_status in ["PENDING_ORDER_RECONCILIATION", "RISK_BREACH_UNRESOLVED"] or
+                    rec_prot == "RISK_BREACH_UNRESOLVED" or
+                    rec_reason in ["RISK_BREACH", "RISK_BREACH_UNRESOLVED"]):
+                    logger.critical(
+                        f"[NadoTradingService] 🛑 Refusing to open new position on {symbol}: "
+                        f"pending incident reconciliation on {rec_k} (status={rec_status}, prot={rec_prot})! Resolve incident first."
+                    )
+                    self.last_execution_status = "RISK_BREACH_UNRESOLVED"
+                    self.last_execution_details = {"reason": "PENDING_RECONCILIATION_UNRESOLVED_INCIDENT", "breached_symbol": rec_k, "status": rec_status}
+                    return False
 
         clean_sym = symbol.replace('/', '-').strip().upper()
         base_sym = clean_sym.split('-')[0]
@@ -473,6 +492,63 @@ class NadoTradingService(BaseTradingService):
             self.last_execution_status = "REJECTED_BY_EXCHANGE"
             self.last_execution_details = {"reason": f"Invalid tp_price ({tp_price})"}
             return False
+
+        # Strict Geometry Invariants: verify SL and TP are on the correct side of entry price (P1)
+        dir_clean_early = str(direction).strip().upper()
+        if dir_clean_early == "LONG":
+            if sl_price >= entry_price:
+                logger.error(
+                    f"[NadoTradingService] ❌ INVALID_STOP_GEOMETRY for LONG: "
+                    f"sl_price ({sl_price}) must be strictly below entry_price ({entry_price})."
+                )
+                self.last_execution_status = "INVALID_STOP_GEOMETRY"
+                self.last_execution_details = {
+                    "reason": "SL_ABOVE_OR_EQUAL_ENTRY",
+                    "direction": "LONG",
+                    "sl_price": sl_price,
+                    "entry_price": entry_price
+                }
+                return False
+            if tp_price > 0 and tp_price <= entry_price:
+                logger.error(
+                    f"[NadoTradingService] ❌ INVALID_TP_GEOMETRY for LONG: "
+                    f"tp_price ({tp_price}) must be strictly above entry_price ({entry_price})."
+                )
+                self.last_execution_status = "INVALID_TP_GEOMETRY"
+                self.last_execution_details = {
+                    "reason": "TP_BELOW_OR_EQUAL_ENTRY",
+                    "direction": "LONG",
+                    "tp_price": tp_price,
+                    "entry_price": entry_price
+                }
+                return False
+        elif dir_clean_early == "SHORT":
+            if sl_price <= entry_price:
+                logger.error(
+                    f"[NadoTradingService] ❌ INVALID_STOP_GEOMETRY for SHORT: "
+                    f"sl_price ({sl_price}) must be strictly above entry_price ({entry_price})."
+                )
+                self.last_execution_status = "INVALID_STOP_GEOMETRY"
+                self.last_execution_details = {
+                    "reason": "SL_BELOW_OR_EQUAL_ENTRY",
+                    "direction": "SHORT",
+                    "sl_price": sl_price,
+                    "entry_price": entry_price
+                }
+                return False
+            if tp_price > 0 and (tp_price >= entry_price or tp_price <= 0):
+                logger.error(
+                    f"[NadoTradingService] ❌ INVALID_TP_GEOMETRY for SHORT: "
+                    f"tp_price ({tp_price}) must be strictly below entry_price ({entry_price}) and > 0."
+                )
+                self.last_execution_status = "INVALID_TP_GEOMETRY"
+                self.last_execution_details = {
+                    "reason": "TP_ABOVE_OR_EQUAL_ENTRY",
+                    "direction": "SHORT",
+                    "tp_price": tp_price,
+                    "entry_price": entry_price
+                }
+                return False
             
         logger.info(f"[NadoTradingService] 🚀 Routing {direction} {symbol} to Nado DEX...")
         
@@ -544,7 +620,13 @@ class NadoTradingService(BaseTradingService):
             abs_amount_x18 = (abs_amount_x18 // size_increment) * size_increment
             amount_x18 = abs_amount_x18 if amount_x18 >= 0 else -abs_amount_x18
             
-            price_x18 = (price_x18 // price_increment) * price_increment
+            # Directional Protective Limit Price Rounding (P1-1 Audit):
+            # LONG: buy limit rounded down (floor) so max purchase price never exceeds raw_limit.
+            # SHORT: sell limit rounded up (ceil) so min selling price never drops below raw_limit.
+            if dir_clean == "LONG":
+                price_x18 = (price_x18 // price_increment) * price_increment
+            else: # SHORT
+                price_x18 = ((price_x18 + price_increment - 1) // price_increment) * price_increment
             final_limit_price = float(Decimal(price_x18) / Decimal(10**18))
             
             if amount_x18 == 0:
@@ -605,6 +687,62 @@ class NadoTradingService(BaseTradingService):
                 self.last_execution_status = "INVALID_SIZE"
                 self.last_execution_details = {"reason": "INVALID_CONTRACTS", "contracts": final_contracts}
                 return False
+
+            # Final limit price geometry re-verification (P1)
+            if dir_clean == "LONG":
+                if float(sl_price) >= final_limit_price:
+                    logger.error(
+                        f"[NadoTradingService] ❌ INVALID_STOP_GEOMETRY for LONG: "
+                        f"sl_price ({sl_price}) >= final_limit_price ({final_limit_price})."
+                    )
+                    self.last_execution_status = "INVALID_STOP_GEOMETRY"
+                    self.last_execution_details = {
+                        "reason": "SL_ABOVE_OR_EQUAL_LIMIT_PRICE",
+                        "direction": "LONG",
+                        "sl_price": sl_price,
+                        "final_limit_price": final_limit_price
+                    }
+                    return False
+                if tp_price > 0 and float(tp_price) <= final_limit_price:
+                    logger.error(
+                        f"[NadoTradingService] ❌ INVALID_TP_GEOMETRY for LONG: "
+                        f"tp_price ({tp_price}) <= final_limit_price ({final_limit_price})."
+                    )
+                    self.last_execution_status = "INVALID_TP_GEOMETRY"
+                    self.last_execution_details = {
+                        "reason": "TP_BELOW_OR_EQUAL_LIMIT_PRICE",
+                        "direction": "LONG",
+                        "tp_price": tp_price,
+                        "final_limit_price": final_limit_price
+                    }
+                    return False
+            elif dir_clean == "SHORT":
+                if float(sl_price) <= final_limit_price:
+                    logger.error(
+                        f"[NadoTradingService] ❌ INVALID_STOP_GEOMETRY for SHORT: "
+                        f"sl_price ({sl_price}) <= final_limit_price ({final_limit_price})."
+                    )
+                    self.last_execution_status = "INVALID_STOP_GEOMETRY"
+                    self.last_execution_details = {
+                        "reason": "SL_BELOW_OR_EQUAL_LIMIT_PRICE",
+                        "direction": "SHORT",
+                        "sl_price": sl_price,
+                        "final_limit_price": final_limit_price
+                    }
+                    return False
+                if tp_price > 0 and (float(tp_price) >= final_limit_price or float(tp_price) <= 0):
+                    logger.error(
+                        f"[NadoTradingService] ❌ INVALID_TP_GEOMETRY for SHORT: "
+                        f"tp_price ({tp_price}) >= final_limit_price ({final_limit_price}) or <= 0."
+                    )
+                    self.last_execution_status = "INVALID_TP_GEOMETRY"
+                    self.last_execution_details = {
+                        "reason": "TP_ABOVE_OR_EQUAL_LIMIT_PRICE",
+                        "direction": "SHORT",
+                        "tp_price": tp_price,
+                        "final_limit_price": final_limit_price
+                    }
+                    return False
 
             from core.risk_calculator import estimate_total_loss, calculate_max_allowed_stress_loss
             try:

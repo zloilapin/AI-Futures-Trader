@@ -530,6 +530,8 @@ def create_test_pipeline(mock_logger, mock_llm):
     mock_services.trading_service.get_portfolio_summary = AsyncMock(return_value={
         "total_usd": 1000.0,
         "available_margin": 1000.0,
+        "maintenance_health_usd": 1000.0,
+        "daily_drawdown_pct": 0.0,
         "active_positions": {}
     })
     mock_services.trading_service.get_market_limits = AsyncMock(return_value={
