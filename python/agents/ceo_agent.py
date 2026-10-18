@@ -32,19 +32,32 @@ def normalize_mtf_trend(raw_trend: Any) -> Optional[str]:
     Canonical MTF trend normalizer:
     Normalizes raw timeframe trend string into 'BULLISH', 'BEARISH', 'NEUTRAL', or None.
     Handles variants produced by MarketDataService and analysts:
-    e.g. 'bullish', 'bullish_trend', 'bull', 'uptrend', 'up', 'long' -> 'BULLISH'
-         'bearish', 'bearish_trend', 'bear', 'downtrend', 'down', 'short' -> 'BEARISH'
-         'neutral', 'neutral_trend', 'flat', 'chop', 'mixed_chop', 'sideways', 'range', 'consolidation' -> 'NEUTRAL'
+    e.g. 'bullish', 'bullish_trend', 'bull', 'uptrend', 'up', 'long', 'strong_bullish', 'strong_uptrend' -> 'BULLISH'
+         'bearish', 'bearish_trend', 'bear', 'downtrend', 'down', 'short', 'strong_bearish', 'strong_downtrend' -> 'BEARISH'
+         'neutral', 'neutral_trend', 'flat', 'chop', 'mixed_chop', 'sideways', 'range', 'range_bound', 'rangebound', 'consolidation' -> 'NEUTRAL'
     Returns None for missing, unpopulated, or invalid strings ('unknown', 'n/a', 'unavailable', 'none', '').
     """
-    if not raw_trend or not isinstance(raw_trend, (str, bytes)):
+    if raw_trend is None:
         return None
-    s = str(raw_trend).strip().lower().replace("-", "_").replace(" ", "_")
-    if s in ["bullish", "bull", "up", "bullish_trend", "uptrend", "long"]:
+    if isinstance(raw_trend, bytes):
+        try:
+            s_raw = raw_trend.decode("utf-8", errors="ignore")
+        except Exception:
+            return None
+    elif isinstance(raw_trend, str):
+        s_raw = raw_trend
+    else:
+        return None
+
+    s = s_raw.strip().lower().replace("-", "_").replace(" ", "_")
+    if not s or s in ["unknown", "n/a", "na", "unavailable", "none", "null"]:
+        return None
+
+    if s in ["bullish", "bull", "up", "bullish_trend", "uptrend", "long", "strong_bullish", "strong_uptrend"]:
         return "BULLISH"
-    if s in ["bearish", "bear", "down", "bearish_trend", "downtrend", "short"]:
+    if s in ["bearish", "bear", "down", "bearish_trend", "downtrend", "short", "strong_bearish", "strong_downtrend"]:
         return "BEARISH"
-    if s in ["neutral", "flat", "chop", "mixed_chop", "sideways", "range", "consolidation", "neutral_trend"]:
+    if s in ["neutral", "flat", "chop", "mixed_chop", "sideways", "range", "consolidation", "neutral_trend", "range_bound", "rangebound"]:
         return "NEUTRAL"
     return None
 

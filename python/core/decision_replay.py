@@ -15,6 +15,7 @@ if sys.platform == "win32":
 from core.models import FinalTradeDecision
 from core.deterministic_guard import DeterministicGuard
 from core.strategy_router import StrategyProfile
+from agents.ceo_agent import normalize_mtf_trend
 
 
 class MockRiskRules:
@@ -69,6 +70,77 @@ def _is_valid_finite(val: Any) -> bool:
         return math.isfinite(f)
     except (ValueError, TypeError):
         return False
+
+
+def _validate_donchian_for_direction(mgi: Dict[str, Any], direction: str) -> bool:
+    """
+    Directional Donchian validation (Audit Point 2):
+    - For LONG: donchian_high must be a valid positive finite float.
+    - For SHORT: donchian_low must be a valid positive finite float.
+    - If both boundaries exist and are positive finite, ensure donchian_high >= donchian_low.
+    - For NEUTRAL/HOLD: at least one boundary must be a valid positive finite float.
+    """
+    if not isinstance(mgi, dict):
+        return False
+    dh = mgi.get("donchian_high")
+    dl = mgi.get("donchian_low")
+
+    if _is_valid_positive_finite(dh) and _is_valid_positive_finite(dl):
+        if float(dh) < float(dl):
+            return False
+
+    norm_dir = (direction or "").upper()
+    if norm_dir == "LONG":
+        return _is_valid_positive_finite(dh)
+    elif norm_dir == "SHORT":
+        return _is_valid_positive_finite(dl)
+    else:
+        return _is_valid_positive_finite(dh) or _is_valid_positive_finite(dl)
+
+
+def _validate_mtf_trend_data(mgi: Dict[str, Any]) -> bool:
+    """
+    Strict MTF trend data validation (Audit Point 3):
+    - multi_timeframe must be a non-empty dictionary.
+    - Checks actual trend fields: trend_1h and trend_4h (or nested tf_1h.trend / tf_4h.trend).
+    - Requires at least one timeframe to normalize to a valid canonical trend state (BULLISH, BEARISH, NEUTRAL).
+    - If raw trend strings are provided, they must NOT normalize to None (rejecting 'unknown', 'n/a', garbage).
+    - Differentiates NEUTRAL trend (valid market state) from missing/unknown trend data.
+    """
+    if not isinstance(mgi, dict):
+        return False
+    mtf = mgi.get("multi_timeframe")
+    if not mtf or not isinstance(mtf, dict):
+        return False
+
+    tf_1h = mtf.get("tf_1h") if isinstance(mtf.get("tf_1h"), dict) else {}
+    tf_4h = mtf.get("tf_4h") if isinstance(mtf.get("tf_4h"), dict) else {}
+    t1_raw = (tf_1h.get("trend") if isinstance(tf_1h, dict) else None) or mtf.get("trend_1h")
+    t4_raw = (tf_4h.get("trend") if isinstance(tf_4h, dict) else None) or mtf.get("trend_4h")
+
+    norm_1h = normalize_mtf_trend(t1_raw)
+    norm_4h = normalize_mtf_trend(t4_raw)
+
+    if t1_raw is not None and norm_1h is None:
+        return False
+    if t4_raw is not None and norm_4h is None:
+        return False
+
+    valid_states = {"BULLISH", "BEARISH", "NEUTRAL"}
+    return (norm_1h in valid_states or norm_4h in valid_states)
+
+
+def _validate_relative_momentum(mgi: Dict[str, Any]) -> bool:
+    """
+    Strict RELATIVE_MOMENTUM context validation (Audit Point 4):
+    Requires volume_spike_pct and at least one relative performance metric
+    (rs_divergence vs BTC or asset_return_24h).
+    """
+    if not isinstance(mgi, dict):
+        return False
+    has_vol = _is_valid_nonneg_finite(mgi.get("volume_spike_pct"))
+    has_rs = _is_valid_finite(mgi.get("rs_divergence")) or _is_valid_finite(mgi.get("asset_return_24h"))
+    return has_vol and has_rs
 
 
 class DecisionReplayEngine:
@@ -384,46 +456,52 @@ class DecisionReplayEngine:
                     "bb_position_pct": float(raw_bb) if _is_valid_finite(raw_bb) else None,
                     "ema_20": float(mgi["ema_20"]) if _is_valid_positive_finite(mgi.get("ema_20")) else 0.0,
                     "rsi_14": float(raw_rsi) if _is_valid_finite(raw_rsi) else None,
-                    "algo_signals": mgi.get("algo_signals") or {}
+                    "algo_signals": mgi.get("algo_signals") or {},
+                    "asset_return_24h": float(mgi["asset_return_24h"]) if _is_valid_finite(mgi.get("asset_return_24h")) else 0.0,
+                    "rs_divergence": float(mgi["rs_divergence"]) if _is_valid_finite(mgi.get("rs_divergence")) else 0.0
                 },
                 "multi_timeframe": mgi.get("multi_timeframe") or {},
                 "derivatives_data": {
-                    "funding_rate": float(mgi["funding_rate"]) if _is_valid_finite(mgi.get("funding_rate")) else 0.0
+                    "funding_rate": float(mgi["funding_rate"]) if _is_valid_finite(mgi.get("funding_rate")) else None
                 },
                 "is_pullback_retest": bool(mgi.get("is_pullback_retest", False))
             }
 
-        # Required context and indicator invariants by strategy mode (Audit Follow-up P1 & P2)
+        # Candidate target trade direction evaluated by DeterministicGuard (Audit Point 2)
+        cand_direction = (ceo_data.get("decision") or router_data.get("direction_bias") or guard_data.get("decision") or "NEUTRAL").upper()
+
+        # Required context and indicator invariants by strategy mode (Audit Points 2, 3, 4)
         REQUIRED_CONTEXT_BY_STRATEGY = {
             "TREND_FOLLOWING": [
-                ("multi_timeframe", lambda m: bool(m.get("multi_timeframe"))),
-                ("rsi_or_bb", lambda m: _is_valid_finite(m.get("rsi_14")) or _is_valid_finite(m.get("bb_position_pct"))),
+                ("multi_timeframe_trend", lambda m, d: _validate_mtf_trend_data(m)),
+                ("rsi_or_bb", lambda m, d: _is_valid_finite(m.get("rsi_14")) or _is_valid_finite(m.get("bb_position_pct"))),
             ],
             "BREAKOUT": [
-                ("donchian", lambda m: _is_valid_positive_finite(m.get("donchian_high")) or _is_valid_positive_finite(m.get("donchian_low"))),
-                ("volume_spike_pct", lambda m: _is_valid_nonneg_finite(m.get("volume_spike_pct"))),
+                ("donchian_directional", lambda m, d: _validate_donchian_for_direction(m, d)),
+                ("volume_spike_pct", lambda m, d: _is_valid_nonneg_finite(m.get("volume_spike_pct"))),
             ],
             "VOLATILITY_MOMENTUM": [
-                ("donchian", lambda m: _is_valid_positive_finite(m.get("donchian_high")) or _is_valid_positive_finite(m.get("donchian_low"))),
-                ("volume_spike_pct", lambda m: _is_valid_nonneg_finite(m.get("volume_spike_pct"))),
+                ("donchian_directional", lambda m, d: _validate_donchian_for_direction(m, d)),
+                ("volume_spike_pct", lambda m, d: _is_valid_nonneg_finite(m.get("volume_spike_pct"))),
             ],
             "MEAN_REVERSION": [
-                ("bb_or_rsi", lambda m: _is_valid_finite(m.get("bb_position_pct")) or _is_valid_finite(m.get("rsi_14"))),
+                ("bb_or_rsi", lambda m, d: _is_valid_finite(m.get("bb_position_pct")) or _is_valid_finite(m.get("rsi_14"))),
             ],
             "PULLBACK": [
                 (
                     "pullback_context",
-                    lambda m: bool(m.get("is_pullback_retest")) or (
+                    lambda m, d: bool(m.get("is_pullback_retest")) or (
                         _is_valid_positive_finite(m.get("ema_20")) and _is_valid_positive_finite(m.get("atr_pct"))
                     )
                 ),
             ],
             "RELATIVE_MOMENTUM": [
-                ("volume_spike_pct", lambda m: _is_valid_nonneg_finite(m.get("volume_spike_pct"))),
+                ("volume_spike_pct", lambda m, d: _is_valid_nonneg_finite(m.get("volume_spike_pct"))),
+                ("relative_divergence_or_return", lambda m, d: _validate_relative_momentum(m)),
             ],
         }
 
-        # Strict context completeness validation (Audit Follow-up P1 & P2)
+        # Strict context completeness validation (Audit Points 1-4)
         if strict:
             if not original_ceo_trade_action:
                 return False, "INCOMPLETE_REPLAY: missing original ceo.trade_action in snapshot", {"status": "INCOMPLETE_REPLAY"}
@@ -435,7 +513,7 @@ class DecisionReplayEngine:
                 return False, f"INCOMPLETE_REPLAY: unsupported or unrecognized strategy_mode '{strategy_mode}' in strict replay", {"status": "INCOMPLETE_REPLAY"}
 
             for rule_name, validator in REQUIRED_CONTEXT_BY_STRATEGY[strategy_mode]:
-                if not validator(mgi):
+                if not validator(mgi, cand_direction):
                     return False, f"INCOMPLETE_REPLAY: missing required indicator/context '{rule_name}' for {strategy_mode}", {"status": "INCOMPLETE_REPLAY"}
         elif strategy_mode in ["BREAKOUT", "VOLATILITY_MOMENTUM"] and mgi is None:
             return False, "INCOMPLETE_REPLAY: missing market_guard_inputs in snapshot", {"status": "INCOMPLETE_REPLAY"}
@@ -502,40 +580,102 @@ class DecisionReplayEngine:
         )
         return matches, msg, diff
 
-    def run_guard_replay_audit(self, snapshots: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    def run_guard_replay_audit(
+        self,
+        snapshots: Optional[List[Dict[str, Any]]] = None,
+        strict: Optional[bool] = None
+    ) -> Dict[str, Any]:
         """
-        Runs replay audit across all snapshots that have Deterministic Guard data.
-        Returns match stats and any discrepancies found.
+        Runs replay audit across all snapshots that have Deterministic Guard data (Audit Point 1).
+
+        Modes:
+        - strict=True: Enforces strict context completeness across all audited snapshots.
+        - strict=False: Permissive legacy replay mode.
+        - strict=None (default): Categorized hybrid audit.
+          Snapshots with 'market_guard_inputs' are audited under strict=True.
+          Legacy snapshots without full inputs are audited under strict=False and
+          certified as 'legacy_matches'.
+
+        Returns categorized match statistics and any discrepancies found.
         """
         if snapshots is None:
             snapshots = self.load_snapshots()
 
         eligible = [s for s in snapshots if "guard" in s and s.get("guard")]
         if not eligible:
-            return {"total_audited": 0, "matches": 0, "mismatches": 0, "details": []}
+            return {
+                "total_audited": 0,
+                "matches": 0,
+                "strict_matches": 0,
+                "legacy_matches": 0,
+                "incomplete_context": 0,
+                "mismatches": 0,
+                "match_rate_pct": 100.0,
+                "strict_integrity_rate_pct": 100.0,
+                "details": []
+            }
 
-        matches = 0
+        strict_matches = 0
+        legacy_matches = 0
+        incomplete_context = 0
         mismatches = 0
+        strict_eligible = 0
         details = []
 
         for s in eligible:
-            is_match, msg, diff = self.replay_guard_decision(s)
-            if is_match:
-                matches += 1
+            has_mgi = bool(s.get("market_guard_inputs") and isinstance(s.get("market_guard_inputs"), dict))
+
+            if strict is True:
+                snap_strict = True
+            elif strict is False:
+                snap_strict = False
             else:
-                mismatches += 1
-                details.append({
-                    "symbol": s.get("symbol"),
-                    "timestamp": s.get("timestamp"),
-                    "diff": diff,
-                    "reason": msg
-                })
+                snap_strict = has_mgi
+
+            if snap_strict:
+                strict_eligible += 1
+
+            is_match, msg, diff = self.replay_guard_decision(s, strict=snap_strict)
+
+            if is_match:
+                if snap_strict:
+                    strict_matches += 1
+                else:
+                    legacy_matches += 1
+            else:
+                if "INCOMPLETE_REPLAY" in msg:
+                    incomplete_context += 1
+                    details.append({
+                        "symbol": s.get("symbol"),
+                        "timestamp": s.get("timestamp"),
+                        "status": "INCOMPLETE_REPLAY",
+                        "diff": diff,
+                        "reason": msg
+                    })
+                else:
+                    mismatches += 1
+                    details.append({
+                        "symbol": s.get("symbol"),
+                        "timestamp": s.get("timestamp"),
+                        "status": "MISMATCH",
+                        "diff": diff,
+                        "reason": msg
+                    })
+
+        total_matches = strict_matches + legacy_matches
+        total_count = len(eligible)
+        match_rate = round(total_matches / total_count * 100, 2) if total_count > 0 else 100.0
+        strict_rate = round(strict_matches / strict_eligible * 100, 2) if strict_eligible > 0 else 100.0
 
         return {
-            "total_audited": len(eligible),
-            "matches": matches,
+            "total_audited": total_count,
+            "matches": total_matches,
+            "strict_matches": strict_matches,
+            "legacy_matches": legacy_matches,
+            "incomplete_context": incomplete_context,
             "mismatches": mismatches,
-            "match_rate_pct": round(matches / len(eligible) * 100, 2) if eligible else 100.0,
+            "match_rate_pct": match_rate,
+            "strict_integrity_rate_pct": strict_rate,
             "details": details
         }
 
@@ -548,6 +688,7 @@ def main():
     parser.add_argument("--strategy", default=None, help="Filter by strategy mode")
     parser.add_argument("--action", default=None, help="Filter by final action")
     parser.add_argument("--verify-guard", action="store_true", help="Run deterministic replay verification")
+    parser.add_argument("--strict", action="store_true", help="Force strict verification mode on all snapshots")
     parser.add_argument("--limit", type=int, default=10, help="Number of recent records to display")
     args = parser.parse_args()
 
@@ -563,13 +704,18 @@ def main():
 
     if args.verify_guard:
         print("\n🔍 Running Offline Deterministic Guard Replay Audit...")
-        audit = engine.run_guard_replay_audit(snapshots)
-        print(f"Audited: {audit['total_audited']} setups | Matches: {audit['matches']} | Mismatches: {audit['mismatches']}")
-        print(f"Determinism Integrity Rate: {audit['match_rate_pct']}%")
+        audit = engine.run_guard_replay_audit(snapshots, strict=True if args.strict else None)
+        print(f"Total Audited:        {audit['total_audited']} setups")
+        print(f"  • Strict Verified:    {audit['strict_matches']}")
+        print(f"  • Legacy Verified:    {audit['legacy_matches']}")
+        print(f"  • Incomplete Context: {audit['incomplete_context']}")
+        print(f"  • Logic Mismatches:   {audit['mismatches']}")
+        print(f"Overall Match Rate:   {audit['match_rate_pct']}% | Strict Integrity: {audit['strict_integrity_rate_pct']}%")
         if audit["details"]:
-            print("⚠️ Discrepancies:")
+            print("⚠️ Discrepancies / Incomplete Context:")
             for d in audit["details"]:
-                print(f"  • {d['symbol']}: {d['reason']}")
+                status_tag = f"[{d.get('status', 'ISSUE')}]"
+                print(f"  • {status_tag:<20} {d['symbol']}: {d['reason']}")
 
 
 if __name__ == "__main__":

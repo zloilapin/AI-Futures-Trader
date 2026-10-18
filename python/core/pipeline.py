@@ -1393,7 +1393,14 @@ class TradingPipeline:
                 except (ValueError, TypeError):
                     return None
 
-            raw_cur_price = price_data.get("current_price") or market_data.get("current_price")
+            # Explicit presence check for current price rather than truthiness (Audit Point 6)
+            raw_cur_price = price_data.get("current_price")
+            if raw_cur_price is None:
+                raw_cur_price = market_data.get("current_price")
+            cur_price_val = _safe_float(raw_cur_price)
+            if cur_price_val is not None and cur_price_val <= 0.0:
+                cur_price_val = None
+
             raw_dh = indicators.get("donchian_high")
             raw_dl = indicators.get("donchian_low")
             raw_vol = indicators.get("volume_spike_pct")
@@ -1401,10 +1408,12 @@ class TradingPipeline:
             raw_bb = indicators.get("bb_position_pct") if "bb_position_pct" in indicators else indicators.get("bb_pos")
             raw_ema = indicators.get("ema_20")
             raw_rsi = indicators.get("rsi_14") if indicators.get("rsi_14") is not None else indicators.get("rsi")
-            raw_funding = derivatives.get("funding_rate")
+            # Preserve genuine 0.0 vs None for missing/unreported funding rate (Audit Point 6)
+            raw_funding = derivatives.get("funding_rate_hourly", derivatives.get("funding_rate"))
+            funding_val = _safe_float(raw_funding)
 
             snapshot["market_guard_inputs"] = {
-                "current_price": _safe_float(raw_cur_price),
+                "current_price": cur_price_val,
                 "donchian_high": _safe_float(raw_dh),
                 "donchian_low": _safe_float(raw_dl),
                 "volume_spike_pct": _safe_float(raw_vol),
@@ -1412,10 +1421,12 @@ class TradingPipeline:
                 "bb_position_pct": _safe_float(raw_bb),
                 "ema_20": _safe_float(raw_ema),
                 "rsi_14": _safe_float(raw_rsi),
-                "funding_rate": _safe_float(raw_funding) if _safe_float(raw_funding) is not None else 0.0,
+                "funding_rate": funding_val,
                 "is_pullback_retest": bool(market_data.get("is_pullback_retest", False)),
                 "multi_timeframe": market_data.get("multi_timeframe") or {},
-                "algo_signals": indicators.get("algo_signals") or {}
+                "algo_signals": indicators.get("algo_signals") or {},
+                "asset_return_24h": _safe_float(indicators.get("asset_return_24h")),
+                "rs_divergence": _safe_float(indicators.get("rs_divergence"))
             }
         if strategy_profile:
             snapshot["router"] = {

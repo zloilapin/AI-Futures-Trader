@@ -702,5 +702,346 @@ def test_replay_strict_rejects_nan_and_infinite_numeric_inputs(tmp_path):
     assert "donchian" in msgC
 
 
+def test_directional_donchian_breakout_validation(tmp_path):
+    """
+    Audit Point 2: Direction-aware Donchian validation.
+    LONG must require donchian_high; SHORT must require donchian_low.
+    Inverted channels (high < low) must be rejected.
+    """
+    engine = DecisionReplayEngine(filepath=str(tmp_path / "empty.jsonl"))
+
+    # Case A: LONG missing donchian_high (only donchian_low provided)
+    snap_long_no_high = {
+        "candidate_id": "BTC-USD:c1_long_no_high",
+        "symbol": "BTC-USD",
+        "trading_profile": "BALANCED",
+        "router": {"strategy_mode": "BREAKOUT", "direction_bias": "LONG", "has_directional_signal": True},
+        "ceo": {"decision": "LONG", "conviction": 80, "trade_action": "ENTER"},
+        "guard": {"decision": "LONG", "action": "ENTER"},
+        "market_guard_inputs": {
+            "current_price": 65000.0,
+            "donchian_high": None,
+            "donchian_low": 64000.0,
+            "volume_spike_pct": 150.0
+        }
+    }
+    mA, msgA, _ = engine.replay_guard_decision(snap_long_no_high, strict=True)
+    assert mA is False
+    assert "INCOMPLETE_REPLAY" in msgA
+    assert "donchian_directional" in msgA
+
+    # Case B: SHORT missing donchian_low (only donchian_high provided)
+    snap_short_no_low = {
+        "candidate_id": "BTC-USD:c1_short_no_low",
+        "symbol": "BTC-USD",
+        "trading_profile": "BALANCED",
+        "router": {"strategy_mode": "BREAKOUT", "direction_bias": "SHORT", "has_directional_signal": True},
+        "ceo": {"decision": "SHORT", "conviction": 80, "trade_action": "ENTER"},
+        "guard": {"decision": "SHORT", "action": "ENTER"},
+        "market_guard_inputs": {
+            "current_price": 63000.0,
+            "donchian_high": 65000.0,
+            "donchian_low": None,
+            "volume_spike_pct": 150.0
+        }
+    }
+    mB, msgB, _ = engine.replay_guard_decision(snap_short_no_low, strict=True)
+    assert mB is False
+    assert "INCOMPLETE_REPLAY" in msgB
+    assert "donchian_directional" in msgB
+
+    # Case C: Inverted boundaries (donchian_high < donchian_low)
+    snap_inverted = {
+        "candidate_id": "BTC-USD:c1_inverted",
+        "symbol": "BTC-USD",
+        "trading_profile": "BALANCED",
+        "router": {"strategy_mode": "BREAKOUT", "direction_bias": "LONG", "has_directional_signal": True},
+        "ceo": {"decision": "LONG", "conviction": 80, "trade_action": "ENTER"},
+        "guard": {"decision": "LONG", "action": "ENTER"},
+        "market_guard_inputs": {
+            "current_price": 65000.0,
+            "donchian_high": 60000.0,
+            "donchian_low": 65000.0,
+            "volume_spike_pct": 150.0
+        }
+    }
+    mC, msgC, _ = engine.replay_guard_decision(snap_inverted, strict=True)
+    assert mC is False
+    assert "donchian_directional" in msgC
+
+    # Case D: Valid LONG (has donchian_high)
+    snap_valid_long = {
+        "candidate_id": "BTC-USD:c1_valid_long",
+        "symbol": "BTC-USD",
+        "trading_profile": "BALANCED",
+        "router": {"strategy_mode": "BREAKOUT", "direction_bias": "LONG", "has_directional_signal": True},
+        "ceo": {"decision": "LONG", "conviction": 80, "trade_action": "ENTER"},
+        "guard": {"decision": "LONG", "action": "ENTER", "is_actionable": True, "guard_status": "PASSED"},
+        "market_guard_inputs": {
+            "current_price": 65000.0,
+            "donchian_high": 64000.0,
+            "donchian_low": None,
+            "volume_spike_pct": 150.0
+        }
+    }
+    mD, msgD, _ = engine.replay_guard_decision(snap_valid_long, strict=True)
+    assert mD is True
+    assert msgD == "MATCH"
 
 
+def test_strict_mtf_trend_data_validation(tmp_path):
+    """
+    Audit Point 3: MTF trend validation must reject unknown/unpopulated trends
+    and require canonical normalized trends.
+    """
+    engine = DecisionReplayEngine(filepath=str(tmp_path / "empty.jsonl"))
+
+    # Case A: trend_1h is "unknown"
+    snap_unknown = {
+        "candidate_id": "BTC-USD:c1_unknown_mtf",
+        "symbol": "BTC-USD",
+        "trading_profile": "BALANCED",
+        "router": {"strategy_mode": "TREND_FOLLOWING", "direction_bias": "LONG", "has_directional_signal": True},
+        "ceo": {"decision": "LONG", "conviction": 80, "trade_action": "ENTER"},
+        "guard": {"decision": "LONG", "action": "ENTER"},
+        "market_guard_inputs": {
+            "current_price": 65000.0,
+            "rsi_14": 55.0,
+            "multi_timeframe": {"trend_1h": "unknown"}
+        }
+    }
+    mA, msgA, _ = engine.replay_guard_decision(snap_unknown, strict=True)
+    assert mA is False
+    assert "INCOMPLETE_REPLAY" in msgA
+    assert "multi_timeframe_trend" in msgA
+
+    # Case B: Empty multi_timeframe dict
+    snap_empty = {
+        "candidate_id": "BTC-USD:c1_empty_mtf",
+        "symbol": "BTC-USD",
+        "trading_profile": "BALANCED",
+        "router": {"strategy_mode": "TREND_FOLLOWING", "direction_bias": "LONG", "has_directional_signal": True},
+        "ceo": {"decision": "LONG", "conviction": 80, "trade_action": "ENTER"},
+        "guard": {"decision": "LONG", "action": "ENTER"},
+        "market_guard_inputs": {
+            "current_price": 65000.0,
+            "rsi_14": 55.0,
+            "multi_timeframe": {}
+        }
+    }
+    mB, msgB, _ = engine.replay_guard_decision(snap_empty, strict=True)
+    assert mB is False
+    assert "multi_timeframe_trend" in msgB
+
+    # Case C: Valid canonical trend (e.g. "uptrend" or "BULLISH")
+    snap_valid = {
+        "candidate_id": "BTC-USD:c1_valid_mtf",
+        "symbol": "BTC-USD",
+        "trading_profile": "BALANCED",
+        "router": {"strategy_mode": "TREND_FOLLOWING", "direction_bias": "LONG", "has_directional_signal": True},
+        "ceo": {"decision": "LONG", "conviction": 80, "trade_action": "ENTER"},
+        "guard": {"decision": "LONG", "action": "ENTER", "is_actionable": True, "guard_status": "PASSED"},
+        "market_guard_inputs": {
+            "current_price": 65000.0,
+            "rsi_14": 55.0,
+            "multi_timeframe": {"trend_1h": "uptrend"}
+        }
+    }
+    mC, msgC, _ = engine.replay_guard_decision(snap_valid, strict=True)
+    assert mC is True
+    assert msgC == "MATCH"
+
+    # Case D: NEUTRAL market state is valid, not rejected as missing
+    snap_neutral = {
+        "candidate_id": "BTC-USD:c1_neutral_mtf",
+        "symbol": "BTC-USD",
+        "trading_profile": "BALANCED",
+        "router": {"strategy_mode": "TREND_FOLLOWING", "direction_bias": "LONG", "has_directional_signal": True},
+        "ceo": {"decision": "LONG", "conviction": 80, "trade_action": "ENTER"},
+        "guard": {"decision": "LONG", "action": "ENTER", "is_actionable": True, "guard_status": "PASSED"},
+        "market_guard_inputs": {
+            "current_price": 65000.0,
+            "rsi_14": 55.0,
+            "multi_timeframe": {"trend_1h": "neutral"}
+        }
+    }
+    mD, msgD, _ = engine.replay_guard_decision(snap_neutral, strict=True)
+    assert mD is True
+    assert msgD == "MATCH"
+
+
+def test_strict_relative_momentum_validation(tmp_path):
+    """
+    Audit Point 4: RELATIVE_MOMENTUM requires volume_spike_pct AND
+    at least one relative momentum metric (rs_divergence or asset_return_24h).
+    """
+    engine = DecisionReplayEngine(filepath=str(tmp_path / "empty.jsonl"))
+
+    # Case A: Missing rs_divergence and asset_return_24h
+    snap_missing_rs = {
+        "candidate_id": "SOL-USD:c1_rel_mom",
+        "symbol": "SOL-USD",
+        "trading_profile": "BALANCED",
+        "router": {"strategy_mode": "RELATIVE_MOMENTUM", "direction_bias": "LONG", "has_directional_signal": True},
+        "ceo": {"decision": "LONG", "conviction": 80, "trade_action": "ENTER"},
+        "guard": {"decision": "LONG", "action": "ENTER"},
+        "market_guard_inputs": {
+            "current_price": 140.0,
+            "volume_spike_pct": 120.0
+        }
+    }
+    mA, msgA, _ = engine.replay_guard_decision(snap_missing_rs, strict=True)
+    assert mA is False
+    assert "INCOMPLETE_REPLAY" in msgA
+    assert "relative_divergence_or_return" in msgA
+
+    # Case B: With rs_divergence
+    snap_with_rs = {
+        "candidate_id": "SOL-USD:c1_rel_mom_rs",
+        "symbol": "SOL-USD",
+        "trading_profile": "BALANCED",
+        "router": {"strategy_mode": "RELATIVE_MOMENTUM", "direction_bias": "LONG", "has_directional_signal": True},
+        "ceo": {"decision": "LONG", "conviction": 80, "trade_action": "ENTER"},
+        "guard": {"decision": "LONG", "action": "ENTER", "is_actionable": True, "guard_status": "PASSED"},
+        "market_guard_inputs": {
+            "current_price": 140.0,
+            "volume_spike_pct": 120.0,
+            "rs_divergence": 7.5
+        }
+    }
+    mB, msgB, _ = engine.replay_guard_decision(snap_with_rs, strict=True)
+    assert mB is True
+    assert msgB == "MATCH"
+
+
+@pytest.mark.parametrize("raw_input,expected", [
+    ("bullish", "BULLISH"),
+    ("BULLISH", "BULLISH"),
+    ("bull", "BULLISH"),
+    ("up", "BULLISH"),
+    ("bullish_trend", "BULLISH"),
+    ("uptrend", "BULLISH"),
+    ("long", "BULLISH"),
+    ("strong_bullish", "BULLISH"),
+    ("strong_uptrend", "BULLISH"),
+    (b"bullish", "BULLISH"),
+    (b"strong_uptrend", "BULLISH"),
+    ("bearish", "BEARISH"),
+    ("BEARISH", "BEARISH"),
+    ("bear", "BEARISH"),
+    ("down", "BEARISH"),
+    ("bearish_trend", "BEARISH"),
+    ("downtrend", "BEARISH"),
+    ("short", "BEARISH"),
+    ("strong_bearish", "BEARISH"),
+    ("strong_downtrend", "BEARISH"),
+    (b"bearish", "BEARISH"),
+    ("neutral", "NEUTRAL"),
+    ("flat", "NEUTRAL"),
+    ("chop", "NEUTRAL"),
+    ("mixed_chop", "NEUTRAL"),
+    ("sideways", "NEUTRAL"),
+    ("range", "NEUTRAL"),
+    ("range_bound", "NEUTRAL"),
+    ("rangebound", "NEUTRAL"),
+    ("consolidation", "NEUTRAL"),
+    ("neutral_trend", "NEUTRAL"),
+    (b"chop", "NEUTRAL"),
+    (None, None),
+    ("", None),
+    ("   ", None),
+    ("unknown", None),
+    ("n/a", None),
+    ("na", None),
+    ("unavailable", None),
+    ("none", None),
+    ("null", None),
+    (b"unknown", None),
+    (12345, None),
+    ([], None),
+    ({}, None),
+    ("unrelated_market_noise", None),
+])
+def test_normalize_mtf_trend_canonical_and_robust(raw_input, expected):
+    """
+    Audit Point 5: Comprehensive parameterized verification for normalize_mtf_trend,
+    handling string aliases, bytes decoding, and unknown/invalid inputs.
+    """
+    from agents.ceo_agent import normalize_mtf_trend
+    assert normalize_mtf_trend(raw_input) == expected
+
+
+def test_run_guard_replay_audit_categorization(tmp_path):
+    """
+    Audit Point 1: run_guard_replay_audit properly categorizes:
+    - strict_matches (new snapshots with complete inputs)
+    - legacy_matches (legacy snapshots without full inputs)
+    - incomplete_context (new snapshots failing completeness)
+    - mismatches (actual guard decision discrepancies)
+    """
+    engine = DecisionReplayEngine(filepath=str(tmp_path / "empty.jsonl"))
+
+    # Snapshot 1: Strict match
+    s_strict_match = {
+        "candidate_id": "BTC:1",
+        "symbol": "BTC-USD",
+        "trading_profile": "BALANCED",
+        "router": {"strategy_mode": "TREND_FOLLOWING", "direction_bias": "LONG"},
+        "ceo": {"decision": "LONG", "conviction": 80, "trade_action": "ENTER"},
+        "guard": {"decision": "LONG", "action": "ENTER", "is_actionable": True, "guard_status": "PASSED"},
+        "market_guard_inputs": {
+            "current_price": 65000.0,
+            "rsi_14": 50.0,
+            "multi_timeframe": {"trend_1h": "BULLISH"}
+        }
+    }
+
+    # Snapshot 2: Incomplete context (new format missing current_price)
+    s_incomplete = {
+        "candidate_id": "ETH:1",
+        "symbol": "ETH-USD",
+        "trading_profile": "BALANCED",
+        "router": {"strategy_mode": "TREND_FOLLOWING", "direction_bias": "LONG"},
+        "ceo": {"decision": "LONG", "conviction": 80, "trade_action": "ENTER"},
+        "guard": {"decision": "LONG", "action": "ENTER"},
+        "market_guard_inputs": {
+            "current_price": None,
+            "rsi_14": 50.0,
+            "multi_timeframe": {"trend_1h": "BULLISH"}
+        }
+    }
+
+    # Snapshot 3: Legacy format (no market_guard_inputs)
+    s_legacy = {
+        "candidate_id": "SOL:1",
+        "symbol": "SOL-USD",
+        "trading_profile": "BALANCED",
+        "router": {"strategy_mode": "TREND_FOLLOWING", "direction_bias": "LONG"},
+        "ceo": {"decision": "LONG", "conviction": 80, "trade_action": "ENTER"},
+        "guard": {"decision": "LONG", "action": "ENTER", "is_actionable": True, "guard_status": "PASSED"}
+    }
+
+    # Snapshot 4: Logic mismatch (guard action was modified to REJECTED)
+    s_mismatch = {
+        "candidate_id": "AVAX:1",
+        "symbol": "AVAX-USD",
+        "trading_profile": "BALANCED",
+        "router": {"strategy_mode": "TREND_FOLLOWING", "direction_bias": "LONG"},
+        "ceo": {"decision": "LONG", "conviction": 80, "trade_action": "ENTER"},
+        "guard": {"decision": "LONG", "action": "REJECTED", "is_actionable": False},
+        "market_guard_inputs": {
+            "current_price": 30.0,
+            "rsi_14": 50.0,
+            "multi_timeframe": {"trend_1h": "BULLISH"}
+        }
+    }
+
+    audit = engine.run_guard_replay_audit([s_strict_match, s_incomplete, s_legacy, s_mismatch])
+    assert audit["total_audited"] == 4
+    assert audit["strict_matches"] == 1
+    assert audit["legacy_matches"] == 1
+    assert audit["incomplete_context"] == 1
+    assert audit["mismatches"] == 1
+    assert audit["matches"] == 2
+    assert audit["match_rate_pct"] == 50.0
+    assert len(audit["details"]) == 2
