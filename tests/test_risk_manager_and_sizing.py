@@ -438,7 +438,7 @@ async def test_risk_manager_penalty_suppression_veto(risk_mgr, base_market_data,
     ceo_decision = {
         "symbol": "BTC-USD",
         "decision": "LONG",
-        "conviction": 70, # Lower conviction gives boundary penalty (x0.70)
+        "conviction": 85,
         "trade_action": "REDUCE_SIZE" # x0.75
     }
     
@@ -1382,6 +1382,157 @@ async def test_risk_manager_excessive_risk_and_stress_loss_veto(risk_mgr, base_p
     verdict_stress = await risk_mgr.analyze(ceo_decision, portfolio, market_stress, effective_profile="BALANCED", macro_regime="TRENDING")
     assert verdict_stress["approved"] is False
     assert verdict_stress["veto_category"] == "EXCESSIVE_STRESS_RISK"
+
+
+# ==============================================================================
+# 11. QUANTITATIVE EXPECTANCY & R-MULTIPLE SIZING TESTS
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_cohort_classification_and_double_penalty_floor(risk_mgr, base_portfolio_data, base_market_data):
+    """
+    Validates:
+    1. Cohort tagging (A, B, C, D) based on conviction threshold and trade_action.
+    2. Preventing 0.525x compounding penalty collapse (0.70 * 0.75):
+       When conviction is marginal (delta < 5 -> conf_mult=0.70) AND action is REDUCE_SIZE (0.75),
+       the signal_mult is safely floored at 0.60x rather than crashing to 0.525x.
+    3. Exposure of planned_risk_usd, cohort, base_risk_pct, final_risk_pct, and applied_multipliers.
+    """
+    portfolio = dict(base_portfolio_data, total_usd=1000.0, available_margin=1000.0)
+
+    # Cohort A: High Conviction (>= min_conviction + 10 = 80 for BALANCED), Full Size
+    decision_a = {"symbol": "BTC-USD", "decision": "LONG", "conviction": 85, "trade_action": "ENTER"}
+    verdict_a = await risk_mgr.analyze(decision_a, portfolio, base_market_data, effective_profile="BALANCED")
+    assert verdict_a["approved"] is True
+    assert verdict_a["cohort"] == "A"
+    assert verdict_a["applied_multipliers"]["conf_mult"] == 1.15
+    assert verdict_a["applied_multipliers"]["action_mult"] == 1.0
+
+    # Cohort B: High Conviction, Reduced Size
+    decision_b = {"symbol": "BTC-USD", "decision": "LONG", "conviction": 85, "trade_action": "REDUCE_SIZE"}
+    verdict_b = await risk_mgr.analyze(decision_b, portfolio, base_market_data, effective_profile="BALANCED")
+    assert verdict_b["approved"] is True
+    assert verdict_b["cohort"] == "B"
+    assert verdict_b["applied_multipliers"]["action_mult"] == 0.75
+
+    # Cohort C: Low Conviction (< min_conviction + 10 = 80), Full Size
+    decision_c = {"symbol": "BTC-USD", "decision": "LONG", "conviction": 73, "trade_action": "ENTER"}
+    verdict_c = await risk_mgr.analyze(decision_c, portfolio, base_market_data, effective_profile="BALANCED")
+    assert verdict_c["approved"] is True
+    assert verdict_c["cohort"] == "C"
+    assert verdict_c["applied_multipliers"]["action_mult"] == 1.0
+
+    # Cohort D: Low Conviction (< 80) and Reduced Size
+    decision_d = {"symbol": "BTC-USD", "decision": "LONG", "conviction": 72, "trade_action": "REDUCE_SIZE"}
+    
+    # 1. By default, Cohort D is vetoed due to empirical negative expectancy:
+    verdict_d_veto = await risk_mgr.analyze(decision_d, portfolio, base_market_data, effective_profile="BALANCED")
+    assert verdict_d_veto["approved"] is False
+    assert verdict_d_veto["veto_category"] == "COHORT_D_NEGATIVE_EXPECTANCY"
+
+    # 2. When BLOCK_COHORT_D_TRADES is disabled, verify that 0.60x floor protects against 0.525x collapse:
+    from core.config import config
+    orig_block = getattr(config, "BLOCK_COHORT_D_TRADES", True)
+    try:
+        config.BLOCK_COHORT_D_TRADES = False
+        verdict_d = await risk_mgr.analyze(decision_d, portfolio, base_market_data, effective_profile="BALANCED")
+        assert verdict_d["approved"] is True
+        assert verdict_d["cohort"] == "D"
+        assert verdict_d["applied_multipliers"]["conf_mult"] == 0.70
+        assert verdict_d["applied_multipliers"]["action_mult"] == 0.75
+        assert verdict_d["applied_multipliers"]["signal_mult"] == 0.60
+        assert verdict_d["planned_risk_usd"] > 0
+        assert verdict_d["base_risk_pct"] == 0.015
+    finally:
+        config.BLOCK_COHORT_D_TRADES = orig_block
+
+
+def test_continuous_half_kelly_calibration(risk_mgr):
+    """
+    Validates smooth continuous calibration of Half-Kelly multiplier:
+    - total_trades < 15: returns neutral 1.0
+    - f* <= 0 (negative edge): clamped at 0.50
+    - f* >= 0.25 (strong positive edge): capped at 1.00
+    - 0 < f* < 0.25: smoothly interpolates between 0.50 and 1.00 without step jumps.
+    """
+    # 1. Total trades < 15
+    assert risk_mgr._calculate_kelly_multiplier(win_rate=0.70, realized_rr=2.0, total_trades=14) == 1.0
+
+    # 2. Negative edge (f* <= 0)
+    assert risk_mgr._calculate_kelly_multiplier(win_rate=0.35, realized_rr=1.2, total_trades=20) == 0.50
+
+    # 3. Strong edge (f* >= 0.25)
+    assert risk_mgr._calculate_kelly_multiplier(win_rate=0.55, realized_rr=1.8, total_trades=20) == 1.00
+
+    # 4. Marginal positive edge (0 < f* < 0.25) -> smoothly calibrated
+    # win_rate=0.45, realized_rr=1.5:
+    # q = 0.55, f* = (0.45 * 1.5 - 0.55) / 1.5 = (0.675 - 0.55) / 1.5 = 0.125 / 1.5 = 0.08333
+    # Expected multiplier = 0.50 + (0.08333 / 0.25) * 0.50 = 0.50 + 0.16667 = 0.6667
+    k_marginal = risk_mgr._calculate_kelly_multiplier(win_rate=0.45, realized_rr=1.5, total_trades=20)
+    assert 0.60 < k_marginal < 0.75
+    assert k_marginal != 0.50 and k_marginal != 1.00
+
+
+def test_record_closed_trade_journal(monkeypatch):
+    """
+    Validates NadoTradingService._record_closed_trade_journal:
+    - Calculates R-multiple = Net PnL / Planned Risk USD.
+    - Persists trade details with cohort, applied multipliers, and realized R to trade_journal.json.
+    """
+    from services.nado_trading_service import NadoTradingService
+    trading_service = NadoTradingService.__new__(NadoTradingService)
+
+    saved_trades = []
+    monkeypatch.setattr("core.state_store.StateStore.load", lambda f, default=[]: list(saved_trades))
+    def mock_save(f, data):
+        saved_trades.clear()
+        saved_trades.extend(data)
+    monkeypatch.setattr("core.state_store.StateStore.save", mock_save)
+
+    pos_data = {
+        "symbol": "BTC-USD",
+        "direction": "LONG",
+        "entry_price": 80000.0,
+        "sl_price": 79000.0,
+        "planned_risk_usd": 10.0,
+        "cohort": "B",
+        "base_risk_pct": 0.015,
+        "final_risk_pct": 0.012,
+        "applied_multipliers": {"signal_mult": 0.8, "market_mult": 1.0},
+        "open_time": 1700000000.0
+    }
+
+    # Case 1: Profitable trade (Net PnL = +25.0 USD, Planned Risk = 10.0 USD -> +2.50R)
+    r1 = trading_service._record_closed_trade_journal(
+        symbol="BTC-USD",
+        direction="LONG",
+        entry_price=80000.0,
+        exit_price=82500.0,
+        net_pnl=25.0,
+        pos_data=pos_data,
+        fee=1.0,
+        triggered_by="TAKE_PROFIT_TRIGGER"
+    )
+    assert r1 == 2.50
+
+    # Case 2: Loss trade (Net PnL = -10.0 USD, Planned Risk = 10.0 USD -> -1.00R)
+    r2 = trading_service._record_closed_trade_journal(
+        symbol="BTC-USD",
+        direction="LONG",
+        entry_price=80000.0,
+        exit_price=79000.0,
+        net_pnl=-10.0,
+        pos_data=pos_data,
+        fee=1.0,
+        triggered_by="STOP_LOSS_TRIGGER"
+    )
+    assert r2 == -1.00
+
+    assert len(saved_trades) == 2
+    assert saved_trades[0]["realized_r"] == 2.50
+    assert saved_trades[0]["cohort"] == "B"
+    assert saved_trades[1]["realized_r"] == -1.00
+
 
 
 

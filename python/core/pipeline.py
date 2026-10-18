@@ -1,4 +1,5 @@
 import time
+import datetime
 import asyncio
 from dataclasses import dataclass
 from typing import Dict, Any, List, Tuple, Optional
@@ -344,6 +345,16 @@ class TradingPipeline:
                     self.services.logger.warning(f"[System_Core] DATA QUALITY VETO | {symbol} | {dq_reason}")
                     scan_summaries.append({"symbol": symbol, "status": "⛔ DATA INVALID", "reason": dq_reason})
                     tracker.record_rejection("DATA_INVALID")
+                    self._record_candidate_snapshot(
+                        symbol=symbol,
+                        cycle_number=cycle_number,
+                        macro_regime=detected_regime,
+                        profile=profile,
+                        stage="DATA_GUARD",
+                        final_action="REJECTED",
+                        rejection_tag="DATA_INVALID",
+                        rejection_reason=dq_reason
+                    )
                     continue
 
                 current_price = market_data.get("price_data", {}).get("current_price", 0)
@@ -359,6 +370,16 @@ class TradingPipeline:
                     self.services.logger.info(f"[System_Core] Пропуск {symbol}. Причина: {scanner_reason}")
                     scan_summaries.append({"symbol": symbol, "status": "⛔ СКАН ЗАБЛОКИРОВАН", "reason": scanner_reason})
                     tracker.record_rejection(scan_result.get('status', 'SCANNER_BLOCKED'))
+                    self._record_candidate_snapshot(
+                        symbol=symbol,
+                        cycle_number=cycle_number,
+                        macro_regime=detected_regime,
+                        profile=profile,
+                        stage="SCANNER",
+                        final_action="REJECTED",
+                        rejection_tag=scan_result.get('status', 'SCANNER_BLOCKED'),
+                        rejection_reason=scanner_reason
+                    )
                     continue
 
                 # СТАДИЯ 3: СИНДИКАТ АНАЛИТИКОВ
@@ -406,6 +427,17 @@ class TradingPipeline:
                         "status": "🛑 ОШИБКА АГЕНТОВ"
                     })
                     tracker.record_rejection("AGENT_ERROR")
+                    self._record_candidate_snapshot(
+                        symbol=symbol,
+                        cycle_number=cycle_number,
+                        macro_regime=detected_regime,
+                        profile=profile,
+                        stage="ANALYST_QUORUM",
+                        final_action="REJECTED",
+                        rejection_tag="AGENT_ERROR",
+                        rejection_reason=f"Insufficient valid analysts ({len(valid_reports)}/5)",
+                        analyst_reports=valid_reports
+                    )
                     continue
 
                 # --- STRATEGY ROUTER ---
@@ -437,6 +469,18 @@ class TradingPipeline:
                         "status": "⏸️ НЕТ СИГНАЛА"
                     })
                     tracker.record_rejection("NO_SIGNAL")
+                    self._record_candidate_snapshot(
+                        symbol=symbol,
+                        cycle_number=cycle_number,
+                        macro_regime=detected_regime,
+                        profile=profile,
+                        stage="STRATEGY_ROUTER",
+                        final_action="REJECTED",
+                        rejection_tag="NO_SIGNAL",
+                        rejection_reason=strategy_profile.reasoning,
+                        strategy_profile=strategy_profile,
+                        analyst_reports=valid_reports
+                    )
                     continue
 
                 # СТАДИЯ 4: MULTI-AGENT DEBATE & CEO JUDGEMENT
@@ -457,36 +501,65 @@ class TradingPipeline:
                     return_exceptions=True
                 )
                 
+                bull_status = "OK"
                 if isinstance(bull_res, Exception) or not isinstance(bull_res, dict) or bull_res.get("signal") == "ERROR":
                     self.services.logger.error(f"[Stage 4] Ошибка Bull Agent: {bull_res}")
+                    bull_status = "ERROR"
                     bull_verdict = {
+                        "status": "ERROR",
+                        "is_fallback": True,
+                        "error_details": str(bull_res),
                         "thesis_score": 0,
-                        "bullish_arguments": ["Бычий тезис недоступен (fallback)."],
+                        "bullish_arguments": ["Бычий тезис недоступен (fallback из-за ошибки LLM)."],
                         "potential_target": 0.0,
                         "invalidation_level": 0.0,
                         "summary": "Fallback bull thesis (error)"
                     }
                 else:
                     bull_verdict = bull_res
+                    bull_verdict["status"] = "OK"
+                    bull_verdict["is_fallback"] = False
 
+                bear_status = "OK"
                 if isinstance(bear_res, Exception) or not isinstance(bear_res, dict) or bear_res.get("signal") == "ERROR":
                     self.services.logger.error(f"[Stage 4] Ошибка Bear Agent: {bear_res}")
+                    bear_status = "ERROR"
                     bear_verdict = {
+                        "status": "ERROR",
+                        "is_fallback": True,
+                        "error_details": str(bear_res),
                         "thesis_score": 0,
-                        "bearish_arguments": ["Медвежий тезис недоступен (fallback)."],
+                        "bearish_arguments": ["Медвежий тезис недоступен (fallback из-за ошибки LLM)."],
                         "potential_target": 0.0,
                         "invalidation_level": 0.0,
                         "summary": "Fallback bear thesis (error)"
                     }
                 else:
                     bear_verdict = bear_res
+                    bear_verdict["status"] = "OK"
+                    bear_verdict["is_fallback"] = False
+
+                if bull_status == "OK" and bear_status == "OK":
+                    debate_status = "COMPLETE"
+                elif bull_status == "ERROR" and bear_status == "ERROR":
+                    debate_status = "FAILED"
+                elif bull_status == "ERROR":
+                    debate_status = "DEGRADED_BULL_FAILED"
+                else:
+                    debate_status = "DEGRADED_BEAR_FAILED"
+
+                if debate_status != "COMPLETE":
+                    self.services.logger.warning(
+                        f"[Stage 4] Debate completeness degraded for {symbol}: {debate_status} "
+                        f"(Bull: {bull_status}, Bear: {bear_status})"
+                    )
                 
                 bull_summary = str(bull_verdict.get('summary', 'N/A')).strip()
                 bear_summary = str(bear_verdict.get('summary', 'N/A')).strip()
-                print(f"🐂 Bull Thesis: {bull_summary}")
-                print(f"🐻 Bear Thesis: {bear_summary}")
+                print(f"🐂 Bull Thesis ({bull_status}): {bull_summary}")
+                print(f"🐻 Bear Thesis ({bear_status}): {bear_summary}")
                 
-                self.services.logger.info(f"[Stage 4] CEO Agent (Judge) evaluates the debate and MTF trend for {symbol}...")
+                self.services.logger.info(f"[Stage 4] CEO Agent (Judge) evaluates the debate and MTF trend for {symbol} (Debate: {debate_status})...")
                 historical_context = self.agents.memory.get_recent_context(limit=3, symbol=symbol)
                 symbol_lessons = self.agents.reflector.get_lessons(limit=5, symbol=symbol)
                 
@@ -513,6 +586,9 @@ class TradingPipeline:
                     "multi_timeframe_context": clean_mtf,
                     "bull_thesis": bull_verdict,
                     "bear_thesis": bear_verdict,
+                    "bull_status": bull_status,
+                    "bear_status": bear_status,
+                    "debate_status": debate_status,
                     "subordinate_analyst_reports": valid_reports,
                     "historical_context": historical_context,
                     "past_lessons_learned": symbol_lessons,
@@ -580,6 +656,25 @@ class TradingPipeline:
                     }
                     scan_summaries.append(asset_summary)
                     tracker.record_rejection(final_trade_decision.rejection_tag or "NO_SIGNAL")
+                    self._record_candidate_snapshot(
+                        symbol=symbol,
+                        cycle_number=cycle_number,
+                        macro_regime=detected_regime,
+                        profile=effective_asset_profile,
+                        stage="DETERMINISTIC_GUARD",
+                        final_action=final_trade_decision.trade_action,
+                        rejection_tag=final_trade_decision.rejection_tag or "GUARD_BLOCKED",
+                        rejection_reason=final_trade_decision.guard_reason,
+                        strategy_profile=strategy_profile,
+                        analyst_reports=valid_reports,
+                        debate_info={
+                            "bull_status": bull_status,
+                            "bear_status": bear_status,
+                            "debate_status": debate_status
+                        },
+                        ceo_verdict=ceo_verdict,
+                        final_trade_decision=final_trade_decision
+                    )
                     continue
 
                 # СТАДИЯ 5: РИСК-МЕНЕДЖМЕНТ
@@ -610,6 +705,25 @@ class TradingPipeline:
                                 "status": "⏸️ НЕТ СИГНАЛА"
                             })
                             tracker.record_rejection("SLIPPAGE_VETO")
+                            self._record_candidate_snapshot(
+                                symbol=symbol,
+                                cycle_number=cycle_number,
+                                macro_regime=detected_regime,
+                                profile=effective_asset_profile,
+                                stage="SLIPPAGE_GATE",
+                                final_action="REJECTED",
+                                rejection_tag="SLIPPAGE_VETO",
+                                rejection_reason=f"Slippage deviation {deviation*100:.2f}% (Signal: {current_price}, Fresh: {fresh_price})",
+                                strategy_profile=strategy_profile,
+                                analyst_reports=valid_reports,
+                                debate_info={
+                                    "bull_status": bull_status,
+                                    "bear_status": bear_status,
+                                    "debate_status": debate_status
+                                },
+                                ceo_verdict=ceo_verdict,
+                                final_trade_decision=final_trade_decision
+                            )
                             continue
                     
                     # Update market data and price for RiskManager
@@ -655,7 +769,12 @@ class TradingPipeline:
                             atr_value=atr_14_val,
                             max_slippage_pct=risk_verdict.get("expected_slippage_pct"),
                             approved_risk_usd=approved_risk_val,
-                            taker_fee_pct=taker_fee_val
+                            taker_fee_pct=taker_fee_val,
+                            planned_risk_usd=float(risk_verdict.get("planned_risk_usd") or approved_risk_val),
+                            base_risk_pct=float(risk_verdict.get("base_risk_pct", 0.0)),
+                            final_risk_pct=float(risk_verdict.get("final_risk_pct", 0.0)),
+                            cohort=risk_verdict.get("cohort", "UNKNOWN"),
+                            applied_multipliers=risk_verdict.get("applied_multipliers", {})
                         )
                     except Exception as e:
                         self.services.logger.error(f"[Stage 5] Unexpected error placing order on exchange for {symbol}: {e}", exc_info=True)
@@ -673,16 +792,22 @@ class TradingPipeline:
                         if not active_pos:
                             base_s = symbol.split("-")[0].upper()
                             active_pos = self.services.trading_service.active_positions.get(base_s)
-                        if active_pos and active_pos.get("entry_price"):
-                            actual_fill_price = float(active_pos["entry_price"])
-                            real_notional = float(active_pos.get("notional_usd") or active_pos.get("size_usd") or 0.0)
-                            real_contracts = float(active_pos.get("contracts") or 0.0)
-                            if isinstance(risk_verdict, dict):
-                                risk_verdict["entry_price"] = actual_fill_price
-                                if real_notional > 0:
-                                    risk_verdict["notional_size_usd"] = real_notional
-                                if real_contracts > 0:
-                                    risk_verdict["contracts"] = real_contracts
+                        if active_pos:
+                            active_pos["planned_risk_usd"] = float(risk_verdict.get("planned_risk_usd") or approved_risk_val)
+                            active_pos["base_risk_pct"] = float(risk_verdict.get("base_risk_pct", 0.0))
+                            active_pos["final_risk_pct"] = float(risk_verdict.get("final_risk_pct", 0.0))
+                            active_pos["cohort"] = risk_verdict.get("cohort", "UNKNOWN")
+                            active_pos["applied_multipliers"] = risk_verdict.get("applied_multipliers", {})
+                            if active_pos.get("entry_price"):
+                                actual_fill_price = float(active_pos["entry_price"])
+                                real_notional = float(active_pos.get("notional_usd") or active_pos.get("size_usd") or 0.0)
+                                real_contracts = float(active_pos.get("contracts") or 0.0)
+                                if isinstance(risk_verdict, dict):
+                                    risk_verdict["entry_price"] = actual_fill_price
+                                    if real_notional > 0:
+                                        risk_verdict["notional_size_usd"] = real_notional
+                                    if real_contracts > 0:
+                                        risk_verdict["contracts"] = real_contracts
                                 tp_p = float(risk_verdict.get("take_profit_price") or 0.0)
                                 sl_p = float(risk_verdict.get("stop_loss_price") or 0.0)
                                 approved_risk = float(risk_verdict.get("approved_risk_usd") or risk_verdict.get("risk_amount_usd") or 0.0)
@@ -783,6 +908,30 @@ class TradingPipeline:
                             tracker.record_execution_failed()
                     else:
                         tracker.record_trade()
+
+                    self._record_candidate_snapshot(
+                        symbol=symbol,
+                        cycle_number=cycle_number,
+                        macro_regime=detected_regime,
+                        profile=effective_asset_profile,
+                        stage="EXECUTION",
+                        final_action="EXECUTED" if trade_success else "EXECUTION_FAILED",
+                        rejection_tag=None if trade_success else (execution_status or "EXECUTION_FAILED"),
+                        rejection_reason=None if trade_success else f"Order execution failed: {execution_status}",
+                        strategy_profile=strategy_profile,
+                        analyst_reports=valid_reports,
+                        debate_info={
+                            "bull_status": bull_status,
+                            "bear_status": bear_status,
+                            "debate_status": debate_status
+                        },
+                        ceo_verdict=ceo_verdict,
+                        final_trade_decision=final_trade_decision,
+                        risk_verdict=risk_verdict,
+                        execution_status=execution_status,
+                        trade_success=trade_success,
+                        actual_fill_price=actual_fill_price
+                    )
                 else:
                     self.services.logger.error(f"❌ Status: VETOED BY RISK MANAGER ({risk_verdict.get('reasoning')})")
                     veto_cat = risk_verdict.get("veto_category") or "RISK_VETO"
@@ -792,6 +941,26 @@ class TradingPipeline:
                         status="SKIPPED",
                         executed_at=time.time(),
                         error=f"Vetoed by Risk Manager: {veto_cat}"
+                    )
+                    self._record_candidate_snapshot(
+                        symbol=symbol,
+                        cycle_number=cycle_number,
+                        macro_regime=detected_regime,
+                        profile=effective_asset_profile,
+                        stage="RISK_MANAGER",
+                        final_action="REJECTED",
+                        rejection_tag=veto_cat,
+                        rejection_reason=risk_verdict.get("reasoning", ""),
+                        strategy_profile=strategy_profile,
+                        analyst_reports=valid_reports,
+                        debate_info={
+                            "bull_status": bull_status,
+                            "bear_status": bear_status,
+                            "debate_status": debate_status
+                        },
+                        ceo_verdict=ceo_verdict,
+                        final_trade_decision=final_trade_decision,
+                        risk_verdict=risk_verdict
                     )
 
                 # СТАДИЯ 6: ТЕЛЕГРАМ
@@ -1134,6 +1303,100 @@ class TradingPipeline:
                 self.services.logger.debug(f"[FastRadar] Error checking {symbol}: {e}")
 
         return False, "", ""
+
+    def _record_candidate_snapshot(
+        self,
+        symbol: str,
+        cycle_number: int,
+        macro_regime: str,
+        profile: str,
+        stage: str,
+        final_action: str,
+        rejection_tag: Optional[str] = None,
+        rejection_reason: Optional[str] = None,
+        strategy_profile: Optional[Any] = None,
+        analyst_reports: Optional[List[Dict[str, Any]]] = None,
+        debate_info: Optional[Dict[str, Any]] = None,
+        ceo_verdict: Optional[Dict[str, Any]] = None,
+        final_trade_decision: Optional[Any] = None,
+        risk_verdict: Optional[Dict[str, Any]] = None,
+        execution_status: Optional[str] = None,
+        trade_success: Optional[bool] = None,
+        actual_fill_price: Optional[float] = None
+    ):
+        """
+        Builds and logs a structured Decision Pipeline Snapshot to diagnostics tracker.
+        Enables offline replay tests and historical funnel verification (Audit Point 8).
+        """
+        now_ts = time.time()
+        iso_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        snapshot = {
+            "timestamp": now_ts,
+            "iso_time": iso_str,
+            "cycle_number": cycle_number,
+            "symbol": symbol,
+            "macro_regime": macro_regime,
+            "trading_profile": profile,
+            "stage": stage,
+            "final_action": final_action,
+            "rejection_tag": rejection_tag,
+            "rejection_reason": rejection_reason,
+        }
+        if strategy_profile:
+            snapshot["router"] = {
+                "strategy_mode": getattr(strategy_profile, "strategy_mode", None),
+                "direction_bias": getattr(strategy_profile, "direction_bias", None),
+                "has_directional_signal": getattr(strategy_profile, "has_directional_signal", None),
+                "reasoning": getattr(strategy_profile, "reasoning", None)
+            }
+        if analyst_reports:
+            snapshot["analysts"] = {
+                r.get("agent_name", f"agent_{i}"): {
+                    "signal": r.get("signal"),
+                    "confidence": r.get("confidence")
+                }
+                for i, r in enumerate(analyst_reports) if isinstance(r, dict)
+            }
+        if debate_info:
+            snapshot["debate"] = debate_info
+        if ceo_verdict:
+            snapshot["ceo"] = {
+                "decision": ceo_verdict.get("decision"),
+                "conviction": ceo_verdict.get("conviction"),
+                "directional_confidence": ceo_verdict.get("directional_confidence"),
+                "entry_quality": ceo_verdict.get("entry_quality"),
+                "raw_score": ceo_verdict.get("raw_score"),
+                "deterministic_score": ceo_verdict.get("deterministic_score"),
+                "risk_breakdown": ceo_verdict.get("risk_breakdown", {}),
+                "reasoning": ceo_verdict.get("reasoning_en", "")
+            }
+        if final_trade_decision:
+            snapshot["guard"] = {
+                "action": getattr(final_trade_decision, "trade_action", None),
+                "decision": getattr(final_trade_decision, "decision", None),
+                "conviction": getattr(final_trade_decision, "conviction", None),
+                "reason": getattr(final_trade_decision, "guard_reason", None),
+                "is_actionable": getattr(final_trade_decision, "is_actionable", None)
+            }
+        if risk_verdict:
+            approved_risk_val = float(risk_verdict.get("approved_risk_usd") or risk_verdict.get("risk_amount_usd") or 0.0)
+            snapshot["risk"] = {
+                "approved": risk_verdict.get("approved"),
+                "notional_size_usd": risk_verdict.get("notional_size_usd", 0),
+                "cohort": risk_verdict.get("cohort", "UNKNOWN"),
+                "leverage": risk_verdict.get("leverage", 10),
+                "take_profit_price": risk_verdict.get("take_profit_price", 0),
+                "stop_loss_price": risk_verdict.get("stop_loss_price", 0),
+                "approved_risk_usd": approved_risk_val,
+                "reasoning": risk_verdict.get("reasoning", "")
+            }
+        if execution_status is not None:
+            snapshot["execution"] = {
+                "status": execution_status,
+                "trade_success": bool(trade_success),
+                "fill_price": actual_fill_price
+            }
+        tracker.record_decision_snapshot(snapshot)
 
     def register_pullback_candidate(
         self,

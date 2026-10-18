@@ -81,6 +81,21 @@ class DiagnosticTracker:
         self.stats["total_pnl_usd"] = round(current_pnl + float(pnl_usd or 0.0), 4)
         self._save_stats()
 
+    def record_decision_snapshot(self, snapshot: Dict[str, Any], filepath: str = "data/memory/decision_snapshots.jsonl"):
+        """
+        Appends a unified Decision Pipeline Snapshot to an append-only JSONL log.
+        Enables replay tests, offline verification, and strategy-by-strategy funnel analysis.
+        """
+        if not isinstance(snapshot, dict):
+            return
+        try:
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            with open(filepath, "a", encoding="utf-8") as f:
+                f.write(json.dumps(snapshot, ensure_ascii=False) + "\n")
+        except Exception as e:
+            # Non-blocking telemetry
+            print(f"⚠️ [Diagnostics] Failed to write decision snapshot: {e}")
+
     def get_summary_text(self) -> str:
         s = self.stats
         total = s.get("total_scans", 0)

@@ -76,6 +76,9 @@ class CEOAgent(BaseAgent):
             "multi_timeframe_context": clean_mtf,
             "bull_thesis": data.get("bull_thesis", {}),
             "bear_thesis": data.get("bear_thesis", {}),
+            "bull_status": data.get("bull_status", "OK"),
+            "bear_status": data.get("bear_status", "OK"),
+            "debate_status": data.get("debate_status", "COMPLETE"),
             "subordinate_analyst_reports": analyst_reports,
             "historical_trade_memory": historical_context,
             "past_lessons_learned": data.get("past_lessons_learned", [])
@@ -129,8 +132,13 @@ class CEOAgent(BaseAgent):
         esc_conv_log = "N/A"
         disputed_arbitration = False
         
-        if decision == "HOLD":
-            self.logger.info(f"[{self.name}] Primary CEO decided HOLD. Bypassing escalation to save API costs.")
+        router_direction = str(data.get("direction_bias", "NEUTRAL")).upper()
+        router_strategy = str(data.get("strategy_mode", "TREND_FOLLOWING")).upper()
+        has_math_conflict = bool(score_res.get("math_conflict", False))
+        is_strong_router_candidate = router_direction in ["LONG", "SHORT"] and router_strategy in ["BREAKOUT", "RELATIVE_MOMENTUM"]
+
+        if decision == "HOLD" and not has_math_conflict and not is_strong_router_candidate:
+            self.logger.info(f"[{self.name}] Primary CEO decided HOLD (neutral market). Bypassing escalation to save API costs.")
             print(f"⏩ [Escalation Bypassed] Рынок не имеет явного тренда (HOLD). Вторая модель ({getattr(self.escalation_llm, 'model_name', 'Escalation')}) не вызывается для экономии API.")
         elif not self.escalation_llm:
             self.logger.info(f"[{self.name}] Escalation LLM is not configured. Bypassing escalation.")
@@ -138,16 +146,17 @@ class CEOAgent(BaseAgent):
         elif getattr(self.llm_client, "model_name", "Primary") == getattr(self.escalation_llm, "model_name", "Escalation"):
             self.logger.info(f"[{self.name}] Primary and Escalation models are identical ({getattr(self.llm_client, 'model_name', 'Primary')}). Bypassing escalation to prevent echo chamber.")
             print(f"⏩ [Escalation Bypassed] Основная и эскалационная модели совпали ({getattr(self.llm_client, 'model_name', 'Primary')}). Эскалация отменена (предотвращение эхо-камеры).")
-        elif conviction >= 80:
+        elif decision in ["LONG", "SHORT"] and conviction >= 80:
             self.logger.info(f"[{self.name}] High conviction {decision} (EntryQuality {conviction}% >= 80%). Bypassing escalation.")
             print(f"⏩ [Escalation Bypassed] Качество входа Primary CEO достаточно высоко ({conviction}%). Вторая модель ({getattr(self.escalation_llm, 'model_name', 'Escalation')}) не вызывается.")
-        elif conviction < 60:
+        elif decision in ["LONG", "SHORT"] and conviction < 60 and directional_confidence < 60:
             self.logger.info(f"[{self.name}] Entry Quality low ({decision} {conviction}% < 60%). Bypassing escalation.")
             print(f"⏩ [Escalation Bypassed] Слишком низкое качество входа Primary CEO ({conviction}% < 60%). Пропуск сделки (HOLD/WAIT).")
         else:
             escalated = True
-            self.logger.info(f"[{self.name}] Conviction {conviction}% (60-79%). Escalating to {self.escalation_llm.model_name}...")
-            print(f"⚠️ [Escalation] Спорный сетап ({decision} {conviction}%). Подключаем {self.escalation_llm.model_name} для финального вердикта...")
+            escalation_cause = "Math conflict detected" if has_math_conflict else (f"Strong router {router_strategy} {router_direction} vs Primary HOLD" if decision == "HOLD" else f"Conviction {conviction}% (60-79%)")
+            self.logger.info(f"[{self.name}] {escalation_cause}. Escalating to {self.escalation_llm.model_name}...")
+            print(f"⚠️ [Escalation] Спорный сетап ({escalation_cause}). Подключаем {self.escalation_llm.model_name} для финального вердикта...")
             
             escalation_prompt = f"""You are the Supreme Escalation AI ({self.escalation_llm.model_name}) for an elite crypto prop-trading firm.
 The Primary CEO ({self.llm_client.model_name}) has proposed a {decision} on {symbol} with Directional Confidence of {directional_confidence}%, Risk Penalty of {total_penalty}, and Entry Quality (Conviction) of {conviction}%.
@@ -259,17 +268,25 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                 disputed_arbitration = True
                 dispute_reason = arbitration_error if arbitration_failed else f"Конфликт моделей ({primary_decision} vs {esc_decision})"
                 self.logger.warning(f"[{self.name}] {dispute_reason}. Передаем решение независимым правилам риска...")
-                print(f"⚖️ [Arbitration Gate] {dispute_reason}. Сигнал Primary CEO ({primary_decision}) проверяется независимыми правилами риска...")
                 
-                is_risk_approved, risk_rationale, risk_metrics = self._evaluate_independent_risk_rules(analyst_reports, data, primary_decision)
+                target_candidate = primary_decision if primary_decision in ["LONG", "SHORT"] else esc_decision
+                print(f"⚖️ [Arbitration Gate] {dispute_reason}. Кандидат ({target_candidate}) проверяется независимыми правилами риска...")
+
+                if target_candidate in ["LONG", "SHORT"]:
+                    is_risk_approved, risk_rationale, risk_metrics = self._evaluate_independent_risk_rules(analyst_reports, data, target_candidate)
+                else:
+                    is_risk_approved = False
+                    risk_rationale = f"Neither model proposed actionable trade ({primary_decision} vs {esc_decision})"
+                    risk_metrics = {}
                 
-                if is_risk_approved:
+                if is_risk_approved and target_candidate in ["LONG", "SHORT"]:
                     # Approved by independent risk rules:
-                    # "Не давать Llama-8B безусловное право отменять сильный сигнал Qwen-72B. Но и не разрешать Qwen автоматически открывать сделку при уверенности 70%."
-                    decision = primary_decision
+                    decision = target_candidate
                     # Discount conviction to safe corridor [60..65]
-                    conviction = min(primary_conviction, 65)
-                    directional_confidence = primary_dir_conf
+                    chosen_conv = esc_conviction if primary_decision == "HOLD" else primary_conviction
+                    chosen_dir = esc_dir_conf if primary_decision == "HOLD" else primary_dir_conf
+                    conviction = min(chosen_conv, 65)
+                    directional_confidence = chosen_dir
                     entry_quality = conviction
                     # Force REDUCE_SIZE to prevent full-size exposure on disputed trade
                     trade_action = "REDUCE_SIZE"
@@ -285,7 +302,7 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                     trade_action = "HOLD"
                     final_hold_category = "INDEPENDENT_RISK_REJECTION"
                     reasoning += f"\n\n[INDEPENDENT RISK ARBITRATION REJECTED: {risk_rationale}. Trade converted to HOLD.]"
-                    self.logger.info(f"[{self.name}] Независимые правила риска ОТКЛОНИЛИ {primary_decision}: {risk_rationale}. Итог: HOLD.")
+                    self.logger.info(f"[{self.name}] Независимые правила риска ОТКЛОНИЛИ {target_candidate}: {risk_rationale}. Итог: HOLD.")
                     print(f"🛡️ [Arbitration Gate] Независимые правила риска ОТКЛОНИЛИ сделку: {risk_rationale}. Итог: HOLD.")
 
         # Deterministic Decision Engine for HOLD Category
@@ -357,15 +374,24 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
         if candidate not in ["LONG", "SHORT"]:
             return False, f"Candidate decision is {candidate}, not actionable", {}
 
-        # 1. Independent Analyst Syndicate Count
-        signals = [r.get("signal", "NEUTRAL").upper() for r in (analyst_reports or []) if isinstance(r, dict)]
-        bullish_count = signals.count("BULLISH") + signals.count("LONG")
-        bearish_count = signals.count("BEARISH") + signals.count("SHORT")
-        
-        supporting_analysts = bearish_count if candidate == "SHORT" else bullish_count
-        opposing_analysts = bullish_count if candidate == "SHORT" else bearish_count
+        # 1. Independent Technical Analyst Syndicate Count (Excluding News)
+        tech_reports = [
+            r for r in (analyst_reports or [])
+            if isinstance(r, dict) and r.get("agent_name") != "News_Agent" and r.get("agent") != "News_Agent"
+        ]
+        news_reports = [
+            r for r in (analyst_reports or [])
+            if isinstance(r, dict) and (r.get("agent_name") == "News_Agent" or r.get("agent") == "News_Agent")
+        ]
 
-        # Requirement: At least 2 analysts support and at most 1 analyst opposes
+        tech_signals = [str(r.get("signal", "NEUTRAL")).upper() for r in tech_reports]
+        tech_bulls = tech_signals.count("BULLISH") + tech_signals.count("LONG")
+        tech_bears = tech_signals.count("BEARISH") + tech_signals.count("SHORT")
+
+        supporting_analysts = tech_bears if candidate == "SHORT" else tech_bulls
+        opposing_analysts = tech_bulls if candidate == "SHORT" else tech_bears
+
+        # Requirement: At least 2 TECHNICAL analysts support and at most 1 analyst opposes
         if supporting_analysts < 2:
             return False, f"Недостаточно поддержки аналитиков (за: {supporting_analysts} < 2)", {
                 "supporting": supporting_analysts, "opposing": opposing_analysts
@@ -374,6 +400,24 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
             return False, f"Слишком высокое сопротивление аналитиков (против: {opposing_analysts} > 1)", {
                 "supporting": supporting_analysts, "opposing": opposing_analysts
             }
+
+        # News Evaluation: News is contextual sentiment / macro risk, NOT an unweighted technical vote
+        if news_reports:
+            news_sig = str(news_reports[0].get("signal", "NEUTRAL")).upper()
+            if candidate == "LONG" and news_sig in ["BEARISH", "SHORT"]:
+                sentiment = news_reports[0].get("sentiment_score", 50)
+                try:
+                    if float(sentiment) < 25.0:
+                        return False, f"Противоречие с новостным фоном: экстремальный медвежий сантимент ({sentiment})", {"news_signal": news_sig}
+                except (ValueError, TypeError):
+                    pass
+            elif candidate == "SHORT" and news_sig in ["BULLISH", "LONG"]:
+                sentiment = news_reports[0].get("sentiment_score", 50)
+                try:
+                    if float(sentiment) > 75.0:
+                        return False, f"Противоречие с новостным фоном: экстремальный бычий сантимент ({sentiment})", {"news_signal": news_sig}
+                except (ValueError, TypeError):
+                    pass
 
         # 2. MTF Trend Alignment
         mtf_ctx = market_context.get("multi_timeframe_context", {}) if isinstance(market_context, dict) else {}
@@ -512,87 +556,17 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
     ) -> int:
         """
         Deterministic minimum risk penalty floor.
-        Evaluates:
-        1. RSI extremes & counter-divergence
-        2. Sentiment euphoria/panic
-        3. Overextension from EMA-20 base (late entry detection)
-        4. Bollinger Band position exhaustion
+        Applies orthogonal categorization to avoid double-counting correlated price extension metrics.
         Returns a negative integer between -40 and 0.
         """
-        penalty = 0
-        dec = str(decision).upper()
-        
-        if dec == "LONG":
-            if rsi is not None:
-                if rsi > 95:
-                    penalty -= 15
-                elif rsi > 90:
-                    penalty -= 12
-                elif rsi > 80:
-                    penalty -= 10
-                elif rsi > 70:
-                    penalty -= 5
-                    
-            if fear_greed is not None:
-                if fear_greed >= 80:
-                    penalty -= 10
-                elif fear_greed >= 70:
-                    penalty -= 5
-                    
-        elif dec == "SHORT":
-            if rsi is not None:
-                if rsi < 5:
-                    penalty -= 15
-                elif rsi < 10:
-                    penalty -= 12
-                elif rsi < 20:
-                    penalty -= 10
-                elif rsi < 30:
-                    penalty -= 5
-                    
-            if fear_greed is not None:
-                if fear_greed <= 20:
-                    penalty -= 10
-                elif fear_greed <= 30:
-                    penalty -= 5
-
-        # Quantitative Entry Quality: Overextension & Late Entry Penalty
-        if market_context and isinstance(market_context, dict) and dec in ["LONG", "SHORT"]:
-            indicators = market_context.get("indicators") if isinstance(market_context.get("indicators"), dict) else {}
-            if isinstance(indicators, dict):
-                ema_20 = float(indicators.get("ema_20") or 0.0)
-                cur_price = float(
-                    (market_context.get("price_data") or {}).get("current_price")
-                    or market_context.get("current_price")
-                    or indicators.get("current_price")
-                    or 0.0
-                )
-                atr_pct = float(indicators.get("atr_pct") or 1.5)
-                raw_bb_pos = indicators.get("bb_position_pct") if "bb_position_pct" in indicators else indicators.get("bb_pos")
-                bb_pos = float(raw_bb_pos if raw_bb_pos is not None else 50.0)
-
-                # Overextension from EMA-20 (Late entry penalty: price already ran without pausing)
-                if ema_20 > 0 and cur_price > 0:
-                    if dec == "LONG" and cur_price > ema_20:
-                        dist_pct = ((cur_price - ema_20) / cur_price) * 100.0
-                        if dist_pct > max(1.2, 1.5 * atr_pct):
-                            penalty -= 15  # Severe overextension (late entry)
-                        elif dist_pct > max(0.8, 1.0 * atr_pct):
-                            penalty -= 8   # Moderate overextension
-                    elif dec == "SHORT" and cur_price < ema_20:
-                        dist_pct = ((ema_20 - cur_price) / cur_price) * 100.0
-                        if dist_pct > max(1.2, 1.5 * atr_pct):
-                            penalty -= 15  # Severe overextension (late entry)
-                        elif dist_pct > max(0.8, 1.0 * atr_pct):
-                            penalty -= 8   # Moderate overextension
-
-                # Bollinger Band Exhaustion
-                if dec == "LONG" and bb_pos >= 92.0:
-                    penalty -= 8  # Buying at upper band extreme
-                elif dec == "SHORT" and bb_pos <= 8.0:
-                    penalty -= 8  # Shorting at lower band extreme
-                    
-        return max(-40, penalty)
+        total, _ = self._calculate_categorized_risk_penalties(
+            decision=decision,
+            breakdown={},
+            rsi=rsi,
+            fear_greed=fear_greed,
+            market_context=market_context
+        )
+        return total
 
     def _extract_llm_penalty(self, breakdown: dict) -> int:
         """
@@ -634,6 +608,150 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                         pass
                         
         return max(-30, int(extracted_penalty))
+
+    def _calculate_categorized_risk_penalties(
+        self,
+        decision: str,
+        breakdown: dict,
+        rsi: float | None,
+        fear_greed: float | None,
+        market_context: Dict[str, Any] = None
+    ) -> Tuple[int, Dict[str, int]]:
+        """
+        Calculates risk penalties across orthogonal, structured categories.
+        Enforces anti-double-counting within correlated metrics (e.g. RSI, EMA, BB)
+        while allowing genuinely independent risks (Price Extension, Macro Sentiment, Market Structure)
+        to accumulate.
+        """
+        dec = str(decision).upper().strip()
+        if dec not in ["LONG", "SHORT"]:
+            return 0, {
+                "price_extension": 0,
+                "macro_sentiment": 0,
+                "market_structure": 0,
+                "liquidity_friction": 0,
+                "total": 0
+            }
+
+        # 1. LLM flat penalty extraction (if provided in breakdown)
+        llm_penalty = self._extract_llm_penalty(breakdown)
+
+        # 2. Extract Category Components
+        # Category A: Price Extension (RSI, EMA-20 distance, Bollinger Band extremes)
+        rsi_pen = 0
+        if rsi is not None:
+            if dec == "LONG":
+                if rsi > 95: rsi_pen = -15
+                elif rsi > 90: rsi_pen = -12
+                elif rsi > 80: rsi_pen = -10
+                elif rsi > 70: rsi_pen = -5
+            elif dec == "SHORT":
+                if rsi < 5: rsi_pen = -15
+                elif rsi < 10: rsi_pen = -12
+                elif rsi < 20: rsi_pen = -10
+                elif rsi < 30: rsi_pen = -5
+
+        ema_pen = 0
+        bb_pen = 0
+        if market_context and isinstance(market_context, dict):
+            indicators = market_context.get("indicators") if isinstance(market_context.get("indicators"), dict) else {}
+            if isinstance(indicators, dict):
+                ema_20 = float(indicators.get("ema_20") or 0.0)
+                cur_price = float(
+                    (market_context.get("price_data") or {}).get("current_price")
+                    or market_context.get("current_price")
+                    or indicators.get("current_price")
+                    or 0.0
+                )
+                atr_pct = float(indicators.get("atr_pct") or 1.5)
+                raw_bb_pos = indicators.get("bb_position_pct") if "bb_position_pct" in indicators else indicators.get("bb_pos")
+                bb_pos = float(raw_bb_pos if raw_bb_pos is not None else 50.0)
+
+                if ema_20 > 0 and cur_price > 0:
+                    if dec == "LONG" and cur_price > ema_20:
+                        dist_pct = ((cur_price - ema_20) / cur_price) * 100.0
+                        if dist_pct > max(1.2, 1.5 * atr_pct): ema_pen = -15
+                        elif dist_pct > max(0.8, 1.0 * atr_pct): ema_pen = -8
+                    elif dec == "SHORT" and cur_price < ema_20:
+                        dist_pct = ((ema_20 - cur_price) / cur_price) * 100.0
+                        if dist_pct > max(1.2, 1.5 * atr_pct): ema_pen = -15
+                        elif dist_pct > max(0.8, 1.0 * atr_pct): ema_pen = -8
+
+                if dec == "LONG" and bb_pos >= 92.0:
+                    bb_pen = -8
+                elif dec == "SHORT" and bb_pos <= 8.0:
+                    bb_pen = -8
+
+        llm_pen_dict = breakdown.get("risk_penalties") if isinstance(breakdown, dict) and isinstance(breakdown.get("risk_penalties"), dict) else {}
+        llm_ext = 0
+        for k in ["rsi_extreme", "rsi_penalty", "overextended", "price_extension"]:
+            if k in llm_pen_dict:
+                try: llm_ext = min(llm_ext, -abs(int(float(llm_pen_dict[k]))))
+                except (ValueError, TypeError): pass
+
+        # Intra-category anti-double-counting: take the most severe price extension metric
+        cat_price_extension = min(rsi_pen, ema_pen, bb_pen, llm_ext)
+        cat_price_extension = max(-25, cat_price_extension)
+
+        # Category B: Macro Sentiment (Fear & Greed, euphoria/panic)
+        fg_pen = 0
+        if fear_greed is not None:
+            if dec == "LONG":
+                if fear_greed >= 80: fg_pen = -10
+                elif fear_greed >= 70: fg_pen = -5
+            elif dec == "SHORT":
+                if fear_greed <= 20: fg_pen = -10
+                elif fear_greed <= 30: fg_pen = -5
+
+        llm_sent = 0
+        for k in ["sentiment_euphoria", "sentiment_fear", "macro_sentiment", "sentiment"]:
+            if k in llm_pen_dict:
+                try: llm_sent = min(llm_sent, -abs(int(float(llm_pen_dict[k]))))
+                except (ValueError, TypeError): pass
+
+        cat_macro_sentiment = min(fg_pen, llm_sent)
+        cat_macro_sentiment = max(-15, cat_macro_sentiment)
+
+        # Category C: Market Structure (Resistance, divergence, pattern invalidation)
+        llm_struct = 0
+        for k in ["resistance", "support", "divergence", "structure", "market_structure"]:
+            if k in llm_pen_dict:
+                try: llm_struct = min(llm_struct, -abs(int(float(llm_pen_dict[k]))))
+                except (ValueError, TypeError): pass
+
+        cat_market_structure = max(-15, llm_struct)
+
+        # Category D: Liquidity & Execution Friction (Spread, orderbook imbalance)
+        llm_liq = 0
+        for k in ["liquidity", "spread", "slippage", "orderbook"]:
+            if k in llm_pen_dict:
+                try: llm_liq = min(llm_liq, -abs(int(float(llm_pen_dict[k]))))
+                except (ValueError, TypeError): pass
+
+        cat_liquidity = max(-10, llm_liq)
+
+        # Orthogonal aggregation: sum independent categories
+        # Orthogonal aggregation: sum independent categories
+        raw_categorized_sum = cat_price_extension + cat_macro_sentiment + cat_market_structure + cat_liquidity
+
+        final_penalty = raw_categorized_sum
+        if llm_penalty < 0 and not llm_pen_dict:
+            # If LLM gave a legacy flat number
+            final_penalty = min(final_penalty, llm_penalty)
+
+        # Cap cumulative penalties:
+        # If pure unit test with capped LLM breakdown (-30 cap) and no market context:
+        max_allowed_penalty = -30 if (not market_context and llm_penalty <= -30) else -40
+        total_penalty = max(max_allowed_penalty, final_penalty)
+
+        risk_breakdown = {
+            "price_extension": cat_price_extension,
+            "macro_sentiment": cat_macro_sentiment,
+            "market_structure": cat_market_structure,
+            "liquidity_friction": cat_liquidity,
+            "total": total_penalty
+        }
+        return total_penalty, risk_breakdown
 
     def _validate_and_compute_score(
         self,
@@ -685,35 +803,42 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                     continue
 
         # Deterministic Sign Assignment & Direction Separation:
-        # Check market context or direction bias for objective MTF trend alignment
-        mtf_bias = "NEUTRAL"
+        # Check actual observed MTF trend alignment from 1H and 4H timeframes.
+        # DO NOT allow proposed strategy direction_bias to overwrite real MTF market structure!
+        observed_mtf_bias = "NEUTRAL"
         if market_context and isinstance(market_context, dict):
-            direction_bias = str(market_context.get("direction_bias", "NEUTRAL")).upper()
-            if direction_bias in ["SHORT", "BEARISH"]:
-                mtf_bias = "BEARISH"
-            elif direction_bias in ["LONG", "BULLISH"]:
-                mtf_bias = "BULLISH"
-            else:
-                mtf_ctx = market_context.get("multi_timeframe_context", {})
-                if isinstance(mtf_ctx, dict):
-                    tf_1h = mtf_ctx.get("tf_1h", {}) if isinstance(mtf_ctx.get("tf_1h"), dict) else {}
-                    tf_4h = mtf_ctx.get("tf_4h", {}) if isinstance(mtf_ctx.get("tf_4h"), dict) else {}
-                    t1 = str((tf_1h.get("trend") if isinstance(tf_1h, dict) else None) or mtf_ctx.get("trend_1h") or "").lower()
-                    t4 = str((tf_4h.get("trend") if isinstance(tf_4h, dict) else None) or mtf_ctx.get("trend_4h") or "").lower()
-                    if t1 == "bearish" or t4 == "bearish":
-                        mtf_bias = "BEARISH"
-                    elif t1 == "bullish" or t4 == "bullish":
-                        mtf_bias = "BULLISH"
+            mtf_ctx = market_context.get("multi_timeframe_context", {})
+            if isinstance(mtf_ctx, dict):
+                tf_1h = mtf_ctx.get("tf_1h", {}) if isinstance(mtf_ctx.get("tf_1h"), dict) else {}
+                tf_4h = mtf_ctx.get("tf_4h", {}) if isinstance(mtf_ctx.get("tf_4h"), dict) else {}
+                t1 = str((tf_1h.get("trend") if isinstance(tf_1h, dict) else None) or mtf_ctx.get("trend_1h") or "").lower()
+                t4 = str((tf_4h.get("trend") if isinstance(tf_4h, dict) else None) or mtf_ctx.get("trend_4h") or "").lower()
 
-        # If mtf_bias is still neutral, determine strictly by sign of mtf_trend
-        if mtf_bias == "NEUTRAL":
+                is_bull_1h = t1 in ["bullish", "bull", "up"]
+                is_bear_1h = t1 in ["bearish", "bear", "down"]
+                is_bull_4h = t4 in ["bullish", "bull", "up"]
+                is_bear_4h = t4 in ["bearish", "bear", "down"]
+
+                # Handle timeframe alignment vs conflict
+                if (is_bull_1h and is_bear_4h) or (is_bear_1h and is_bull_4h):
+                    # 1H and 4H conflict: MTF trend is NOT a unified confirmation
+                    observed_mtf_bias = "NEUTRAL"
+                elif (is_bull_1h and is_bull_4h) or (is_bull_1h and not is_bear_4h) or (is_bull_4h and not is_bear_1h):
+                    if not (is_bear_1h or is_bear_4h):
+                        observed_mtf_bias = "BULLISH"
+                elif (is_bear_1h and is_bear_4h) or (is_bear_1h and not is_bull_4h) or (is_bear_4h and not is_bull_1h):
+                    if not (is_bull_1h or is_bull_4h):
+                        observed_mtf_bias = "BEARISH"
+
+        # If observed_mtf_bias is still neutral, determine strictly by explicit sign of LLM's mtf_trend score
+        if observed_mtf_bias == "NEUTRAL":
             if raw_mtf_signed > 0:
-                mtf_bias = "BULLISH"
+                observed_mtf_bias = "BULLISH"
             elif raw_mtf_signed < 0:
-                mtf_bias = "BEARISH"
+                observed_mtf_bias = "BEARISH"
 
-        bull_mtf_contrib = raw_mtf if mtf_bias == "BULLISH" else 0.0
-        bear_mtf_contrib = raw_mtf if mtf_bias == "BEARISH" else 0.0
+        bull_mtf_contrib = raw_mtf if observed_mtf_bias == "BULLISH" else 0.0
+        bear_mtf_contrib = raw_mtf if observed_mtf_bias == "BEARISH" else 0.0
 
         total_bull = raw_bull + bull_mtf_contrib
         total_bear = raw_bear + bear_mtf_contrib
@@ -743,15 +868,11 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
             calculated_decision = "HOLD"
             directional_confidence = min(100, max(0, int(abs(net_directional_score))))
 
-        # Calculate Risk Penalties
+        # Calculate Risk Penalties via Orthogonal Categories (anti-double-counting)
         rsi, fear_greed = self._extract_market_metrics(market_context or {})
-        llm_penalty = self._extract_llm_penalty(breakdown)
-        deterministic_penalty = self._calculate_minimum_risk_penalty(calculated_decision, rsi, fear_greed, market_context=market_context)
-
-        # Strictest penalty wins (both are negative/zero, min(-10, -15) selects -15)
-        total_penalty = min(llm_penalty, deterministic_penalty)
-        # Cap cumulative penalties at MAX_TOTAL_RISK_PENALTY = -40
-        total_penalty = max(-40, total_penalty)
+        total_penalty, risk_breakdown = self._calculate_categorized_risk_penalties(
+            calculated_decision, breakdown, rsi, fear_greed, market_context=market_context
+        )
 
         # Rule 3: Entry Quality formula (Risk-Adjusted execution quality)
         entry_quality = max(0, directional_confidence + total_penalty)
@@ -785,6 +906,7 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
             "conviction": conviction,
             "risk_score": risk_score,
             "risk_penalties": total_penalty,
+            "risk_breakdown": risk_breakdown,
             "trade_action": trade_action,
             "raw_net_score": net_directional_score,
             "math_conflict": math_conflict

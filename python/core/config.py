@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     MIN_TP_PCT: float = Field(default=0.03)    # 3.0% floor (was 7.5%)
     SPREAD_PENALTY_THRESHOLD: float = Field(default=0.4)
     SPREAD_VETO_THRESHOLD: float = Field(default=1.0)
+    
+    # Блокировка сделок Когорты D (низкая уверенность + REDUCE_SIZE) из-за отрицательного матожидания E(R) < 0
+    BLOCK_COHORT_D_TRADES: bool = Field(default=True)
 
     model_config = SettingsConfigDict(
         env_file=".env", 

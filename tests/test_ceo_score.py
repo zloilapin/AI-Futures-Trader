@@ -252,8 +252,10 @@ def test_rsi_directional_conditioning_no_cross_penalty():
     (85, "ENTER", "CONSERVATIVE", True, None),
     (65, "WAIT_FOR_PULLBACK", "BALANCED", False, "WAIT_FOR_PULLBACK"),
     (65, "WAIT_FOR_PULLBACK", "AGGRESSIVE", False, "WAIT_FOR_PULLBACK"),
-    (72, "REDUCE_SIZE", "BALANCED", True, None),
-    (72, "REDUCE_SIZE", "AGGRESSIVE", True, None),
+    (85, "REDUCE_SIZE", "BALANCED", True, None),
+    (85, "REDUCE_SIZE", "AGGRESSIVE", True, None),
+    (72, "REDUCE_SIZE", "BALANCED", False, "COHORT_D_NEGATIVE_EXPECTANCY"),
+    (72, "REDUCE_SIZE", "AGGRESSIVE", False, "COHORT_D_NEGATIVE_EXPECTANCY"),
     (55, "HOLD", "BALANCED", False, "LOW_CONFIDENCE"),
     (55, "HOLD", "AGGRESSIVE", False, "LOW_CONFIDENCE"),
 ])
@@ -289,4 +291,50 @@ async def test_profile_matrix_execution_and_sizing(entry_quality, action, profil
         ceo_enter = dict(ceo_decision, trade_action="ENTER")
         enter_verdict = await rm.analyze(ceo_enter, portfolio_data, market_data, effective_profile=profile)
         assert verdict["notional_size_usd"] < enter_verdict["notional_size_usd"]
+
+
+def test_categorized_risk_penalties_anti_double_counting():
+    """
+    Verifies that:
+    1. Correlated price extension metrics (RSI, EMA distance, Bollinger position)
+       do NOT triple-punish the setup (anti-double-counting).
+    2. Independent risk categories (Price Extension + Macro Sentiment)
+       accumulate cleanly.
+    3. Structured risk_breakdown is populated.
+    """
+    ceo = get_mock_ceo()
+    # Market context with extreme RSI (96.8 -> -15), EMA overextension (2.0% -> -15), and BB position (95% -> -8)
+    market_context = {
+        "indicators": {
+            "rsi_14": 96.8,
+            "ema_20": 100.0,
+            "current_price": 102.5,  # 2.5% over EMA-20
+            "atr_pct": 1.0,
+            "bb_position_pct": 95.0
+        },
+        "news_data": {
+            "fear_and_greed_index": 85.0  # Macro euphoria -> -10
+        }
+    }
+    breakdown = {
+        "bull_argument": 45,
+        "bear_argument": 0,
+        "mtf_trend": 35,
+        "risk_penalties": 0
+    }
+    result = ceo._validate_and_compute_score("LONG", breakdown, market_context=market_context)
+
+    # Price extension took the most severe single metric (-15) rather than summing -15+-15+-8 = -38
+    assert result["risk_breakdown"]["price_extension"] == -15
+    # Macro sentiment is evaluated independently (-10)
+    assert result["risk_breakdown"]["macro_sentiment"] == -10
+    # Total is sum of independent categories: -15 + -10 = -25
+    assert result["risk_penalties"] == -25
+    assert result["risk_breakdown"]["total"] == -25
+    # Directional confidence: 45 + 35 = 80
+    assert result["directional_confidence"] == 80
+    # Entry quality: 80 - 25 = 55 (< 60) -> trade_action WAIT_FOR_PULLBACK or HOLD
+    assert result["entry_quality"] == 55
+    assert result["trade_action"] in ["WAIT_FOR_PULLBACK", "HOLD"]
+
 

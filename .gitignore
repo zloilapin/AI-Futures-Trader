@@ -18,6 +18,8 @@ python/data/memory/diagnostics.json
 python/data/memory/lessons.json
 python/data/memory/pending_reconciliations.json
 python/data/memory/processed_fills.json
+python/data/memory/trade_journal.json
+python/data/memory/*.jsonl
 *.log
 bot_debug_log.txt
 dump_trades.py

@@ -32,36 +32,36 @@ class RiskManager(BaseAgent):
         if profile == "AGGRESSIVE":
             rules = {
                 "min_conviction": 65,
-                "base_risk": 0.060,           # 6.0% base risk per trade (was 2.0%)
-                "risk_cap": 0.080,            # 8.0% risk cap
-                "portfolio_risk_cap": 0.16,   # 16.0% portfolio risk cap
-                "max_daily_drawdown_pct": 0.15, # 15% max daily loss for boost mode
+                "base_risk": 0.020,
+                "risk_cap": 0.025,
+                "portfolio_risk_cap": 0.06,
+                "max_daily_drawdown_pct": 0.08, # 8% max daily loss
                 "max_concurrent_positions": max_concurrent,
                 "sl_mult": 1.75,
                 "tp_mult": 3.0,
                 "min_rr": 1.20,
-                "target_margin_pct": 0.45,    # 45% margin allocation per trade (~$43 on $96)
-                "max_margin_pct": 0.60,       # 60% max margin allocation
+                "target_margin_pct": 0.20,
+                "max_margin_pct": 0.45,
                 "max_leverage": 15,
-                "sentinel_be_atr": 2.5,
-                "sentinel_trail_atr": 3.5,
-                "sentinel_trail_activation_atr": 3.5,
-                "sentinel_trail_distance_atr": 2.5,
-                "sentinel_min_improve_atr": 0.30
+                "sentinel_be_atr": 2.2,
+                "sentinel_trail_atr": 3.0,
+                "sentinel_trail_activation_atr": 3.0,
+                "sentinel_trail_distance_atr": 2.0,
+                "sentinel_min_improve_atr": 0.25
             }
         elif profile == "CONSERVATIVE":
             rules = {
                 "min_conviction": 80,
-                "base_risk": 0.010,
-                "risk_cap": 0.015,
-                "portfolio_risk_cap": 0.03,
-                "max_daily_drawdown_pct": 0.05,
+                "base_risk": 0.005,
+                "risk_cap": 0.010,
+                "portfolio_risk_cap": 0.02,
+                "max_daily_drawdown_pct": 0.04, # 4% max daily loss
                 "max_concurrent_positions": min(2, max_concurrent),
                 "sl_mult": 2.0,
                 "tp_mult": 3.0,
                 "min_rr": 1.25,
-                "target_margin_pct": 0.10,
-                "max_margin_pct": 0.15,
+                "target_margin_pct": 0.05,
+                "max_margin_pct": 0.10,
                 "max_leverage": 5,
                 "sentinel_be_atr": 1.5,
                 "sentinel_trail_atr": 2.0,
@@ -73,20 +73,20 @@ class RiskManager(BaseAgent):
             rules = {
                 "min_conviction": 70,
                 "base_risk": 0.015,
-                "risk_cap": 0.025,
-                "portfolio_risk_cap": 0.05,
-                "max_daily_drawdown_pct": 0.06,
+                "risk_cap": 0.020,
+                "portfolio_risk_cap": 0.04,
+                "max_daily_drawdown_pct": 0.06, # 6% max daily loss
                 "max_concurrent_positions": max_concurrent,
                 "sl_mult": 1.5,
                 "tp_mult": 2.6,
                 "min_rr": 1.25,
                 "target_margin_pct": 0.10,
-                "max_margin_pct": 0.15,
+                "max_margin_pct": 0.20,
                 "max_leverage": 10,
-                "sentinel_be_atr": 2.0,
-                "sentinel_trail_atr": 2.8,
-                "sentinel_trail_activation_atr": 2.8,
-                "sentinel_trail_distance_atr": 1.8,
+                "sentinel_be_atr": 1.8,
+                "sentinel_trail_atr": 2.5,
+                "sentinel_trail_activation_atr": 2.5,
+                "sentinel_trail_distance_atr": 1.5,
                 "sentinel_min_improve_atr": 0.25
             }
             
@@ -182,11 +182,15 @@ class RiskManager(BaseAgent):
         q = 1.0 - win_rate
         f_star = (win_rate * realized_rr - q) / realized_rr
         
-        # Asymmetric downside damping only:
+        # Asymmetric downside damping with continuous calibration:
+        # Instead of a discrete binary step jump between 0.50 and 1.00 at f* = 0,
+        # linearly interpolate marginal edges (0 < f* < 0.25) smoothly between 0.50 and 1.00.
         if f_star <= 0:
             return 0.50
-        
-        return 1.0
+        elif f_star >= 0.25:
+            return 1.00
+        else:
+            return round(0.50 + (f_star / 0.25) * 0.50, 4)
 
     def _build_veto_result(self, veto_category: str, reason: str, trade_action: str = "HOLD") -> Dict[str, Any]:
         """Uniform dictionary constructor for rejected / vetoed trade candidates."""
@@ -594,26 +598,75 @@ class RiskManager(BaseAgent):
         # 3. Fractional (Half) Kelly Multiplier (Active at N >= 15 trades)
         kelly_mult = self._calculate_kelly_multiplier(win_rate, realized_rr, total_trades) if total_trades >= 15 else 1.0
 
-        # 4. Conviction and Action Multipliers
+        # 4. Conviction and Action Multipliers (Signal Edge)
         conf_mult = self._get_conviction_multiplier(min_conviction, conviction)
         action_mult = 0.75 if trade_action == "REDUCE_SIZE" else 1.0
 
+        # Cohort Determination for mathematical expectancy analytics (Groups A, B, C, D):
+        # A: High Conviction (>= min_conviction + 10), Full Size (action == ENTER)
+        # B: High Conviction (>= min_conviction + 10), Reduced Size (action == REDUCE_SIZE)
+        # C: Low Conviction (< min_conviction + 10), Full Size (action == ENTER)
+        # D: Low Conviction (< min_conviction + 10), Reduced Size (action == REDUCE_SIZE)
+        is_high_conv = conviction >= (min_conviction + 10)
+        is_full_size = (trade_action != "REDUCE_SIZE")
+        if is_high_conv and is_full_size:
+            cohort = "A"
+        elif is_high_conv and not is_full_size:
+            cohort = "B"
+        elif not is_high_conv and is_full_size:
+            cohort = "C"
+        else:
+            cohort = "D"
+
+        # Gate: Block Cohort D trades (low conviction + REDUCE_SIZE) due to empirical negative expectancy E(R) < 0
+        block_cohort_d = getattr(config, "BLOCK_COHORT_D_TRADES", True)
+        if block_cohort_d and cohort == "D":
+            msg = (f"Cohort D trade vetoed: Conviction {conviction}% is below high-confidence threshold "
+                   f"({min_conviction + 10}%) with REDUCE_SIZE. Empirical expectancy E(R) < 0; "
+                   f"capital preserved by enforcing strict HOLD.")
+            self.logger.warning(f"[{self.name}] 🚫 COHORT_D_VETO: {msg}")
+            return self._build_veto_result("COHORT_D_NEGATIVE_EXPECTANCY", msg, "HOLD")
+
+        # Signal edge multiplier with dampening against excessive double-penalty:
+        # If conviction is already near threshold (conf_mult = 0.70) AND trade_action is REDUCE_SIZE (0.75),
+        # compounding 0.70 * 0.75 = 0.525 severely punishes trades.
+        # We preserve action downscaling while setting a conservative signal floor (0.60x):
+        raw_signal_mult = conf_mult * action_mult
+        signal_mult = max(0.60, raw_signal_mult) if (conf_mult < 1.0 and action_mult < 1.0) else raw_signal_mult
+
+        # Orthogonal Factor 2: Market Friction (Volume & Spread)
+        market_mult = quality_mult
+
+        # Orthogonal Factor 3: Portfolio Health (Drawdown streak & Kelly)
+        portfolio_mult = dd_mult * kelly_mult
+
         # Combine into dynamic risk percentage with a safe floor check
-        dynamic_risk_pct = base_risk * conf_mult * quality_mult * dd_mult * action_mult * kelly_mult
+        dynamic_risk_pct = base_risk * signal_mult * market_mult * portfolio_mult
         min_viable_risk = base_risk * 0.35  # Protect at least 35% of base risk to meet exchange minimums
 
         if dynamic_risk_pct < min_viable_risk:
             msg = (f"Dynamic risk ({dynamic_risk_pct*100:.3f}%) fell below minimum viable risk "
-                   f"({min_viable_risk*100:.3f}%). Cumulative penalties (DD x{dd_mult}, Qual x{quality_mult:.2f}, "
-                   f"Kelly x{kelly_mult:.2f}) suppress viable trade edge. Vetoing to protect capital.")
+                   f"({min_viable_risk*100:.3f}%). Cumulative penalties (Signal x{signal_mult:.2f}, "
+                   f"DD x{dd_mult}, Qual x{quality_mult:.2f}, Kelly x{kelly_mult:.2f}) suppress viable trade edge. Vetoing to protect capital.")
             self.logger.warning(f"[{self.name}] 🚫 PENALTY_SUPPRESSION VETO: {msg}")
             return self._build_veto_result("PENALTY_SUPPRESSION", msg, trade_action)
 
         dynamic_risk_pct = min(dynamic_risk_pct, risk_cap)
         
+        applied_multipliers = {
+            "conf_mult": conf_mult,
+            "action_mult": action_mult,
+            "signal_mult": round(signal_mult, 4),
+            "quality_mult": round(quality_mult, 4),
+            "dd_mult": round(dd_mult, 4),
+            "kelly_mult": round(kelly_mult, 4),
+            "combined_mult": round(dynamic_risk_pct / base_risk, 4) if base_risk > 0 else 1.0
+        }
+
         self.logger.info(
-            f"[{self.name}] Final Risk: {dynamic_risk_pct*100:.2f}% (Base: {base_risk*100}%, Conf: x{conf_mult}, "
-            f"Quality: x{quality_mult:.2f}, DD: x{dd_mult}, Kelly: x{kelly_mult:.2f}, Action: x{action_mult}, Cap: {risk_cap*100}%)"
+            f"[{self.name}] Final Risk: {dynamic_risk_pct*100:.2f}% (Base: {base_risk*100}%, Signal: x{signal_mult:.2f} "
+            f"[Conf: x{conf_mult}, Action: x{action_mult}], Market: x{market_mult:.2f}, "
+            f"Portfolio: x{portfolio_mult:.2f} [DD: x{dd_mult}, Kelly: x{kelly_mult:.2f}], Cohort: {cohort}, Cap: {risk_cap*100}%)"
         )
 
         # ═══ Stage 6: Position Sizing (Canonical Math with Fee Integration) ═══
@@ -851,6 +904,11 @@ class RiskManager(BaseAgent):
             "reasoning": final_reasoning,
             "risk_amount_usd": risk_amount_usd,
             "approved_risk_usd": risk_amount_usd,
+            "planned_risk_usd": risk_amount_usd,
+            "base_risk_pct": base_risk,
+            "final_risk_pct": dynamic_risk_pct,
+            "cohort": cohort,
+            "applied_multipliers": applied_multipliers,
             "expected_fee_usd": loss_calc.fee_loss_usd,
             "total_expected_loss_usd": loss_calc.total_expected_loss_usd,
             "total_stress_loss_usd": loss_calc.total_stress_loss_usd,

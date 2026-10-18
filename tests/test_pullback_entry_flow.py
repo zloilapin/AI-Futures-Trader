@@ -52,8 +52,8 @@ async def run_tests():
     assert res.is_actionable is True, f"Expected actionable True, got {res.is_actionable}"
     print("✅ Confirmed BREAKOUT overrides WAIT_FOR_PULLBACK to ENTER successfully.")
 
-    # 1.2 Strategy mode is TREND_FOLLOWING but indicators have confirmed Donchian breakout + volume surge
-    tf_profile = StrategyProfile(True, "TREND_FOLLOWING", "SHORT", "Trend following test")
+    # 1.2 Strategy mode is VOLATILITY_MOMENTUM with confirmed Donchian breakdown + volume surge -> overrides to ENTER
+    vm_profile = StrategyProfile(True, "VOLATILITY_MOMENTUM", "SHORT", "Volatility momentum test")
     market_data_breakout = {
         "price_data": {"current_price": 2500.0},
         "indicators": {
@@ -69,7 +69,7 @@ async def run_tests():
         "trade_action": "WAIT_FOR_PULLBACK"
     }
     res2 = DeterministicGuard.evaluate(
-        strategy_profile=tf_profile,
+        strategy_profile=vm_profile,
         ceo_proposal=dict(short_proposal),
         profile="BALANCED",
         risk_manager=risk_mgr,
@@ -77,9 +77,25 @@ async def run_tests():
         symbol="BTC-USD"
     )
     assert res2.decision == "SHORT"
-    assert res2.trade_action == "ENTER", f"Expected ENTER on confirmed Donchian break, got {res2.trade_action}"
+    assert res2.trade_action == "ENTER", f"Expected ENTER on confirmed Donchian break for VOLATILITY_MOMENTUM, got {res2.trade_action}"
     assert res2.is_actionable is True
-    print("✅ Confirmed breakdown via indicators overrides WAIT_FOR_PULLBACK to ENTER successfully.")
+    print("✅ Confirmed breakdown via indicators overrides WAIT_FOR_PULLBACK to ENTER for VOLATILITY_MOMENTUM.")
+
+    # 1.3 Strategy mode is TREND_FOLLOWING: must PRESERVE WAIT_FOR_PULLBACK even if Donchian channel is broken (No FOMO top-buying)
+    tf_profile = StrategyProfile(True, "TREND_FOLLOWING", "SHORT", "Trend following test")
+    res_tf = DeterministicGuard.evaluate(
+        strategy_profile=tf_profile,
+        ceo_proposal=dict(short_proposal),
+        profile="BALANCED",
+        risk_manager=risk_mgr,
+        market_data=market_data_breakout,
+        symbol="BTC-USD"
+    )
+    assert res_tf.decision == "SHORT"
+    assert res_tf.trade_action == "WAIT_FOR_PULLBACK", f"Expected WAIT_FOR_PULLBACK preserved for TREND_FOLLOWING, got {res_tf.trade_action}"
+    assert res_tf.is_actionable is False
+    assert res_tf.guard_status == "PULLBACK_WATCHLIST"
+    print("✅ Confirmed TREND_FOLLOWING strictly preserves WAIT_FOR_PULLBACK to prevent entering at extremes.")
 
     print("\n=== TEST 2: No Breakout Confirmation -> Keep Monitoring (Not Actionable) ===")
     market_data_normal = {

@@ -360,7 +360,12 @@ class NadoTradingService(BaseTradingService):
         atr_value: float = 0.0,
         max_slippage_pct: Optional[float] = None,
         approved_risk_usd: float = 0.0,
-        taker_fee_pct: float = 0.0005
+        taker_fee_pct: float = 0.0005,
+        planned_risk_usd: float = 0.0,
+        base_risk_pct: float = 0.0,
+        final_risk_pct: float = 0.0,
+        cohort: str = "UNKNOWN",
+        applied_multipliers: Optional[Dict[str, Any]] = None
     ) -> bool:
         """Submits an EIP-712 signed order to Nado Gateway."""
         self.last_execution_status = "PENDING"
@@ -668,7 +673,12 @@ class NadoTradingService(BaseTradingService):
                 "original_thesis": original_thesis,
                 "native_triggers_placed": False,
                 "open_time": time.time(),
-                "open_digest": digest
+                "open_digest": digest,
+                "planned_risk_usd": float(planned_risk_usd or approved_risk_usd or 0.0),
+                "base_risk_pct": float(base_risk_pct or 0.0),
+                "final_risk_pct": float(final_risk_pct or 0.0),
+                "cohort": cohort or "UNKNOWN",
+                "applied_multipliers": applied_multipliers or {}
             }
             if canonical_sym != symbol:
                 self.active_positions[canonical_sym] = self.active_positions[symbol]
@@ -1084,6 +1094,70 @@ class NadoTradingService(BaseTradingService):
                 self.processed_fill_digests.add(d_norm)
         self._save_processed_fills()
 
+    def _record_closed_trade_journal(
+        self,
+        symbol: str,
+        direction: str,
+        entry_price: float,
+        exit_price: float,
+        net_pnl: float,
+        pos_data: Dict[str, Any],
+        fee: float = 0.0,
+        triggered_by: str = "MANUAL_OR_ON_CHAIN"
+    ) -> float:
+        """
+        Records a completed trade into the persistent Trade Journal (data/memory/trade_journal.json).
+        Calculates exact realized R-multiple: R = Net PnL / Planned Risk.
+        Returns the realized R-multiple.
+        """
+        planned_risk = float(pos_data.get("planned_risk_usd") or pos_data.get("approved_risk_usd") or 0.0)
+        if planned_risk <= 0.0:
+            sl_p = float(pos_data.get("sl_price") or 0.0)
+            cnt = float(pos_data.get("contracts") or 0.0)
+            if entry_price > 0 and sl_p > 0 and cnt > 0:
+                planned_risk = cnt * abs(entry_price - sl_p)
+
+        realized_r = round(net_pnl / planned_risk, 4) if planned_risk > 0 else 0.0
+        cohort = pos_data.get("cohort", "UNKNOWN")
+        multipliers = pos_data.get("applied_multipliers", {})
+
+        trade_entry = {
+            "timestamp": time.time(),
+            "symbol": symbol,
+            "direction": direction,
+            "entry_price": round(float(entry_price or 0.0), 6),
+            "exit_price": round(float(exit_price or 0.0), 6),
+            "net_pnl_usd": round(float(net_pnl or 0.0), 4),
+            "fee_usd": round(float(fee or 0.0), 4),
+            "planned_risk_usd": round(float(planned_risk or 0.0), 4),
+            "realized_r": realized_r,
+            "cohort": cohort,
+            "base_risk_pct": float(pos_data.get("base_risk_pct", 0.0)),
+            "final_risk_pct": float(pos_data.get("final_risk_pct", 0.0)),
+            "applied_multipliers": multipliers,
+            "triggered_by": triggered_by,
+            "open_time": float(pos_data.get("open_time", 0.0))
+        }
+
+        try:
+            from core.state_store import StateStore
+            journal_file = "data/memory/trade_journal.json"
+            journal = StateStore.load(journal_file, default=[])
+            if not isinstance(journal, list):
+                journal = []
+            journal.append(trade_entry)
+            if len(journal) > 1000:
+                journal = journal[-1000:]
+            StateStore.save(journal_file, journal)
+        except Exception as e:
+            logger.warning(f"[NadoTradingService] ⚠️ Could not save trade to journal: {e}")
+
+        logger.info(
+            f"[NadoTradingService] 📊 TRADE JOURNAL ENTRY -> {symbol} {direction} | Net PnL: ${net_pnl:.4f} "
+            f"({realized_r:+.2f}R | Planned Risk: ${planned_risk:.2f} | Cohort: {cohort} | Reason: {triggered_by})"
+        )
+        return realized_r
+
     async def check_and_update_positions(self, symbol: str, current_price: float) -> List[Dict[str, Any]]:
         """Checks if a position was closed natively by Nado (TP/SL trigger)."""
         closed_reports = []
@@ -1310,6 +1384,16 @@ class NadoTradingService(BaseTradingService):
                     self._save_state()
                     
                 closure_tag = f"CLOSED_ON_CHAIN ({triggered_by})" if triggered_by != "MANUAL_OR_ON_CHAIN" else "CLOSED_ON_CHAIN"
+                realized_r = self._record_closed_trade_journal(
+                    symbol=symbol,
+                    direction=direction,
+                    entry_price=entry_price,
+                    exit_price=exit_price,
+                    net_pnl=target_pnl,
+                    pos_data=pos,
+                    fee=estimated_fees,
+                    triggered_by=closure_tag
+                )
                 closed_reports.append({
                     "symbol": symbol,
                     "direction": direction,
@@ -1317,6 +1401,9 @@ class NadoTradingService(BaseTradingService):
                     "entry_price": entry_price,
                     "exit_price": exit_price,
                     "pnl_usd": target_pnl,
+                    "realized_r": realized_r,
+                    "planned_risk_usd": float(pos.get("planned_risk_usd") or pos.get("approved_risk_usd") or 0.0),
+                    "cohort": pos.get("cohort", "UNKNOWN"),
                     "roi_pct": (target_pnl / pos.get("margin_used", size_usd) * 100) if size_usd > 0 else 0,
                     "original_thesis": pos.get("original_thesis", "") if pos else ""
                 })
@@ -1785,6 +1872,17 @@ class NadoTradingService(BaseTradingService):
                         f"Exit: {exit_price:.4f}, Net PnL: ${net_pnl:.4f} (includes TP ${acc_pnl:.2f})"
                     )
 
+                    realized_r = self._record_closed_trade_journal(
+                        symbol=symbol,
+                        direction=direction,
+                        entry_price=entry_price,
+                        exit_price=exit_price,
+                        net_pnl=net_pnl,
+                        pos_data=pending,
+                        fee=fee,
+                        triggered_by=pending.get("reason", "INDEXER_RECONCILED")
+                    )
+
                     keys_to_remove.append(symbol)
                     resolved_reports.append({
                         "symbol": symbol,
@@ -1794,6 +1892,9 @@ class NadoTradingService(BaseTradingService):
                         "entry_price": entry_price,
                         "exit_price": exit_price,
                         "pnl_usd": net_pnl,
+                        "realized_r": realized_r,
+                        "planned_risk_usd": float(pending.get("planned_risk_usd") or pending.get("approved_risk_usd") or 0.0),
+                        "cohort": pending.get("cohort", "UNKNOWN"),
                         "fee": fee,
                         "roi_pct": (net_pnl / pending.get("size_usd", 1.0) * 100) if pending.get("size_usd", 0) > 0 else 0,
                         "original_thesis": pending.get("original_thesis", "")
@@ -2077,7 +2178,11 @@ class NadoTradingService(BaseTradingService):
                             "attempts": 0,
                             "excluded_digests": list(excluded_digests),
                             "status": "PNL_RECONCILIATION_PENDING",
-                            "reason": "FORCE_CLOSE_INDEXER_LAG"
+                            "reason": "FORCE_CLOSE_INDEXER_LAG",
+                            "planned_risk_usd": float(pos_data.get("planned_risk_usd") or pos_data.get("approved_risk_usd") or 0.0),
+                            "cohort": pos_data.get("cohort", "UNKNOWN"),
+                            "base_risk_pct": float(pos_data.get("base_risk_pct", 0.0)),
+                            "applied_multipliers": pos_data.get("applied_multipliers", {})
                         }
                         self._save_pending_reconciliations()
                         
@@ -2214,7 +2319,11 @@ class NadoTradingService(BaseTradingService):
                                 "attempts": 0,
                                 "excluded_digests": list(excluded_digests),
                                 "status": "PNL_RECONCILIATION_PENDING",
-                                "reason": "ERROR_2002_FILL_PENDING"
+                                "reason": "ERROR_2002_FILL_PENDING",
+                                "planned_risk_usd": float(pos_data.get("planned_risk_usd") or pos_data.get("approved_risk_usd") or 0.0),
+                                "cohort": pos_data.get("cohort", "UNKNOWN"),
+                                "base_risk_pct": float(pos_data.get("base_risk_pct", 0.0)),
+                                "applied_multipliers": pos_data.get("applied_multipliers", {})
                             }
                             self._save_pending_reconciliations()
                             return True, acc_pnl
@@ -2947,7 +3056,11 @@ class NadoTradingService(BaseTradingService):
                 "attempts": 0,
                 "excluded_digests": list(excluded_digests),
                 "status": "PNL_RECONCILIATION_PENDING",
-                "reason": triggered_by
+                "reason": triggered_by,
+                "planned_risk_usd": float(pos.get("planned_risk_usd") or pos.get("approved_risk_usd") or 0.0),
+                "cohort": pos.get("cohort", "UNKNOWN"),
+                "base_risk_pct": float(pos.get("base_risk_pct", 0.0)),
+                "applied_multipliers": pos.get("applied_multipliers", {})
             }
             self._save_pending_reconciliations()
             logger.warning(
@@ -3358,6 +3471,8 @@ class NadoTradingService(BaseTradingService):
         """
         Cancels active trigger order digests from Nado book.
         Prevents zombie / orphaned trigger orders after position closures.
+        Handles batch and individual cancellations gracefully, treating error 2020
+        (order already filled / not found) as benign.
         """
         valid_digests = [d for d in digests if d and isinstance(d, str)]
         if not valid_digests or not self.is_connected or product_id is None:
@@ -3367,8 +3482,14 @@ class NadoTradingService(BaseTradingService):
         if not target_sender:
             return False
 
+        from nado_protocol.trigger_client.types.execute import CancelTriggerOrdersParams
+
+        def is_already_gone_error(err: Exception) -> bool:
+            err_str = str(err).lower()
+            return "2020" in err_str or "could not be found" in err_str or "order not found" in err_str
+
+        # 1. Attempt fast batch cancellation first
         try:
-            from nado_protocol.trigger_client.types.execute import CancelTriggerOrdersParams
             cancel_params = CancelTriggerOrdersParams(
                 productIds=[product_id] * len(valid_digests),
                 digests=valid_digests,
@@ -3378,8 +3499,35 @@ class NadoTradingService(BaseTradingService):
             logger.info(f"[NadoTradingService] 🗑️ Successfully cancelled {len(valid_digests)} trigger orders on product {product_id}: {valid_digests}")
             return True
         except Exception as e:
-            logger.warning(f"[NadoTradingService] ⚠️ Failed to cancel trigger orders {valid_digests}: {e}")
-            return False
+            # 2. If batch failed (e.g. error 2020 because one of the orders already executed/filled),
+            # retry cancelling each digest individually so that any actually open order is still cleanly cancelled!
+            if len(valid_digests) > 1:
+                logger.info(f"[NadoTradingService] Batch cancel failed ({e}). Retrying individual trigger cancellations...")
+                all_resolved = True
+                for single_digest in valid_digests:
+                    try:
+                        single_param = CancelTriggerOrdersParams(
+                            productIds=[product_id],
+                            digests=[single_digest],
+                            sender=target_sender
+                        )
+                        await asyncio.to_thread(self.client.market.cancel_trigger_orders, single_param)
+                        logger.info(f"[NadoTradingService] 🗑️ Successfully cancelled trigger order {single_digest} on product {product_id}")
+                    except Exception as err:
+                        if is_already_gone_error(err):
+                            logger.info(f"[NadoTradingService] ℹ️ Trigger order {single_digest} already executed or absent on-chain (error 2020).")
+                        else:
+                            logger.warning(f"[NadoTradingService] ⚠️ Failed to cancel trigger order {single_digest}: {err}")
+                            all_resolved = False
+                return all_resolved
+
+            # Single digest case
+            if is_already_gone_error(e):
+                logger.info(f"[NadoTradingService] ℹ️ Trigger order {valid_digests[0]} already executed or absent on-chain (error 2020).")
+                return True
+            else:
+                logger.warning(f"[NadoTradingService] ⚠️ Failed to cancel trigger orders {valid_digests}: {e}")
+                return False
 
     async def sync_with_exchange(self, is_startup: bool = False) -> None:
         """Syncs local state with active positions on Nado."""

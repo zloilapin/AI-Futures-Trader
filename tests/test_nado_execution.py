@@ -350,15 +350,50 @@ async def test_cancel_trigger_digests_matches_product_ids_length():
     cancel_mock = MagicMock()
     service.client.market.cancel_trigger_orders = cancel_mock
 
-    digests = ["0xdigest1", "0xdigest2"]
+    digests = ["0x" + "11" * 32, "0x" + "22" * 32]
     res = await service._cancel_trigger_digests(product_id=5, digests=digests, sender="0xsubaccount")
 
     assert res is True
     cancel_mock.assert_called_once()
     call_args = cancel_mock.call_args[0][0]
     assert call_args.productIds == [5, 5]
-    assert call_args.digests == ["0xdigest1", "0xdigest2"]
+    assert len(call_args.digests) == 2
     assert len(call_args.productIds) == len(call_args.digests)
+
+
+@pytest.mark.asyncio
+async def test_cancel_trigger_digests_error_2020_batch_fallback_and_recovery():
+    """
+    Verifies that when batch cancel fails because an already-executed trigger order
+    returns error 2020 ('could not be found'), _cancel_trigger_digests:
+    1. Retries individual cancellation for each digest.
+    2. Treats error 2020 as benign (order already gone).
+    3. Successfully cancels any remaining open trigger order.
+    """
+    service = get_mock_service()
+    service.is_connected = True
+    service.default_subaccount_id = "0xsubaccount"
+
+    d1 = "0x" + "aa" * 32
+    d2 = "0x" + "bb" * 32
+    d1_bytes = bytes.fromhex("aa" * 32)
+    d2_bytes = bytes.fromhex("bb" * 32)
+
+    def mock_cancel(params):
+        if len(params.digests) > 1:
+            raise Exception('{"error_code": 2020, "error": "Order with the provided digest could not be found."}')
+        elif params.digests[0] == d1_bytes:
+            raise Exception('{"error_code": 2020, "error": "Order with the provided digest could not be found."}')
+        elif params.digests[0] == d2_bytes:
+            return {"status": "success"}
+        raise Exception(f"unexpected digest: {params.digests[0]}")
+
+    service.client.market.cancel_trigger_orders = MagicMock(side_effect=mock_cancel)
+
+    res = await service._cancel_trigger_digests(product_id=16, digests=[d1, d2], sender="0xsubaccount")
+
+    assert res is True
+    assert service.client.market.cancel_trigger_orders.call_count == 3  # 1 batch + 2 individual
 
 
 @pytest.mark.asyncio

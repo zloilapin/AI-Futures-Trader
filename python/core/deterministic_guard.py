@@ -71,11 +71,11 @@ class DeterministicGuard:
                 reasoning_en = f"{reasoning_en}\n\n{guard_msg}".strip()
 
         # 2. Volatility Momentum & Breakout: Confirmed impulse breakdown/breakout enters immediately
-        # Only true if market indicators genuinely confirm a breakout with volume spike;
-        # strategy name alone NEVER justifies overriding WAIT_FOR_PULLBACK.
+        # Only true if market indicators genuinely confirm a breakout with volume spike AND strategy mode is BREAKOUT/VOLATILITY_MOMENTUM;
+        # Never override WAIT_FOR_PULLBACK for TREND_FOLLOWING, PULLBACK, or RELATIVE_MOMENTUM to prevent buying tops/selling bottoms.
         is_confirmed_breakout = False
         breakout_reason = ""
-        if market_data and decision in ["LONG", "SHORT"]:
+        if strategy_mode in ["BREAKOUT", "VOLATILITY_MOMENTUM"] and market_data and decision in ["LONG", "SHORT"]:
             indicators = market_data.get("indicators") or {}
             donchian_high = float(indicators.get("donchian_high") or 0.0)
             donchian_low = float(indicators.get("donchian_low") or 0.0)
