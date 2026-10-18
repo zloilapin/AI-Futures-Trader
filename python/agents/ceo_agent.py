@@ -27,6 +27,27 @@ class ScoreResult(dict):
     def __iter__(self):
         return iter([self["decision"], self["conviction"]])
 
+def normalize_mtf_trend(raw_trend: Any) -> Optional[str]:
+    """
+    Canonical MTF trend normalizer:
+    Normalizes raw timeframe trend string into 'BULLISH', 'BEARISH', 'NEUTRAL', or None.
+    Handles variants produced by MarketDataService and analysts:
+    e.g. 'bullish', 'bullish_trend', 'bull', 'uptrend', 'up', 'long' -> 'BULLISH'
+         'bearish', 'bearish_trend', 'bear', 'downtrend', 'down', 'short' -> 'BEARISH'
+         'neutral', 'neutral_trend', 'flat', 'chop', 'mixed_chop', 'sideways', 'range', 'consolidation' -> 'NEUTRAL'
+    Returns None for missing, unpopulated, or invalid strings ('unknown', 'n/a', 'unavailable', 'none', '').
+    """
+    if not raw_trend or not isinstance(raw_trend, (str, bytes)):
+        return None
+    s = str(raw_trend).strip().lower().replace("-", "_").replace(" ", "_")
+    if s in ["bullish", "bull", "up", "bullish_trend", "uptrend", "long"]:
+        return "BULLISH"
+    if s in ["bearish", "bear", "down", "bearish_trend", "downtrend", "short"]:
+        return "BEARISH"
+    if s in ["neutral", "flat", "chop", "mixed_chop", "sideways", "range", "consolidation", "neutral_trend"]:
+        return "NEUTRAL"
+    return None
+
 
 class CEOAgent(BaseAgent):
     """
@@ -840,20 +861,18 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
             if isinstance(mtf_ctx, dict):
                 tf_1h = mtf_ctx.get("tf_1h", {}) if isinstance(mtf_ctx.get("tf_1h"), dict) else {}
                 tf_4h = mtf_ctx.get("tf_4h", {}) if isinstance(mtf_ctx.get("tf_4h"), dict) else {}
-                t1 = str((tf_1h.get("trend") if isinstance(tf_1h, dict) else None) or mtf_ctx.get("trend_1h") or "").strip().lower()
-                t4 = str((tf_4h.get("trend") if isinstance(tf_4h, dict) else None) or mtf_ctx.get("trend_4h") or "").strip().lower()
+                t1_raw = (tf_1h.get("trend") if isinstance(tf_1h, dict) else None) or mtf_ctx.get("trend_1h")
+                t4_raw = (tf_4h.get("trend") if isinstance(tf_4h, dict) else None) or mtf_ctx.get("trend_4h")
 
-                BULL_TERMS = {"bullish", "bull", "up"}
-                BEAR_TERMS = {"bearish", "bear", "down"}
-                NEUTRAL_TERMS = {"neutral", "flat", "chop", "sideways", "range", "consolidation"}
-                VALID_TERMS = BULL_TERMS | BEAR_TERMS | NEUTRAL_TERMS
+                norm_1h = normalize_mtf_trend(t1_raw)
+                norm_4h = normalize_mtf_trend(t4_raw)
 
-                is_bull_1h = t1 in BULL_TERMS
-                is_bear_1h = t1 in BEAR_TERMS
-                is_bull_4h = t4 in BULL_TERMS
-                is_bear_4h = t4 in BEAR_TERMS
-                has_1h = t1 in VALID_TERMS
-                has_4h = t4 in VALID_TERMS
+                has_1h = norm_1h is not None
+                has_4h = norm_4h is not None
+                is_bull_1h = (norm_1h == "BULLISH")
+                is_bear_1h = (norm_1h == "BEARISH")
+                is_bull_4h = (norm_4h == "BULLISH")
+                is_bear_4h = (norm_4h == "BEARISH")
 
                 if has_1h and has_4h:
                     # Both timeframes are known and evaluated

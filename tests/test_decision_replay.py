@@ -560,4 +560,147 @@ def test_replay_strict_strategy_matrix(tmp_path):
     assert "bb_or_rsi" in msg3
 
 
+def test_replay_strict_pullback_rejects_missing_context_even_with_is_pullback_retest_false(tmp_path):
+    """
+    Auditor P1 Requirement:
+    is_pullback_retest=False with missing/zero ema_20 and missing atr_pct
+    must NOT pass strict replay!
+    """
+    engine = DecisionReplayEngine(filepath=str(tmp_path / "empty.jsonl"))
+
+    snapshot = {
+        "candidate_id": "BTC-USD:c1_pb_false",
+        "symbol": "BTC-USD",
+        "trading_profile": "BALANCED",
+        "router": {"strategy_mode": "PULLBACK", "direction_bias": "LONG", "has_directional_signal": True},
+        "ceo": {"decision": "LONG", "conviction": 80, "trade_action": "ENTER"},
+        "guard": {"decision": "LONG", "action": "ENTER"},
+        "market_guard_inputs": {
+            "current_price": 65000.0,
+            "is_pullback_retest": False,  # Present, but False!
+            "ema_20": 0.0,                # Zero / unpopulated!
+            "atr_pct": None               # Missing!
+        }
+    }
+    match, msg, _ = engine.replay_guard_decision(snapshot, strict=True)
+    assert match is False
+    assert "INCOMPLETE_REPLAY" in msg
+    assert "pullback_context" in msg
+
+
+def test_replay_strict_breakout_rejects_none_volume(tmp_path):
+    """
+    Auditor P1 Requirement:
+    Breakout with missing volume (None) must NOT pass strict replay.
+    """
+    engine = DecisionReplayEngine(filepath=str(tmp_path / "empty.jsonl"))
+
+    snapshot = {
+        "candidate_id": "BTC-USD:c1_bo_novol",
+        "symbol": "BTC-USD",
+        "trading_profile": "BALANCED",
+        "router": {"strategy_mode": "BREAKOUT", "direction_bias": "LONG", "has_directional_signal": True},
+        "ceo": {"decision": "LONG", "conviction": 80, "trade_action": "ENTER"},
+        "guard": {"decision": "LONG", "action": "ENTER"},
+        "market_guard_inputs": {
+            "current_price": 65000.0,
+            "donchian_high": 64000.0,
+            "donchian_low": 60000.0,
+            "volume_spike_pct": None      # Volume was unpopulated/None!
+        }
+    }
+    match, msg, _ = engine.replay_guard_decision(snapshot, strict=True)
+    assert match is False
+    assert "INCOMPLETE_REPLAY" in msg
+    assert "volume_spike_pct" in msg
+
+
+def test_replay_strict_rejects_unsupported_strategy_mode(tmp_path):
+    """
+    Auditor P2 Requirement:
+    Unknown or unsupported strategy mode must be rejected in strict replay,
+    never silently bypassing validation.
+    """
+    engine = DecisionReplayEngine(filepath=str(tmp_path / "empty.jsonl"))
+
+    snapshot = {
+        "candidate_id": "BTC-USD:c1_unknown_strat",
+        "symbol": "BTC-USD",
+        "trading_profile": "BALANCED",
+        "router": {"strategy_mode": "UNKNOWN_CUSTOM_STRATEGY", "direction_bias": "LONG", "has_directional_signal": True},
+        "ceo": {"decision": "LONG", "conviction": 80, "trade_action": "ENTER"},
+        "guard": {"decision": "LONG", "action": "ENTER"},
+        "market_guard_inputs": {"current_price": 65000.0}
+    }
+    match, msg, _ = engine.replay_guard_decision(snapshot, strict=True)
+    assert match is False
+    assert "INCOMPLETE_REPLAY" in msg
+    assert "unsupported or unrecognized strategy_mode" in msg
+
+
+def test_replay_strict_rejects_nan_and_infinite_numeric_inputs(tmp_path):
+    """
+    Auditor P2 Requirement:
+    current_price=NaN or infinite values of indicators must fail strict replay.
+    """
+    import math
+    engine = DecisionReplayEngine(filepath=str(tmp_path / "empty.jsonl"))
+
+    # Case A: NaN price
+    snap_nan = {
+        "candidate_id": "BTC-USD:c1_nan_price",
+        "symbol": "BTC-USD",
+        "trading_profile": "BALANCED",
+        "router": {"strategy_mode": "TREND_FOLLOWING", "direction_bias": "LONG", "has_directional_signal": True},
+        "ceo": {"decision": "LONG", "conviction": 80, "trade_action": "ENTER"},
+        "guard": {"decision": "LONG", "action": "ENTER"},
+        "market_guard_inputs": {
+            "current_price": float("nan"),
+            "rsi_14": 50.0,
+            "multi_timeframe": {"trend_1h": "BULLISH"}
+        }
+    }
+    mA, msgA, _ = engine.replay_guard_decision(snap_nan, strict=True)
+    assert mA is False
+    assert "current_price" in msgA
+
+    # Case B: Inf price
+    snap_inf = {
+        "candidate_id": "BTC-USD:c1_inf_price",
+        "symbol": "BTC-USD",
+        "trading_profile": "BALANCED",
+        "router": {"strategy_mode": "TREND_FOLLOWING", "direction_bias": "LONG", "has_directional_signal": True},
+        "ceo": {"decision": "LONG", "conviction": 80, "trade_action": "ENTER"},
+        "guard": {"decision": "LONG", "action": "ENTER"},
+        "market_guard_inputs": {
+            "current_price": float("inf"),
+            "rsi_14": 50.0,
+            "multi_timeframe": {"trend_1h": "BULLISH"}
+        }
+    }
+    mB, msgB, _ = engine.replay_guard_decision(snap_inf, strict=True)
+    assert mB is False
+    assert "current_price" in msgB
+
+    # Case C: NaN donchian
+    snap_nan_dh = {
+        "candidate_id": "BTC-USD:c1_nan_dh",
+        "symbol": "BTC-USD",
+        "trading_profile": "BALANCED",
+        "router": {"strategy_mode": "BREAKOUT", "direction_bias": "LONG", "has_directional_signal": True},
+        "ceo": {"decision": "LONG", "conviction": 80, "trade_action": "ENTER"},
+        "guard": {"decision": "LONG", "action": "ENTER"},
+        "market_guard_inputs": {
+            "current_price": 65000.0,
+            "donchian_high": float("nan"),
+            "donchian_low": float("nan"),
+            "volume_spike_pct": 150.0
+        }
+    }
+    mC, msgC, _ = engine.replay_guard_decision(snap_nan_dh, strict=True)
+    assert mC is False
+    assert "donchian" in msgC
+
+
+
 

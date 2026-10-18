@@ -1,6 +1,7 @@
 import time
 import datetime
 import asyncio
+import math
 from dataclasses import dataclass
 from typing import Dict, Any, List, Tuple, Optional
 
@@ -1377,18 +1378,35 @@ class TradingPipeline:
             indicators = market_data.get("indicators") or {}
             price_data = market_data.get("price_data") or {}
             derivatives = market_data.get("derivatives_data") or {}
+            def _safe_float(val: Any) -> Optional[float]:
+                if val is None:
+                    return None
+                try:
+                    f = float(val)
+                    return f if math.isfinite(f) else None
+                except (ValueError, TypeError):
+                    return None
+
+            raw_cur_price = price_data.get("current_price") or market_data.get("current_price")
+            raw_dh = indicators.get("donchian_high")
+            raw_dl = indicators.get("donchian_low")
+            raw_vol = indicators.get("volume_spike_pct")
+            raw_atr = indicators.get("atr_pct")
             raw_bb = indicators.get("bb_position_pct") if "bb_position_pct" in indicators else indicators.get("bb_pos")
+            raw_ema = indicators.get("ema_20")
             raw_rsi = indicators.get("rsi_14") if indicators.get("rsi_14") is not None else indicators.get("rsi")
+            raw_funding = derivatives.get("funding_rate")
+
             snapshot["market_guard_inputs"] = {
-                "current_price": float(price_data.get("current_price") or market_data.get("current_price") or 0.0),
-                "donchian_high": float(indicators.get("donchian_high") or 0.0),
-                "donchian_low": float(indicators.get("donchian_low") or 0.0),
-                "volume_spike_pct": float(indicators.get("volume_spike_pct") or 0.0),
-                "atr_pct": float(indicators.get("atr_pct") or 0.0),
-                "bb_position_pct": float(raw_bb) if raw_bb is not None else None,
-                "ema_20": float(indicators.get("ema_20") or 0.0),
-                "rsi_14": float(raw_rsi) if raw_rsi is not None else None,
-                "funding_rate": float(derivatives.get("funding_rate") or 0.0),
+                "current_price": _safe_float(raw_cur_price),
+                "donchian_high": _safe_float(raw_dh),
+                "donchian_low": _safe_float(raw_dl),
+                "volume_spike_pct": _safe_float(raw_vol),
+                "atr_pct": _safe_float(raw_atr),
+                "bb_position_pct": _safe_float(raw_bb),
+                "ema_20": _safe_float(raw_ema),
+                "rsi_14": _safe_float(raw_rsi),
+                "funding_rate": _safe_float(raw_funding) if _safe_float(raw_funding) is not None else 0.0,
                 "is_pullback_retest": bool(market_data.get("is_pullback_retest", False)),
                 "multi_timeframe": market_data.get("multi_timeframe") or {},
                 "algo_signals": indicators.get("algo_signals") or {}

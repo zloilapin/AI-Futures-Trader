@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import time
+import math
 from typing import List, Dict, Any, Optional, Tuple
 from collections import Counter
 
@@ -38,6 +39,36 @@ class CapturedRiskRules:
 
     def _get_profile_rules(self, profile: str, strategy_mode: str) -> Dict[str, Any]:
         return {"min_conviction": self.min_conviction}
+
+
+def _is_valid_positive_finite(val: Any) -> bool:
+    if val is None:
+        return False
+    try:
+        f = float(val)
+        return math.isfinite(f) and f > 0.0
+    except (ValueError, TypeError):
+        return False
+
+
+def _is_valid_nonneg_finite(val: Any) -> bool:
+    if val is None:
+        return False
+    try:
+        f = float(val)
+        return math.isfinite(f) and f >= 0.0
+    except (ValueError, TypeError):
+        return False
+
+
+def _is_valid_finite(val: Any) -> bool:
+    if val is None:
+        return False
+    try:
+        f = float(val)
+        return math.isfinite(f)
+    except (ValueError, TypeError):
+        return False
 
 
 class DecisionReplayEngine:
@@ -343,21 +374,21 @@ class DecisionReplayEngine:
             raw_rsi = mgi.get("rsi_14") if mgi.get("rsi_14") is not None else mgi.get("rsi")
             raw_bb = mgi.get("bb_position_pct") if mgi.get("bb_position_pct") is not None else mgi.get("bb_pos")
             reconstructed_market_data = {
-                "price_data": {"current_price": mgi.get("current_price", 0.0)},
-                "current_price": mgi.get("current_price", 0.0),
+                "price_data": {"current_price": float(mgi["current_price"]) if _is_valid_positive_finite(mgi.get("current_price")) else 0.0},
+                "current_price": float(mgi["current_price"]) if _is_valid_positive_finite(mgi.get("current_price")) else 0.0,
                 "indicators": {
-                    "donchian_high": mgi.get("donchian_high", 0.0),
-                    "donchian_low": mgi.get("donchian_low", 0.0),
-                    "volume_spike_pct": mgi.get("volume_spike_pct", 0.0),
-                    "atr_pct": mgi.get("atr_pct", 0.0),
-                    "bb_position_pct": float(raw_bb) if raw_bb is not None else None,
-                    "ema_20": mgi.get("ema_20", 0.0),
-                    "rsi_14": float(raw_rsi) if raw_rsi is not None else None,
+                    "donchian_high": float(mgi["donchian_high"]) if _is_valid_positive_finite(mgi.get("donchian_high")) else 0.0,
+                    "donchian_low": float(mgi["donchian_low"]) if _is_valid_positive_finite(mgi.get("donchian_low")) else 0.0,
+                    "volume_spike_pct": float(mgi["volume_spike_pct"]) if _is_valid_nonneg_finite(mgi.get("volume_spike_pct")) else 0.0,
+                    "atr_pct": float(mgi["atr_pct"]) if _is_valid_positive_finite(mgi.get("atr_pct")) else 0.0,
+                    "bb_position_pct": float(raw_bb) if _is_valid_finite(raw_bb) else None,
+                    "ema_20": float(mgi["ema_20"]) if _is_valid_positive_finite(mgi.get("ema_20")) else 0.0,
+                    "rsi_14": float(raw_rsi) if _is_valid_finite(raw_rsi) else None,
                     "algo_signals": mgi.get("algo_signals") or {}
                 },
                 "multi_timeframe": mgi.get("multi_timeframe") or {},
                 "derivatives_data": {
-                    "funding_rate": mgi.get("funding_rate", 0.0)
+                    "funding_rate": float(mgi["funding_rate"]) if _is_valid_finite(mgi.get("funding_rate")) else 0.0
                 },
                 "is_pullback_retest": bool(mgi.get("is_pullback_retest", False))
             }
@@ -366,24 +397,29 @@ class DecisionReplayEngine:
         REQUIRED_CONTEXT_BY_STRATEGY = {
             "TREND_FOLLOWING": [
                 ("multi_timeframe", lambda m: bool(m.get("multi_timeframe"))),
-                ("rsi_or_bb", lambda m: m.get("rsi_14") is not None or m.get("bb_position_pct") is not None),
+                ("rsi_or_bb", lambda m: _is_valid_finite(m.get("rsi_14")) or _is_valid_finite(m.get("bb_position_pct"))),
             ],
             "BREAKOUT": [
-                ("donchian", lambda m: m.get("donchian_high", 0.0) > 0 or m.get("donchian_low", 0.0) > 0),
-                ("volume_spike_pct", lambda m: m.get("volume_spike_pct") is not None),
+                ("donchian", lambda m: _is_valid_positive_finite(m.get("donchian_high")) or _is_valid_positive_finite(m.get("donchian_low"))),
+                ("volume_spike_pct", lambda m: _is_valid_nonneg_finite(m.get("volume_spike_pct"))),
             ],
             "VOLATILITY_MOMENTUM": [
-                ("donchian", lambda m: m.get("donchian_high", 0.0) > 0 or m.get("donchian_low", 0.0) > 0),
-                ("volume_spike_pct", lambda m: m.get("volume_spike_pct") is not None),
+                ("donchian", lambda m: _is_valid_positive_finite(m.get("donchian_high")) or _is_valid_positive_finite(m.get("donchian_low"))),
+                ("volume_spike_pct", lambda m: _is_valid_nonneg_finite(m.get("volume_spike_pct"))),
             ],
             "MEAN_REVERSION": [
-                ("bb_or_rsi", lambda m: m.get("bb_position_pct") is not None or m.get("rsi_14") is not None),
+                ("bb_or_rsi", lambda m: _is_valid_finite(m.get("bb_position_pct")) or _is_valid_finite(m.get("rsi_14"))),
             ],
             "PULLBACK": [
-                ("pullback_context", lambda m: "is_pullback_retest" in m or m.get("ema_20", 0.0) > 0 or m.get("atr_pct") is not None),
+                (
+                    "pullback_context",
+                    lambda m: bool(m.get("is_pullback_retest")) or (
+                        _is_valid_positive_finite(m.get("ema_20")) and _is_valid_positive_finite(m.get("atr_pct"))
+                    )
+                ),
             ],
             "RELATIVE_MOMENTUM": [
-                ("volume_spike_pct", lambda m: m.get("volume_spike_pct") is not None),
+                ("volume_spike_pct", lambda m: _is_valid_nonneg_finite(m.get("volume_spike_pct"))),
             ],
         }
 
@@ -393,10 +429,12 @@ class DecisionReplayEngine:
                 return False, "INCOMPLETE_REPLAY: missing original ceo.trade_action in snapshot", {"status": "INCOMPLETE_REPLAY"}
             if not mgi or not isinstance(mgi, dict):
                 return False, "INCOMPLETE_REPLAY: missing market_guard_inputs in snapshot", {"status": "INCOMPLETE_REPLAY"}
-            if mgi.get("current_price", 0.0) <= 0:
-                return False, "INCOMPLETE_REPLAY: missing valid current_price in market_guard_inputs", {"status": "INCOMPLETE_REPLAY"}
+            if not _is_valid_positive_finite(mgi.get("current_price")):
+                return False, "INCOMPLETE_REPLAY: missing valid positive finite current_price in market_guard_inputs", {"status": "INCOMPLETE_REPLAY"}
+            if strategy_mode not in REQUIRED_CONTEXT_BY_STRATEGY:
+                return False, f"INCOMPLETE_REPLAY: unsupported or unrecognized strategy_mode '{strategy_mode}' in strict replay", {"status": "INCOMPLETE_REPLAY"}
 
-            for rule_name, validator in REQUIRED_CONTEXT_BY_STRATEGY.get(strategy_mode, []):
+            for rule_name, validator in REQUIRED_CONTEXT_BY_STRATEGY[strategy_mode]:
                 if not validator(mgi):
                     return False, f"INCOMPLETE_REPLAY: missing required indicator/context '{rule_name}' for {strategy_mode}", {"status": "INCOMPLETE_REPLAY"}
         elif strategy_mode in ["BREAKOUT", "VOLATILITY_MOMENTUM"] and mgi is None:
