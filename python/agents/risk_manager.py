@@ -40,8 +40,9 @@ class RiskManager(BaseAgent):
     Gatekeeper agent responsible for capital preservation, risk profiles, and position sizing.
     Calculates exact Take Profit (TP), Stop Loss (SL), position amount (USD / %), and risk/reward ratio.
     """
-    def __init__(self, logger: TradeLogger, llm_client: LLMClient):
+    def __init__(self, logger: TradeLogger, llm_client: LLMClient, default_macro_regime: str = "UNKNOWN"):
         super().__init__("Risk_Manager", logger, llm_client)
+        self.default_macro_regime = default_macro_regime
 
     def _get_profile_rules(self, profile: str, strategy_mode: str = "TREND_FOLLOWING") -> dict:
         max_concurrent = getattr(config, "MAX_CONCURRENT_POSITIONS", 3)
@@ -251,7 +252,7 @@ class RiskManager(BaseAgent):
             "position_size_pct": 0.0
         }
 
-    async def analyze(self, ceo_decision: Dict[str, Any], portfolio_data: Dict[str, Any], market_data: Dict[str, Any], effective_profile: str = "BALANCED", macro_regime: str = "RANGE_CHOPPY", strategy_mode: str = "TREND_FOLLOWING") -> Dict[str, Any]:
+    async def analyze(self, ceo_decision: Dict[str, Any], portfolio_data: Dict[str, Any], market_data: Dict[str, Any], effective_profile: str = "BALANCED", macro_regime: Optional[str] = None, strategy_mode: str = "TREND_FOLLOWING") -> Dict[str, Any]:
         """
         Deterministic risk engine. All sizing is math-only, no LLM.
         
@@ -357,9 +358,10 @@ class RiskManager(BaseAgent):
         # Gate 1.5: Macro Regime Integrity Veto (Fail-Closed Independent Risk Layer)
         # If macro regime is unconfirmed, corrupt, or telemetry is lost (UNKNOWN or DATA_INSUFFICIENT),
         # strictly veto opening of ANY new positions regardless of candidate quality or available margin.
-        norm_macro = str(macro_regime or "").strip().upper()
-        if norm_macro in ["UNKNOWN", "DATA_INSUFFICIENT"]:
-            msg = f"New position entry strictly blocked: Macro market regime is {norm_macro} (telemetry unconfirmed)."
+        target_regime = macro_regime if macro_regime is not None else getattr(self, "default_macro_regime", "UNKNOWN")
+        norm_macro = str(target_regime or "").strip().upper()
+        if not norm_macro or norm_macro in ["UNKNOWN", "DATA_INSUFFICIENT", "NONE"]:
+            msg = f"New position entry strictly blocked: Macro market regime is {norm_macro or 'EMPTY'} (telemetry unconfirmed)."
             self.logger.warning(f"[{self.name}] 🚫 UNKNOWN_MACRO_REGIME VETO: {msg}")
             return self._build_veto_result("UNKNOWN_MACRO_REGIME", msg, trade_action)
 

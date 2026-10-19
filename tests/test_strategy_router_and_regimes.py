@@ -297,7 +297,7 @@ async def test_mean_reversion_sl_tp_targets_middle_band(mock_logger, mock_llm):
 
     verdict = await rm.analyze(
         ceo_decision, portfolio_data, market_data,
-        effective_profile="BALANCED", strategy_mode="MEAN_REVERSION"
+        effective_profile="BALANCED", macro_regime="RANGE_CHOPPY", strategy_mode="MEAN_REVERSION"
     )
 
     assert verdict["approved"] is True
@@ -338,7 +338,7 @@ async def test_mean_reversion_short_tp_strictly_before_mean(mock_logger, mock_ll
 
     verdict = await rm.analyze(
         ceo_decision, portfolio_data, market_data,
-        effective_profile="BALANCED", strategy_mode="MEAN_REVERSION"
+        effective_profile="BALANCED", macro_regime="RANGE_CHOPPY", strategy_mode="MEAN_REVERSION"
     )
 
     assert verdict["approved"] is True
@@ -378,7 +378,7 @@ async def test_mean_reversion_narrow_edge_vetoed(mock_logger, mock_llm):
 
     verdict = await rm.analyze(
         ceo_decision, portfolio_data, market_data,
-        effective_profile="BALANCED", strategy_mode="MEAN_REVERSION"
+        effective_profile="BALANCED", macro_regime="RANGE_CHOPPY", strategy_mode="MEAN_REVERSION"
     )
 
     assert verdict["approved"] is False
@@ -413,7 +413,7 @@ async def test_mean_reversion_price_already_past_mean_vetoed(mock_logger, mock_l
 
     verdict = await rm.analyze(
         ceo_decision, portfolio_data, market_data,
-        effective_profile="BALANCED", strategy_mode="MEAN_REVERSION"
+        effective_profile="BALANCED", macro_regime="RANGE_CHOPPY", strategy_mode="MEAN_REVERSION"
     )
 
     assert verdict["approved"] is False
@@ -448,7 +448,7 @@ async def test_volatility_momentum_tight_floors(mock_logger, mock_llm):
 
     verdict = await rm.analyze(
         ceo_decision, portfolio_data, market_data,
-        effective_profile="BALANCED", strategy_mode="VOLATILITY_MOMENTUM"
+        effective_profile="BALANCED", macro_regime="RANGE_CHOPPY", strategy_mode="VOLATILITY_MOMENTUM"
     )
 
     assert verdict["approved"] is True
@@ -514,7 +514,7 @@ async def test_ceo_payload_receives_direction_bias_and_regimes(mock_logger, mock
 
 def create_test_pipeline(mock_logger, mock_llm):
     """Factory helper to build a fully wired TradingPipeline for unit and integration testing."""
-    risk_manager = RiskManager(mock_logger, mock_llm)
+    risk_manager = RiskManager(mock_logger, mock_llm, default_macro_regime="RANGE_CHOPPY")
 
     mock_services = MagicMock(spec=ServiceRegistry)
     mock_services.logger = mock_logger
@@ -949,7 +949,7 @@ async def test_risk_manager_strict_contract_binary_approve_or_veto_only(mock_log
     RiskManager receives FinalTradeDecision.
     It can ONLY APPROVE or VETO. It NEVER mutates 'decision'.
     """
-    risk_manager = RiskManager(mock_logger, mock_llm)
+    risk_manager = RiskManager(mock_logger, mock_llm, default_macro_regime="TRENDING")
 
     # 1. Non-actionable candidate passed to RiskManager -> strictly VETO
     blocked_trade = FinalTradeDecision(

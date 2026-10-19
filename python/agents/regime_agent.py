@@ -108,7 +108,14 @@ class RegimeAgent(BaseAgent):
 
         # If already formatted summary
         if "mtf_trends" in raw_asset and "atr_pct" in raw_asset and "order_book_data" not in raw_asset:
-            return raw_asset
+            summary = dict(raw_asset)
+            if isinstance(summary.get("mtf_trends"), dict):
+                summary["mtf_trends"] = {
+                    tf: self._normalize_trend(trend) for tf, trend in summary["mtf_trends"].items()
+                }
+            if summary.get("mtf_alignment"):
+                summary["mtf_alignment"] = str(summary["mtf_alignment"]).strip().upper()
+            return summary
 
         price_data = raw_asset.get("price_data", {}) or {}
         indicators = raw_asset.get("indicators", {}) or {}

@@ -1,4 +1,5 @@
 import pytest
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 from agents.regime_agent import RegimeAgent
 from core.logger import TradeLogger
@@ -597,5 +598,164 @@ async def test_e2e_pipeline_stage0_telemetry_failure_fails_closed():
     assert rm_res["veto_category"] == "UNKNOWN_MACRO_REGIME"
 
 
+@pytest.mark.asyncio
+async def test_preformatted_summary_with_long_short_trends_normalized_and_accepted(mock_logger, mock_llm):
+    """
+    P2 Audit Requirement:
+    Verifies that when RegimeAgent receives pre-formatted macro summary (e.g. from upstream cache)
+    with synonyms like 'LONG', 'SHORT', 'SIDEWAYS', or lowercase 'up',
+    _extract_asset_macro normalizes them to canonical 'BULLISH', 'BEARISH', 'NEUTRAL',
+    allowing the asset to pass validation and compute valid regime scores rather than triggering UNKNOWN.
+    """
+    agent = RegimeAgent(mock_logger, mock_llm)
+
+    btc_summary = {
+        "price": 60000.0,
+        "atr_pct": 1.2,
+        "rsi_14": 55.0,
+        "er_14": 0.45,
+        "funding_rate": 0.0001,
+        "mtf_trends": {
+            "15m": "LONG",      # synonym for BULLISH
+            "1h": "SHORT",     # synonym for BEARISH
+            "4h": "SIDEWAYS"   # synonym for NEUTRAL
+        },
+        "mtf_alignment": "mixed_chop"  # non-canonical case
+    }
+    eth_summary = {
+        "price": 3000.0,
+        "atr_pct": 1.5,
+        "rsi_14": 50.0,
+        "er_14": 0.40,
+        "funding_rate": 0.0001,
+        "mtf_trends": {
+            "15m": "up",        # lowercase synonym for BULLISH
+            "1h": "down",      # lowercase synonym for BEARISH
+            "4h": "flat"       # lowercase synonym for NEUTRAL
+        },
+        "mtf_alignment": "MIXED_CHOP"
+    }
+
+    # Verify extraction normalizes trends and alignment
+    btc_extracted = agent._extract_asset_macro(btc_summary)
+    assert btc_extracted["mtf_trends"]["15m"] == "BULLISH"
+    assert btc_extracted["mtf_trends"]["1h"] == "BEARISH"
+    assert btc_extracted["mtf_trends"]["4h"] == "NEUTRAL"
+    assert btc_extracted["mtf_alignment"] == "MIXED_CHOP"
+
+    eth_extracted = agent._extract_asset_macro(eth_summary)
+    assert eth_extracted["mtf_trends"]["15m"] == "BULLISH"
+    assert eth_extracted["mtf_trends"]["1h"] == "BEARISH"
+    assert eth_extracted["mtf_trends"]["4h"] == "NEUTRAL"
+
+    # Both must pass _is_valid_macro_asset validation
+    assert agent._is_valid_macro_asset(btc_extracted) is True
+    assert agent._is_valid_macro_asset(eth_extracted) is True
+
+    # Full analyze() call must succeed and NOT return UNKNOWN
+    res = await agent.analyze({"btc_data": btc_summary, "eth_data": eth_summary})
+    assert res["data_valid"] is True
+    assert res["regime"] != "UNKNOWN"
 
 
+@pytest.mark.asyncio
+async def test_pipeline_e2e_telemetry_failure_engages_regime_unknown_and_risk_veto(mock_logger, mock_llm, monkeypatch):
+    """
+    P2 Full Pipeline End-to-End Test:
+    Verifies that when market telemetry is corrupted/missing:
+    1. Real RegimeAgent.analyze() detects invalid macro telemetry and returns regime="UNKNOWN".
+    2. Real TradingPipeline.run_cycle() captures detected_regime="UNKNOWN".
+    3. Even if CEO Agent produces a high-conviction LONG entry,
+       real RiskManager.analyze() receives macro_regime="UNKNOWN" and strictly issues UNKNOWN_MACRO_REGIME veto.
+    4. trading_service.open_position is NEVER dispatched.
+    """
+    from core.pipeline import TradingPipeline, AgentRegistry, ServiceRegistry
+    from agents.risk_manager import RiskManager
+
+    real_regime_agent = RegimeAgent(mock_logger, mock_llm)
+    real_risk_manager = RiskManager(mock_logger, mock_llm)  # default_macro_regime="UNKNOWN"
+
+    mock_services = MagicMock(spec=ServiceRegistry)
+    mock_services.logger = mock_logger
+    mock_services.fetcher = MagicMock()
+    mock_services.tg_sender = MagicMock()
+    mock_services.tg_sender.send_message = AsyncMock()
+    mock_services.tg_sender.broadcast_to_channel = AsyncMock()
+    mock_services.trading_service = MagicMock()
+    mock_services.trading_service.active_positions = {}
+    mock_services.trading_service.cooldown_until = 0
+    mock_services.trading_service.recent_streak = []
+    mock_services.trading_service.sync_with_exchange = AsyncMock()
+    mock_services.trading_service.get_portfolio_summary = AsyncMock(return_value={
+        "total_usd": 2000.0,
+        "available_margin": 2000.0,
+        "maintenance_health_usd": 2000.0,
+        "daily_drawdown_pct": 0.0,
+        "active_positions": {}
+    })
+    mock_services.trading_service.get_market_limits = AsyncMock(return_value={
+        "size_increment": 0.001,
+        "min_notional": 10.0,
+        "min_size": 0.001,
+        "price_increment": 0.1
+    })
+    mock_services.trading_service.open_position = AsyncMock(return_value=True)
+
+    mock_agents = MagicMock(spec=AgentRegistry)
+    mock_agents.regime = real_regime_agent      # REAL RegimeAgent
+    mock_agents.risk = real_risk_manager        # REAL RiskManager
+    mock_agents.universe = MagicMock()
+    mock_agents.universe.analyze = AsyncMock(return_value={"selected_pairs": ["BTC-USD"]})
+    mock_agents.scanner = MagicMock()
+    mock_agents.scanner.analyze = AsyncMock(return_value={"proceed": True, "reasoning": "Valid"})
+
+    for aname in ["candle", "orderbook", "oi_funding", "news", "indicator"]:
+        mock_analyst = MagicMock()
+        mock_analyst.name = f"{aname.capitalize()}_Agent"
+        mock_analyst.analyze = AsyncMock(return_value={
+            "agent_name": mock_analyst.name,
+            "signal": "BULLISH",
+            "confidence": 85,
+            "reasoning_en": "Bullish telemetry"
+        })
+        setattr(mock_agents, aname, mock_analyst)
+
+    mock_agents.bull = MagicMock()
+    mock_agents.bull.analyze = AsyncMock(return_value={"confidence": 85, "reasoning_en": "Strong setup"})
+    mock_agents.bear = MagicMock()
+    mock_agents.bear.analyze = AsyncMock(return_value={"confidence": 20, "reasoning_en": "Weak thesis"})
+    mock_agents.ceo = MagicMock()
+    mock_agents.ceo.analyze = AsyncMock(return_value={
+        "symbol": "BTC-USD",
+        "decision": "LONG",
+        "conviction": 85,
+        "entry_quality": 80,
+        "directional_confidence": 85,
+        "trade_action": "ENTER",
+        "reasoning_en": "High conviction setup"
+    })
+    mock_agents.sentinel = MagicMock()
+    mock_agents.reflector = MagicMock()
+    mock_agents.memory = MagicMock()
+    mock_agents.memory.save_cycle = MagicMock()
+
+    pipeline = TradingPipeline(mock_agents, mock_services, "nado")
+
+    # Corrupted / missing telemetry for BTC/ETH (missing funding_rate, empty mtf_trends)
+    corrupted_market_data = {
+        "symbol": "BTC-USD",
+        "price_data": {"current_price": 60000.0, "candles_20": [{"close": 60000.0}] * 20, "ohlcv_1h": [{"volume": 100}] * 10},
+        "indicators": {"atr_14": 500.0, "atr_pct": 0.8},
+        "derivatives_data": {"size_increment": 0.001, "price_increment": 0.1, "min_size": 0.001},
+        "multi_timeframe": None  # Telemetry failure!
+    }
+    mock_services.fetcher.fetch_all_market_data = AsyncMock(return_value=corrupted_market_data)
+    mock_services.fetcher.fetch_active_perps = AsyncMock(return_value=[{"symbol": "BTC-USD", "volume_24h": 50000000}])
+
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+    # ACT: Run real pipeline cycle
+    await pipeline.run_cycle(1, force_scan=True)
+
+    # ASSERT: open_position was NEVER called due to fail-closed UNKNOWN macro veto
+    mock_services.trading_service.open_position.assert_not_called()

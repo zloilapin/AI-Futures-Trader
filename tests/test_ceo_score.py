@@ -266,7 +266,7 @@ async def test_profile_matrix_execution_and_sizing(entry_quality, action, profil
     and REDUCE_SIZE downscales position sizing.
     """
     from agents.risk_manager import RiskManager
-    rm = RiskManager(MagicMock(), MagicMock())
+    rm = RiskManager(MagicMock(), MagicMock(), default_macro_regime="RANGE_CHOPPY")
     portfolio_data = {"total_usd": 1000.0, "available_margin": 1000.0, "active_positions": {}}
     market_data = {
         "price_data": {"current_price": 250.0, "ohlcv_1h": [{"volume": 100}] * 10},

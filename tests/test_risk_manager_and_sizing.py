@@ -17,7 +17,10 @@ def mock_llm():
 
 @pytest.fixture
 def risk_mgr(mock_logger, mock_llm):
-    return RiskManager(mock_logger, mock_llm)
+    # Unit tests in this suite focus specifically on sizing math, Kelly calibration,
+    # and portfolio drawdown limits. Set default_macro_regime to RANGE_CHOPPY so
+    # individual sizing tests run with a valid regime unless testing macro veto.
+    return RiskManager(mock_logger, mock_llm, default_macro_regime="RANGE_CHOPPY")
 
 @pytest.fixture
 def base_market_data():
@@ -2979,14 +2982,36 @@ async def test_restart_recovery_with_unresolved_incident_blocks_new_trades():
     assert mock_client.market.place_order.called is False
 
 
+@pytest.mark.asyncio
+async def test_risk_manager_default_omitted_macro_regime_fails_closed(mock_logger, mock_llm, base_market_data, base_portfolio_data):
+    """
+    P1 Audit Requirement:
+    Verifies that a newly instantiated RiskManager without arguments has default_macro_regime="UNKNOWN".
+    When analyze() is called without passing macro_regime, or with None/empty string,
+    it strictly fails closed and issues UNKNOWN_MACRO_REGIME veto even if all other metrics are pristine.
+    """
+    raw_rm = RiskManager(mock_logger, mock_llm)
+    assert raw_rm.default_macro_regime == "UNKNOWN"
 
+    ceo_decision = {"symbol": "BTC-USD", "decision": "LONG", "conviction": 85, "trade_action": "ENTER"}
 
+    # 1. Direct call without macro_regime argument -> VETO
+    res_omitted = await raw_rm.analyze(ceo_decision, base_portfolio_data, base_market_data, effective_profile="BALANCED")
+    assert res_omitted["approved"] is False
+    assert res_omitted["veto_category"] == "UNKNOWN_MACRO_REGIME"
+    assert "telemetry unconfirmed" in res_omitted["reasoning"]
 
+    # 2. Call with macro_regime=None -> VETO
+    res_none = await raw_rm.analyze(ceo_decision, base_portfolio_data, base_market_data, macro_regime=None)
+    assert res_none["approved"] is False
+    assert res_none["veto_category"] == "UNKNOWN_MACRO_REGIME"
 
+    # 3. Call with macro_regime="" -> VETO
+    res_empty = await raw_rm.analyze(ceo_decision, base_portfolio_data, base_market_data, macro_regime="")
+    assert res_empty["approved"] is False
+    assert res_empty["veto_category"] == "UNKNOWN_MACRO_REGIME"
 
-
-
-
-
-
+    # 4. Explicitly provided valid macro_regime -> PROCEEDS PAST GATE
+    res_valid = await raw_rm.analyze(ceo_decision, base_portfolio_data, base_market_data, macro_regime="RANGE_CHOPPY")
+    assert res_valid.get("veto_category") != "UNKNOWN_MACRO_REGIME"
 

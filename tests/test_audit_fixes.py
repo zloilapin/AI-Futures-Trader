@@ -185,6 +185,7 @@ def test_risk_manager_mean_reversion_rr_veto():
         portfolio_data=portfolio_data,
         market_data=market_data,
         effective_profile="BALANCED",
+        macro_regime="RANGE_CHOPPY",
         strategy_mode="MEAN_REVERSION"
     ))
     
