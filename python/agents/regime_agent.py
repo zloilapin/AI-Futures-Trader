@@ -27,11 +27,18 @@ class RegimeAgent(BaseAgent):
         except (ValueError, TypeError):
             return None
 
+    VALID_ALIGNMENTS = {
+        "FULL_ALIGNMENT", "TRANSITION", "COUNTER_TREND_WARNING",
+        "MIXED_CHOP", "PARTIAL_ALIGNMENT"
+    }
+    VALID_TRENDS = {"BULLISH", "BEARISH", "NEUTRAL"}
+
     @classmethod
     def _is_valid_macro_asset(cls, asset: Dict[str, Any]) -> bool:
         """
         Validates that extracted macro metrics are present, complete, and numerically sound.
-        Rejects empty dictionaries, NaN, Inf, non-positive prices, and out-of-bound indicators.
+        Rejects empty dictionaries, NaN, Inf, non-positive prices, missing/None funding rate,
+        and incomplete or unverified MTF contexts.
         """
         if not isinstance(asset, dict) or not asset:
             return False
@@ -58,7 +65,17 @@ class RegimeAgent(BaseAgent):
                 return False
 
             mtf_trends = asset.get("mtf_trends")
-            if not isinstance(mtf_trends, dict):
+            if not isinstance(mtf_trends, dict) or not mtf_trends:
+                return False
+
+            valid_tf_names = ("15m", "1h", "4h")
+            for tf in valid_tf_names:
+                trend_val = mtf_trends.get(tf)
+                if not trend_val or str(trend_val).upper() not in cls.VALID_TRENDS:
+                    return False
+
+            alignment = asset.get("mtf_alignment")
+            if not alignment or str(alignment).upper() not in cls.VALID_ALIGNMENTS:
                 return False
 
             return True
@@ -69,6 +86,7 @@ class RegimeAgent(BaseAgent):
         """
         Extracts strictly essential macro risk metrics for an asset (BTC or ETH),
         completely stripping raw candles, order book, and deep arrays.
+        Does NOT inject artificial neutral defaults when telemetry is absent.
         """
         if not isinstance(raw_asset, dict) or not raw_asset:
             return {}
@@ -77,7 +95,6 @@ class RegimeAgent(BaseAgent):
         if "mtf_trends" in raw_asset and "atr_pct" in raw_asset and "order_book_data" not in raw_asset:
             return raw_asset
 
-        mtf = raw_asset.get("multi_timeframe", {}) or {}
         price_data = raw_asset.get("price_data", {}) or {}
         indicators = raw_asset.get("indicators", {}) or {}
         derivatives = raw_asset.get("derivatives_data", {}) or {}
@@ -85,10 +102,22 @@ class RegimeAgent(BaseAgent):
 
         price = self._safe_finite_float(price_data.get("current_price") or raw_asset.get("current_price"))
 
-        t15 = mtf.get("trend_15m") or mtf.get("tf_15m", {}).get("trend", "NEUTRAL")
-        t1h = mtf.get("trend_1h") or mtf.get("tf_1h", {}).get("trend", "NEUTRAL")
-        t4h = mtf.get("trend_4h") or mtf.get("tf_4h", {}).get("trend", "NEUTRAL")
-        alignment = mtf.get("mtf_alignment", "MIXED_CHOP")
+        raw_mtf = raw_asset.get("multi_timeframe")
+        if isinstance(raw_mtf, dict) and raw_mtf:
+            t15 = raw_mtf.get("trend_15m") or (raw_mtf.get("tf_15m", {}).get("trend") if isinstance(raw_mtf.get("tf_15m"), dict) else None)
+            t1h = raw_mtf.get("trend_1h") or (raw_mtf.get("tf_1h", {}).get("trend") if isinstance(raw_mtf.get("tf_1h"), dict) else None)
+            t4h = raw_mtf.get("trend_4h") or (raw_mtf.get("tf_4h", {}).get("trend") if isinstance(raw_mtf.get("tf_4h"), dict) else None)
+            alignment_raw = raw_mtf.get("mtf_alignment")
+
+            mtf_trends = {
+                "15m": str(t15).upper() if t15 else None,
+                "1h": str(t1h).upper() if t1h else None,
+                "4h": str(t4h).upper() if t4h else None
+            }
+            alignment = str(alignment_raw).upper() if alignment_raw else None
+        else:
+            mtf_trends = None
+            alignment = None
 
         atr_pct = self._safe_finite_float(indicators.get("atr_pct"))
         rsi_14 = self._safe_finite_float(indicators.get("rsi_14"))
@@ -96,17 +125,22 @@ class RegimeAgent(BaseAgent):
         ema_trend = indicators.get("ema_trend", "neutral")
         macd_label = indicators.get("macd_label") or indicators.get("macd_signal", "neutral")
 
-        funding_rate = self._safe_finite_float(derivatives.get("funding_rate", derivatives.get("funding_rate_hourly", 0.0)), 0.0)
-        open_interest_usd = self._safe_finite_float(derivatives.get("open_interest_usd", 0.0), 0.0)
-        news_sentiment = news.get("overall_sentiment") or news.get("sentiment_score") or "neutral"
+        raw_fr = None
+        if isinstance(derivatives, dict):
+            if "funding_rate" in derivatives and derivatives["funding_rate"] is not None:
+                raw_fr = derivatives["funding_rate"]
+            elif "funding_rate_hourly" in derivatives and derivatives["funding_rate_hourly"] is not None:
+                raw_fr = derivatives["funding_rate_hourly"]
+        elif "funding_rate" in raw_asset and raw_asset["funding_rate"] is not None:
+            raw_fr = raw_asset["funding_rate"]
+
+        funding_rate = self._safe_finite_float(raw_fr, default=None)
+        open_interest_usd = self._safe_finite_float(derivatives.get("open_interest_usd", 0.0), 0.0) if isinstance(derivatives, dict) else 0.0
+        news_sentiment = news.get("overall_sentiment") or news.get("sentiment_score") or "neutral" if isinstance(news, dict) else "neutral"
 
         return {
             "price": price,
-            "mtf_trends": {
-                "15m": t15,
-                "1h": t1h,
-                "4h": t4h
-            },
+            "mtf_trends": mtf_trends,
             "mtf_alignment": alignment,
             "atr_pct": atr_pct,
             "rsi_14": rsi_14,
@@ -117,6 +151,28 @@ class RegimeAgent(BaseAgent):
             "open_interest_usd": open_interest_usd,
             "news_sentiment": news_sentiment
         }
+
+    @classmethod
+    def classify_regime_from_scores(
+        cls,
+        trend_score: float,
+        range_score: float,
+        vol_score: float,
+        btc_atr: float
+    ) -> tuple[str, str]:
+        """
+        Pure deterministic decision function mapping composite scores to regime and recommended profile.
+        Returns: (regime, recommended_profile)
+        """
+        # High ATR / Extreme volatility must take precedence to protect capital
+        if vol_score >= 65.0 or btc_atr >= 1.5:
+            return "HIGH_VOLATILITY", "CONSERVATIVE"
+        elif trend_score >= 60.0 and trend_score > (range_score + 15.0):
+            return "TRENDING", "AGGRESSIVE"
+        elif range_score >= 55.0 and range_score > (trend_score + 15.0):
+            return "RANGE_CHOPPY", "BALANCED"
+        else:
+            return "TRANSITION", "BALANCED"
 
     def _extract_macro_summary(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -298,19 +354,7 @@ class RegimeAgent(BaseAgent):
         btc_atr = float(btc_summary.get("atr_pct", 0.0) or 0.0)
         
         # Regime determination based on dominant score
-        # High ATR / Extreme volatility must take precedence to protect capital
-        if vol_score >= 65.0 or btc_atr >= 1.5:
-            regime = "HIGH_VOLATILITY"
-            profile = "CONSERVATIVE"
-        elif trend_score >= 60.0 and trend_score > range_score + 15.0:
-            regime = "TRENDING"
-            profile = "AGGRESSIVE"
-        elif range_score >= 55.0 and range_score > trend_score + 15.0:
-            regime = "RANGE_CHOPPY"
-            profile = "BALANCED"
-        else:
-            regime = "TRANSITION"
-            profile = "BALANCED"
+        regime, profile = self.classify_regime_from_scores(trend_score, range_score, vol_score, btc_atr)
 
         reasoning = (
             f"Multi-Factor Regime Scores -> TREND: {trend_score:.1f} | "
@@ -321,6 +365,7 @@ class RegimeAgent(BaseAgent):
         result = {
             "regime": regime,
             "recommended_profile": profile,
+            "data_valid": True,
             "reasoning_en": reasoning
         }
 

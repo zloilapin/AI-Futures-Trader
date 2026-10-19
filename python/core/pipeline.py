@@ -211,7 +211,9 @@ class TradingPipeline:
             detected_rank = profile_ranks.get(detected_profile, 1 if detected_regime == "UNKNOWN" else 2)
             
             # Защита: RegimeAgent может только ПОНИЖАТЬ риск во время шторма или при неизвестном режиме
-            if detected_rank > orig_rank:
+            if detected_regime == "UNKNOWN":
+                effective_profile = "CONSERVATIVE"
+            elif detected_rank > orig_rank:
                 effective_profile = original_profile
                 self.services.logger.info(f"[Macro Regime] LLM proposed {detected_profile}, but bounded to {original_profile}.")
             else:

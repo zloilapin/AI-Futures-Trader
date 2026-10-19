@@ -46,6 +46,16 @@ class StrategyRouter:
         candle_report = next((r for r in valid_reports if r.get("agent_name") == "Candle_Agent"), {})
         candle_signal = str(candle_report.get("signal", "")).upper()
 
+        # Global Fail-Closed Macro Veto: If macro regime is UNKNOWN or DATA_INSUFFICIENT,
+        # halt all new directional entries across all strategies to protect capital during telemetry outages.
+        if detected_regime in ["UNKNOWN", "DATA_INSUFFICIENT"]:
+            return StrategyProfile(
+                has_directional_signal=False,
+                strategy_mode="UNKNOWN_REGIME_VETO",
+                direction_bias="NEUTRAL",
+                reasoning=f"ОТКЛОНЕН (Все новые сделки заблокированы: макро-режим {detected_regime}, телеметрия BTC/ETH не подтверждена)."
+            )
+
         # 1. Breakout Strategy (Highest Priority Momentum - evaluated first so it is not intercepted by local scalping)
         # Allows breakout if current price breaks the 20-period closed channel OR last closed candle broke out
         if (current_price > donchian_high or last_closed_candle_close > donchian_high) and tech_bulls >= 1 and (

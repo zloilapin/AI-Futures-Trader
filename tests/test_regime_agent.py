@@ -292,61 +292,152 @@ async def test_defect_5_boundary_btc_atr_override(mock_logger, mock_llm, btc_atr
 
 
 @pytest.mark.asyncio
-async def test_defect_5_trend_range_score_delta_exact_boundary(mock_logger, mock_llm):
+async def test_defect_1_missing_or_incomplete_mtf_fails_closed(mock_logger, mock_llm):
     """
-    Defect 5 Boundary Test:
-    Classification uses strict comparison:
-      trend_score > range_score + 15.0
-    When trend_score is exactly equal to range_score + 15.0 (difference == 15.0),
-    it must NOT qualify as TRENDING, but fall through to TRANSITION.
-    Only when difference > 15.0 does it become TRENDING.
+    Defect 1 Verification:
+    If MTF context is missing, empty, or lacks required timeframes/valid alignment,
+    RegimeAgent must NOT fall back to artificial NEUTRAL / MIXED_CHOP and declare data_valid=True.
+    It must fail closed with regime="UNKNOWN", recommended_profile="CONSERVATIVE", data_valid=False.
     """
     agent = RegimeAgent(mock_logger, mock_llm)
 
-    # Synthetic summary with controlled scores:
-    # Trend = 60.0, Range = 45.0 (difference == 15.0) -> TRANSITION
-    summary_boundary = {
-        "BTC": {
-            "price": 95000.0, "atr_pct": 0.5, "funding_rate": 0.0, "er_14": 0.35, "rsi_14": 50.0,
-            "mtf_trends": {"15m": "BULLISH", "1h": "BULLISH", "4h": "NEUTRAL"},
-            "mtf_alignment": "PARTIAL_ALIGNMENT", "ema_trend": "neutral", "macd_label": "neutral"
-        },
-        "ETH": {
-            "price": 2700.0, "atr_pct": 0.5, "funding_rate": 0.0, "er_14": 0.35, "rsi_14": 50.0,
-            "mtf_trends": {"15m": "BULLISH", "1h": "BULLISH", "4h": "NEUTRAL"},
-            "mtf_alignment": "PARTIAL_ALIGNMENT", "ema_trend": "neutral", "macd_label": "neutral"
-        }
-    }
-    res = await agent.analyze(summary_boundary)
-    # At exact boundary where trend is not strictly > range + 15, must be TRANSITION
-    assert res["regime"] in ["TRANSITION", "RANGE_CHOPPY"]
+    # 1. multi_timeframe is completely empty dict
+    btc_empty_mtf = make_raw_asset_data("BTC-USD", 94000.0, "FULL_ALIGNMENT", 0.5, 50.0, "flat", 0.0001, er_14=0.2)
+    btc_empty_mtf["multi_timeframe"] = {}
+    eth_valid = make_raw_asset_data("ETH-USD", 2600.0, "FULL_ALIGNMENT", 0.5, 50.0, "flat", 0.0001, er_14=0.2)
+
+    res1 = await agent.analyze({"btc_data": btc_empty_mtf, "eth_data": eth_valid})
+    assert res1["regime"] == "UNKNOWN"
+    assert res1["recommended_profile"] == "CONSERVATIVE"
+    assert res1["data_valid"] is False
+    assert "BTC" in res1["invalid_assets"]
+
+    # 2. multi_timeframe is missing 4h timeframe
+    btc_missing_4h = make_raw_asset_data("BTC-USD", 94000.0, "FULL_ALIGNMENT", 0.5, 50.0, "flat", 0.0001, er_14=0.2)
+    btc_missing_4h["multi_timeframe"]["trend_4h"] = None
+    btc_missing_4h["multi_timeframe"]["tf_4h"] = {}
+
+    res2 = await agent.analyze({"btc_data": btc_missing_4h, "eth_data": eth_valid})
+    assert res2["regime"] == "UNKNOWN"
+    assert res2["data_valid"] is False
+
+    # 3. multi_timeframe has invalid alignment string
+    btc_invalid_align = make_raw_asset_data("BTC-USD", 94000.0, "INVALID_ALIGNMENT", 0.5, 50.0, "flat", 0.0001, er_14=0.2)
+    res3 = await agent.analyze({"btc_data": btc_invalid_align, "eth_data": eth_valid})
+    assert res3["regime"] == "UNKNOWN"
+    assert res3["data_valid"] is False
 
 
-def test_defect_2_strategy_router_blocks_mean_reversion_in_unknown_regime():
+@pytest.mark.asyncio
+async def test_defect_4_funding_distinguishes_zero_vs_missing(mock_logger, mock_llm):
     """
-    Defect 2 Integration Verification:
-    StrategyRouter must strictly block MEAN_REVERSION when macro regime is UNKNOWN or DATA_INSUFFICIENT,
-    preventing catching falling knives during telemetry failures.
+    Defect 4 Verification:
+    Explicitly distinguishes between:
+      (a) Valid measured zero funding rate (0.0): data_valid=True, regime evaluated normally.
+      (b) Missing or None funding rate: rejected immediately with data_valid=False, regime="UNKNOWN".
+    """
+    agent = RegimeAgent(mock_logger, mock_llm)
+
+    # (a) funding_rate is legitimate 0.0
+    btc_zero_funding = make_raw_asset_data("BTC-USD", 94000.0, "FULL_ALIGNMENT", 0.5, 50.0, "up", 0.0, er_14=0.4)
+    eth_zero_funding = make_raw_asset_data("ETH-USD", 2600.0, "FULL_ALIGNMENT", 0.5, 50.0, "up", 0.0, er_14=0.4)
+
+    res_zero = await agent.analyze({"btc_data": btc_zero_funding, "eth_data": eth_zero_funding})
+    assert res_zero["data_valid"] is True
+    assert res_zero["regime"] != "UNKNOWN"
+
+    # (b) funding_rate is None (or omitted from derivatives_data)
+    btc_missing_funding = make_raw_asset_data("BTC-USD", 94000.0, "FULL_ALIGNMENT", 0.5, 50.0, "up", 0.0, er_14=0.4)
+    btc_missing_funding["derivatives_data"] = {"open_interest_usd": 150000000.0} # no funding_rate key!
+
+    res_missing = await agent.analyze({"btc_data": btc_missing_funding, "eth_data": eth_zero_funding})
+    assert res_missing["data_valid"] is False
+    assert res_missing["regime"] == "UNKNOWN"
+    assert res_missing["recommended_profile"] == "CONSERVATIVE"
+    assert "BTC" in res_missing["invalid_assets"]
+
+
+@pytest.mark.parametrize("trend, range_sc, vol, btc_atr, expected_regime, expected_profile", [
+    # Strict delta boundary tests around 15.0:
+    (60.0, 45.1, 10.0, 0.5, "TRANSITION", "BALANCED"),       # delta = 14.9 <= 15.0 -> Not TRENDING
+    (60.0, 45.0, 10.0, 0.5, "TRANSITION", "BALANCED"),       # delta = 15.0 not > 15.0 -> Not TRENDING
+    (60.1, 45.0, 10.0, 0.5, "TRENDING", "AGGRESSIVE"),       # delta = 15.1 > 15.0 and trend >= 60.0 -> TRENDING
+    (59.9, 40.0, 10.0, 0.5, "TRANSITION", "BALANCED"),       # delta = 19.9 > 15.0, but trend < 60.0 floor -> Not TRENDING
+    
+    # Range boundary tests around 15.0 and 55.0:
+    (40.0, 55.0, 10.0, 0.5, "TRANSITION", "BALANCED"),       # delta = 15.0 not > 15.0 -> Not RANGE_CHOPPY
+    (40.0, 55.1, 10.0, 0.5, "RANGE_CHOPPY", "BALANCED"),     # delta = 15.1 > 15.0 and range >= 55.0 -> RANGE_CHOPPY
+    (30.0, 54.9, 10.0, 0.5, "TRANSITION", "BALANCED"),       # delta = 24.9 > 15.0, but range < 55.0 floor -> Not RANGE_CHOPPY
+
+    # High Volatility overrides everything:
+    (80.0, 20.0, 65.0, 0.5, "HIGH_VOLATILITY", "CONSERVATIVE"), # vol_score >= 65.0 overrides high trend
+    (80.0, 20.0, 20.0, 1.5, "HIGH_VOLATILITY", "CONSERVATIVE"),  # btc_atr >= 1.5 overrides high trend
+])
+def test_defect_3_exact_score_classification_matrix(trend, range_sc, vol, btc_atr, expected_regime, expected_profile):
+    """
+    Defect 3 Verification:
+    Tests the exact mathematical boundaries of classify_regime_from_scores without synthetic noise:
+      - Trend delta 14.9 vs 15.0 vs 15.1
+      - Trend minimum floor 60.0
+      - Range delta 15.0 vs 15.1 and floor 55.0
+      - Volatility overrides (vol >= 65.0, btc_atr >= 1.5)
+    """
+    regime, profile = RegimeAgent.classify_regime_from_scores(trend, range_sc, vol, btc_atr)
+    assert regime == expected_regime
+    assert profile == expected_profile
+
+
+def test_defect_2_strategy_router_blocks_all_strategies_in_unknown_regime():
+    """
+    Defect 2 Verification:
+    StrategyRouter must enforce a global fail-closed guard:
+    When detected_regime is UNKNOWN or DATA_INSUFFICIENT, ALL strategies
+    (BREAKOUT, RELATIVE_MOMENTUM, MEAN_REVERSION, TREND_FOLLOWING)
+    must immediately return has_directional_signal=False and strategy_mode='UNKNOWN_REGIME_VETO'.
     """
     from core.strategy_router import StrategyRouter
 
-    market_data = {
-        "multi_timeframe": {"mtf_alignment": "MIXED_CHOP", "trend_1h": "NEUTRAL"},
-        "indicators": {"bb_width_pct": 2.0, "bb_position_pct": 8.0, "volume_spike_pct": 150.0, "donchian_high": 100.0, "donchian_low": 80.0},
-        "price_data": {"current_price": 85.0}
+    # 1. Data tailored for BREAKOUT LONG
+    breakout_data = {
+        "multi_timeframe": {"mtf_alignment": "FULL_ALIGNMENT", "trend_1h": "BULLISH"},
+        "indicators": {
+            "donchian_high": 100.0,
+            "donchian_low": 80.0,
+            "volume_spike_pct": 250.0,
+            "last_closed_candle_close": 105.0
+        },
+        "price_data": {"current_price": 105.0}
     }
-    valid_reports = [{"agent_name": "Tech_Agent", "signal": "BULLISH"}]
-    macro_cache = {}
+    bull_reports = [
+        {"agent_name": "Tech_Agent", "signal": "BULLISH"},
+        {"agent_name": "Order_Book_Agent", "signal": "BULLISH"}
+    ]
 
-    # Under UNKNOWN regime:
+    # Verify that under TRENDING regime it would be BREAKOUT LONG:
+    profile_trending = StrategyRouter.evaluate(
+        "SOL-USD", breakout_data, bull_reports, {},
+        detected_regime="TRENDING", profile="AGGRESSIVE"
+    )
+    assert profile_trending.has_directional_signal is True
+    assert profile_trending.strategy_mode == "BREAKOUT"
+
+    # Now verify that under UNKNOWN regime BREAKOUT is strictly BLOCKED:
     profile_unknown = StrategyRouter.evaluate(
-        "SOL-USD", market_data, valid_reports, macro_cache,
+        "SOL-USD", breakout_data, bull_reports, {},
         detected_regime="UNKNOWN", profile="CONSERVATIVE"
     )
     assert profile_unknown.has_directional_signal is False
-    assert profile_unknown.strategy_mode == "MEAN_REVERSION"
+    assert profile_unknown.strategy_mode == "UNKNOWN_REGIME_VETO"
     assert "ОТКЛОНЕН" in profile_unknown.reasoning
     assert "UNKNOWN" in profile_unknown.reasoning
+
+    # Also verify DATA_INSUFFICIENT is strictly BLOCKED:
+    profile_insufficient = StrategyRouter.evaluate(
+        "SOL-USD", breakout_data, bull_reports, {},
+        detected_regime="DATA_INSUFFICIENT", profile="CONSERVATIVE"
+    )
+    assert profile_insufficient.has_directional_signal is False
+    assert profile_insufficient.strategy_mode == "UNKNOWN_REGIME_VETO"
 
 
 @pytest.mark.asyncio
@@ -381,5 +472,6 @@ async def test_risk_manager_directional_cluster_cap_enforces_limit_in_unknown_re
     )
     assert verdict["approved"] is False
     assert verdict["veto_category"] == "DIRECTIONAL_CLUSTER_CAP"
+
 
 
