@@ -1,5 +1,6 @@
 import pytest
 import asyncio
+import time
 from unittest.mock import MagicMock, AsyncMock, patch
 from services.nado_trading_service import NadoTradingService
 from agents.telegram_agent import TelegramAgent
@@ -11,14 +12,18 @@ def get_mock_service():
     service.logger = MagicMock()
     service.is_connected = True
     service.default_subaccount_id = "0x" + "12" * 32
-    service.product_map = {"BTC": 2, "BTC-USD": 2, "ETH": 4, "ETH-USD": 4, "ZEC": 8, "ZEC-USD": 8}
+    service.product_map = {"BTC": 2, "BTC-USD": 2, "ETH": 4, "ETH-USD": 4, "SOL": 8, "SOL-USD": 8, "ZEC": 8, "ZEC-USD": 8}
     service.active_positions = {}
     service.pending_reconciliations = {}
     service.processed_fills_registry = {}
     service.processed_fill_digests = set()
     service._reconcile_lock = None
     service._position_locks = {}
-    service._market_cache = {}
+    service._market_cache = {
+        2: MagicMock(book_info=MagicMock(size_increment=int(0.0001 * 1e18), price_increment_x18=int(0.1 * 1e18), min_size=int(0.0001 * 1e18))),
+        4: MagicMock(book_info=MagicMock(size_increment=int(0.001 * 1e18), price_increment_x18=int(0.01 * 1e18), min_size=int(0.001 * 1e18))),
+        8: MagicMock(book_info=MagicMock(size_increment=int(0.01 * 1e18), price_increment_x18=int(0.001 * 1e18), min_size=int(0.01 * 1e18)))
+    }
     service.win_count = 0
     service.loss_count = 0
     service.recent_streak = []
@@ -103,7 +108,7 @@ async def test_zombie_triggers_cancelled_on_force_close():
     called_hex = ['0x' + d.hex() if isinstance(d, bytes) else d for d in called_params.digests]
     assert sl_digest in called_hex
     assert tp_digest in called_hex
-    assert called_params.productIds == [2]
+    assert set(called_params.productIds) == {2}
 
 @pytest.mark.asyncio
 async def test_zombie_triggers_cancelled_on_native_trigger_closure():
@@ -529,7 +534,7 @@ async def test_force_close_error_2002_retains_position_if_fetch_fails():
 
     service.client.market.close_position.side_effect = Exception("2002: amount is zero")
     # Simulate API/network failure when checking fresh positions
-    service.get_active_positions = AsyncMock(side_effect=Exception("Connection reset by peer"))
+    service.get_active_positions = AsyncMock(side_effect=[[], Exception("Connection reset by peer")])
 
     success, pnl = await service.force_close_position("BTC-USD", bypass_check=True)
 
@@ -1222,7 +1227,7 @@ def test_processed_fills_registry_lru_ordered_retention():
 
     # Save and prune
     with patch("core.state_store.StateStore.save") as mock_save:
-        service._save_processed_fills()
+        NadoTradingService._save_processed_fills(service)
 
     # Preserved exactly 3000
     assert len(service.processed_fills_registry) == 3000

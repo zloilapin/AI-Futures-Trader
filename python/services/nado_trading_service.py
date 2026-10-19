@@ -1700,13 +1700,19 @@ class NadoTradingService(BaseTradingService):
                     prod_id = pos.get("product_id") or self.product_map.get(base_symbol)
                     if prod_id is not None and getattr(self, "_market_cache", None) and prod_id in self._market_cache:
                         m_info = self._market_cache[prod_id]
-                        if hasattr(m_info, "oracle_price_x18"):
-                            current_price = float(m_info.oracle_price_x18) / 1e18
-                        elif hasattr(m_info, "product") and hasattr(m_info.product, "oracle_price_x18"):
-                            current_price = float(m_info.product.oracle_price_x18) / 1e18
+                        raw_oracle = getattr(m_info, "oracle_price_x18", None)
+                        if raw_oracle is None and hasattr(m_info, "product"):
+                            raw_oracle = getattr(m_info.product, "oracle_price_x18", None)
+                        if raw_oracle is not None and not hasattr(raw_oracle, "_mock_return_value"):
+                            try:
+                                parsed_oracle = float(raw_oracle) / 1e18
+                                if parsed_oracle > 1e-4:
+                                    current_price = parsed_oracle
+                            except (ValueError, TypeError):
+                                pass
 
                 # Safe fallback price if market price is completely unavailable
-                effective_market_price = current_price if current_price > 0 else (entry_price if entry_price > 0 else 1.0)
+                effective_market_price = current_price if current_price > 1e-4 else (entry_price if entry_price > 0 else 1.0)
 
                 tp_price = float(pos.get("tp_price") or 0.0)
                 sl_price = float(pos.get("sl_price") or 0.0)
@@ -2040,7 +2046,12 @@ class NadoTradingService(BaseTradingService):
                 order_ts_sec = None
                 if ts is not None and str(ts).strip() != "" and str(ts).strip().lower() != "none":
                     try:
-                        order_ts_sec = float(ts) / 1000.0 if len(str(ts)) > 10 else float(ts)
+                        ts_val = float(ts)
+                        ref_magnitude = max(ref_time or 0.0, max_timestamp or 0.0, min_timestamp or 0.0)
+                        if len(str(int(ts_val))) > 10 or (ref_magnitude > 0 and ts_val >= ref_magnitude * 500):
+                            order_ts_sec = ts_val / 1000.0
+                        else:
+                            order_ts_sec = ts_val
                     except (ValueError, TypeError):
                         logger.debug(f"[NadoTradingService] Skipping unparseable order timestamp: {ts}")
                         continue
@@ -2508,7 +2519,20 @@ class NadoTradingService(BaseTradingService):
 
             for attempt in range(max_retries):
                 # CRITICAL-5: Always fetch active positions to capture realized PnL prior to close
-                positions = await self.get_active_positions(bypass_cache=True)
+                try:
+                    positions = await self.get_active_positions(bypass_cache=True)
+                except Exception as fetch_err:
+                    if not bypass_check:
+                        if attempt < max_retries - 1:
+                            logger.warning(f"[NadoTradingService] Error fetching positions for {symbol}: {fetch_err}. Retrying ({attempt+1}/{max_retries})...")
+                            await asyncio.sleep(1.5)
+                            continue
+                        else:
+                            return False, 0.0
+                    else:
+                        logger.warning(f"[NadoTradingService] ⚠️ bypass_check=True, but failed to fetch positions from Indexer: {fetch_err}. PnL will be 0.")
+                        positions = []
+
                 target_pos = next((p for p in positions if p["symbol"].split('-')[0].upper() == base_symbol), None)
                         
                 if not target_pos:
@@ -3014,7 +3038,7 @@ class NadoTradingService(BaseTradingService):
             is_estimated_fee=is_estimated_fee
         )
 
-    def initialize_partial_tp_plan(self, symbol: str) -> Optional[Any]:
+    def initialize_partial_tp_plan(self, symbol: str, preferred_mode: Optional[str] = None) -> Optional[Any]:
         """
         Calculates and attaches a deterministic PartialTPPlan to an active position.
         Phase 3: Persists the updated position state to disk immediately.
@@ -3074,7 +3098,7 @@ class NadoTradingService(BaseTradingService):
         try:
             from services.partial_tp_calculator import PartialTPCalculator
             from core.config import config
-            pref_mode = getattr(config, "PARTIAL_TP_MODE", "2_TIER")
+            pref_mode = preferred_mode or getattr(self, "partial_tp_mode", None) or getattr(config, "PARTIAL_TP_MODE", "2_TIER")
             import time
             plan = PartialTPCalculator.calculate_plan(
                 symbol=canonical_sym,

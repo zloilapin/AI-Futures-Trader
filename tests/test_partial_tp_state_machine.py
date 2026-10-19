@@ -44,6 +44,7 @@ def mock_service():
             )
         )
     }
+    service.partial_tp_mode = "4_TIER"
     return service
 
 
@@ -286,8 +287,8 @@ def test_reconciliation_zero_on_chain_balance_cleans_up(mock_service):
     }
     mock_service.initialize_partial_tp_plan("SOL-USD")
 
-    # On-chain returns 0 contracts (closed on chain)
-    reconciled = mock_service.reconcile_partial_tp_with_chain("SOL-USD", on_chain_contracts=0.0)
+    # On-chain returns 0 contracts (closed on chain with verified PnL)
+    reconciled = mock_service.reconcile_partial_tp_with_chain("SOL-USD", on_chain_contracts=0.0, is_verified_pnl=True)
 
     assert reconciled is True
     assert "SOL-USD" not in mock_service.active_positions

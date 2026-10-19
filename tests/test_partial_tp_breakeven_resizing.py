@@ -58,6 +58,7 @@ def mock_service():
         return []
 
     service._fetch_trigger_orders = mock_fetch_triggers
+    service.partial_tp_mode = "4_TIER"
     return service
 
 

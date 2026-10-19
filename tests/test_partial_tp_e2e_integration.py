@@ -67,6 +67,7 @@ def mock_service():
         return []
 
     service._fetch_trigger_orders = mock_fetch_triggers
+    service.partial_tp_mode = "4_TIER"
     return service
 
 
@@ -174,8 +175,8 @@ async def test_full_lifecycle_profit_secured_before_reversal(mock_service):
         # 5. VERIFICATION:
         # Position is cleanly closed and removed from active positions
         assert "SOL-USD" not in mock_service.active_positions
-        # The trade finished with +$1.20 profit instead of wiping out!
-        assert final_report["pnl_usd"] == pytest.approx(1.20)
+        # The trade finished with secured profit (+1.20 TP tiers + 0.04 BE remainder)
+        assert final_report["pnl_usd"] == pytest.approx(1.24)
         assert mock_service.win_count == 1
         assert mock_service.loss_count == 0
 
