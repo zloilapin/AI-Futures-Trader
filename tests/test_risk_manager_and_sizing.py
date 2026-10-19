@@ -2672,6 +2672,314 @@ async def test_nado_open_position_blocks_on_portfolio_unresolved_risk_breach():
     assert mock_client.market.place_order.called is False
 
 
+# ==============================================================================
+# AUDIT c4cf836 SAFETY SUITE: REAL EMERGENCY CLOSE SDK FLOW & POST-FILL FAIL-CLOSED
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_emergency_protect_risk_breach_real_sdk_close_success():
+    """
+    P2 Audit Requirement:
+    Tests emergency_protect_risk_breach() executing through real force_close_position()
+    WITHOUT mocking emergency_protect_risk_breach or force_close_position.
+    Mocks only underlying Nado SDK calls (subaccount, market.close_position, historical_orders).
+    Verifies:
+      - client.market.close_position called with correct subaccount and product_id
+      - trigger cancellation attempted
+      - position cleaned up from active_positions
+      - returns (True, realized_pnl)
+    """
+    import time
+    from services.nado_trading_service import NadoTradingService
+
+    mock_client = MagicMock()
+    mock_sub = MagicMock()
+    mock_sub.subaccount = "0x" + "aa" * 32
+    mock_client.subaccount.get_subaccounts = MagicMock(return_value=MagicMock(subaccounts=[mock_sub]))
+    mock_client.market.close_position = MagicMock(return_value="0xclose_tx_digest")
+    
+    mock_hist_order = MagicMock()
+    mock_hist_order.digest = "0xclose_fill_digest"
+    mock_hist_order.base_filled = str(int(-0.10 * 1e18))
+    mock_hist_order.quote_filled = str(int(5990.0 * 1e18))
+    mock_hist_order.timestamp = int(time.time() * 1000)
+    mock_client.market.get_subaccount_historical_orders = MagicMock(return_value=MagicMock(orders=[mock_hist_order]))
+
+    service = NadoTradingService()
+    service.active_positions.clear()
+    service.pending_reconciliations.clear()
+    service.client = mock_client
+    service.is_connected = True
+    service.wallet = MagicMock()
+    service.wallet.get_address.return_value = "0x1234567890123456789012345678901234567890"
+    service.default_subaccount_id = "0x" + "aa" * 32
+    service.product_map = {"BTC": 2, "BTC-USD": 2}
+    service._cancel_trigger_digests = AsyncMock()
+
+    service.active_positions["BTC-USD"] = {
+        "symbol": "BTC-USD",
+        "direction": "LONG",
+        "entry_price": 60000.0,
+        "sl_price": 59000.0,
+        "contracts": 0.10,
+        "size_usd": 6000.0,
+        "sl_digest": "0xsl_123",
+        "tp_digest": "0xtp_123",
+        "protection_state": "SUBMITTING_PROTECTION"
+    }
+
+    call_count = [0]
+    async def mock_get_positions(bypass_cache=True):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return [{"symbol": "BTC-USD", "contracts": 0.10, "entry_price": 60000.0, "product_id": 2}]
+        return []
+    service.get_active_positions = AsyncMock(side_effect=mock_get_positions)
+
+    with patch.object(service, "_save_positions"):
+        ok, pnl = await service.emergency_protect_risk_breach("BTC-USD", approved_risk=100.0, actual_risk=150.0)
+
+    assert ok is True
+    assert mock_client.market.close_position.called is True
+    close_args = mock_client.market.close_position.call_args[0]
+    assert close_args[0] == "0x" + "aa" * 32
+    assert close_args[1] == 2
+    assert service._cancel_trigger_digests.called is True
+    assert "BTC-USD" not in service.active_positions
+
+
+@pytest.mark.asyncio
+async def test_emergency_protect_risk_breach_real_sdk_close_failure_marks_unresolved():
+    """
+    P2 Audit Requirement:
+    Verifies that when client.market.close_position fails (e.g. Sequencer Error)
+    and the position remains open on-chain, emergency_protect_risk_breach():
+      - Positively detects position STILL_OPEN on chain via get_active_positions
+      - Does NOT falsely report success
+      - Marks position protection_state as RISK_BREACH_UNRESOLVED
+      - Retains position in active_positions for Sentinel
+      - Returns (False, 0.0)
+    """
+    from services.nado_trading_service import NadoTradingService
+
+    mock_client = MagicMock()
+    mock_sub = MagicMock()
+    mock_sub.subaccount = "0x" + "aa" * 32
+    mock_client.subaccount.get_subaccounts = MagicMock(return_value=MagicMock(subaccounts=[mock_sub]))
+    mock_client.market.close_position = MagicMock(side_effect=RuntimeError("Sequencer rejected: 2004 Insufficient Margin"))
+
+    service = NadoTradingService()
+    service.active_positions.clear()
+    service.pending_reconciliations.clear()
+    service.client = mock_client
+    service.is_connected = True
+    service.wallet = MagicMock()
+    service.wallet.get_address.return_value = "0x1234567890123456789012345678901234567890"
+    service.default_subaccount_id = "0x" + "aa" * 32
+    service.product_map = {"BTC": 2, "BTC-USD": 2}
+
+    service.active_positions["BTC-USD"] = {
+        "symbol": "BTC-USD",
+        "direction": "LONG",
+        "entry_price": 60000.0,
+        "sl_price": 59000.0,
+        "contracts": 0.10,
+        "size_usd": 6000.0,
+        "protection_state": "SUBMITTING_PROTECTION"
+    }
+
+    service.get_active_positions = AsyncMock(return_value=[
+        {"symbol": "BTC-USD", "contracts": 0.10, "entry_price": 60000.0, "product_id": 2}
+    ])
+
+    with patch.object(service, "_save_positions"):
+        ok, pnl = await service.emergency_protect_risk_breach("BTC-USD", approved_risk=100.0, actual_risk=150.0)
+
+    assert ok is False
+    assert pnl == 0.0
+    assert "BTC-USD" in service.active_positions
+    assert service.active_positions["BTC-USD"]["protection_state"] == "RISK_BREACH_UNRESOLVED"
+
+
+@pytest.mark.asyncio
+async def test_post_fill_unexpected_type_error_triggers_emergency_close_and_fails_closed():
+    """
+    P1 Audit Requirement:
+    Verifies that if an unexpected non-ValueError exception (e.g. TypeError, OverflowError)
+    occurs AFTER a confirmed fill:
+      - The exception is NOT treated as REJECTED_BY_EXCHANGE
+      - emergency_protect_risk_breach is invoked
+      - When emergency close succeeds, status is set to ABORTED_CALC_ERROR or ABORTED_POST_FILL_ERROR
+      - Never leaves an open on-chain fill unhedged or unmonitored
+    """
+    from services.nado_trading_service import NadoTradingService
+
+    mock_client = MagicMock()
+    mock_fill_resp = MagicMock()
+    mock_fill_resp.data.digest = "0xtype_err_order"
+    mock_client.market.place_order = MagicMock(return_value=mock_fill_resp)
+
+    mock_hist_order = MagicMock()
+    mock_hist_order.digest = "0xtype_err_order"
+    mock_hist_order.base_filled = str(int(0.10 * 1e18))
+    mock_hist_order.quote_filled = str(int(6000.0 * 1e18))
+    mock_client.market.get_historical_orders_by_digest = MagicMock(
+        return_value=MagicMock(orders=[mock_hist_order])
+    )
+
+    service = NadoTradingService()
+    service.active_positions.clear()
+    service.pending_reconciliations.clear()
+    service.client = mock_client
+    service.is_connected = True
+    service.wallet = MagicMock()
+    service.wallet.get_address.return_value = "0x1234567890123456789012345678901234567890"
+    service.default_subaccount_id = "0x" + "11" * 32
+    service.product_map = {"BTC": 2, "BTC-USD": 2}
+    service._market_cache = {2: MagicMock()}
+    service._get_market_parameters = MagicMock(return_value={
+        "size_increment_base": 0.001,
+        "size_increment_x18": int(0.001 * 1e18),
+        "price_increment_x18": int(1.0 * 1e18),
+        "min_size": 0.001,
+        "min_notional": 0.0
+    })
+
+    service.emergency_protect_risk_breach = AsyncMock(return_value=(True, -2.50))
+
+    from core import risk_calculator
+    orig_estimate = risk_calculator.estimate_total_loss
+    call_count = [0]
+
+    def faulty_estimate_type_error(**kwargs):
+        call_count[0] += 1
+        if call_count[0] > 1:
+            raise TypeError("Unsupported operand types for float and str in risk computation")
+        return orig_estimate(**kwargs)
+
+    with patch("core.risk_calculator.estimate_total_loss", side_effect=faulty_estimate_type_error):
+        with patch("asyncio.sleep", AsyncMock()), patch.object(service, "_save_positions"):
+            ok = await service.open_position(
+                "BTC-USD", "LONG", 60000.0, 6000.0, 62000.0, 59000.0, 10,
+                contracts=0.10, approved_risk_usd=150.0
+            )
+
+    assert ok is False
+    assert service.last_execution_status != "REJECTED_BY_EXCHANGE"
+    assert service.last_execution_status == "ABORTED_CALC_ERROR"
+    assert service.emergency_protect_risk_breach.called is True
+
+
+@pytest.mark.asyncio
+async def test_post_fill_outer_exception_triggers_emergency_protection_and_persists():
+    """
+    P1 Audit Requirement:
+    Verifies that if an unexpected exception occurs in the outer try block AFTER fill confirmation
+    (e.g. state persistence or trigger placement crashes unexpectedly), the outer handler detects
+    is_post_fill=True, invokes emergency_protect_risk_breach, and if closure fails, retains state
+    as RISK_BREACH_UNRESOLVED and never classifies it as REJECTED_BY_EXCHANGE.
+    """
+    from services.nado_trading_service import NadoTradingService
+
+    mock_client = MagicMock()
+    mock_fill_resp = MagicMock()
+    mock_fill_resp.data.digest = "0xouter_err_order"
+    mock_client.market.place_order = MagicMock(return_value=mock_fill_resp)
+
+    mock_hist_order = MagicMock()
+    mock_hist_order.digest = "0xouter_err_order"
+    mock_hist_order.base_filled = str(int(0.10 * 1e18))
+    mock_hist_order.quote_filled = str(int(6000.0 * 1e18))
+    mock_client.market.get_historical_orders_by_digest = MagicMock(
+        return_value=MagicMock(orders=[mock_hist_order])
+    )
+
+    service = NadoTradingService()
+    service.active_positions.clear()
+    service.pending_reconciliations.clear()
+    service.client = mock_client
+    service.is_connected = True
+    service.wallet = MagicMock()
+    service.wallet.get_address.return_value = "0x1234567890123456789012345678901234567890"
+    service.default_subaccount_id = "0x" + "11" * 32
+    service.product_map = {"BTC": 2, "BTC-USD": 2}
+    service._market_cache = {2: MagicMock()}
+    service._get_market_parameters = MagicMock(return_value={
+        "size_increment_base": 0.001,
+        "size_increment_x18": int(0.001 * 1e18),
+        "price_increment_x18": int(1.0 * 1e18),
+        "min_size": 0.001,
+        "min_notional": 0.0
+    })
+
+    service.emergency_protect_risk_breach = AsyncMock(return_value=(False, 0.0))
+
+    # Force an unexpected RuntimeError in trigger placement step
+    save_call_count = [0]
+    def faulty_save():
+        save_call_count[0] += 1
+        if save_call_count[0] >= 2:
+            raise RuntimeError("Database connection lost during position state save")
+
+    service._save_positions = MagicMock(side_effect=faulty_save)
+
+    with patch("asyncio.sleep", AsyncMock()), patch.object(service, "_save_pending_reconciliations"), patch.object(service, "_save_state"):
+        ok = await service.open_position(
+            "BTC-USD", "LONG", 60000.0, 6000.0, 62000.0, 59000.0, 10,
+            contracts=0.10, approved_risk_usd=150.0
+        )
+
+    assert ok is False
+    assert service.last_execution_status != "REJECTED_BY_EXCHANGE"
+    assert service.last_execution_status == "RISK_BREACH_UNRESOLVED"
+    assert service.emergency_protect_risk_breach.called is True
+    assert "BTC-USD" in service.pending_reconciliations
+
+
+@pytest.mark.asyncio
+async def test_restart_recovery_with_unresolved_incident_blocks_new_trades():
+    """
+    P2 Audit Requirement:
+    Verifies state recovery after restart:
+    If active_positions or pending_reconciliations has an unresolved risk breach
+    restored from persistent disk storage, a freshly instantiated NadoTradingService
+    strictly refuses to open any new positions before reconciliation completes.
+    """
+    import time
+    from services.nado_trading_service import NadoTradingService
+
+    mock_client = MagicMock()
+    mock_client.market.place_order = AsyncMock()
+
+    service = NadoTradingService()
+    service.client = mock_client
+    service.is_connected = True
+    service.wallet = MagicMock()
+    service.wallet.get_address.return_value = "0x1234567890123456789012345678901234567890"
+    service.default_subaccount_id = "0x" + "11" * 32
+    service.product_map = {"BTC": 2, "BTC-USD": 2}
+
+    # Simulate restored state with pending unresolved breach
+    service.active_positions.clear()
+    service.pending_reconciliations.clear()
+    service.pending_reconciliations["ETH-USD"] = {
+        "symbol": "ETH-USD",
+        "status": "RISK_BREACH_UNRESOLVED",
+        "reason": "RISK_CALC_ERROR_CLOSE_FAILED",
+        "detected_at": time.time()
+    }
+
+    ok = await service.open_position(
+        "BTC-USD", "LONG", 60000.0, 600.0, 62000.0, 59000.0, 10,
+        contracts=0.01, approved_risk_usd=10.0
+    )
+
+    assert ok is False
+    assert service.last_execution_status == "RISK_BREACH_UNRESOLVED"
+    assert mock_client.market.place_order.called is False
+
+
+
 
 
 

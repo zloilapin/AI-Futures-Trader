@@ -865,7 +865,7 @@ class TradingPipeline:
                                             risk_verdict["actual_risk_usd"] = loss_calc.price_loss_usd
                                             risk_verdict["total_actual_loss_usd"] = total_actual_loss_usd
                                             risk_verdict["total_stress_loss_usd"] = total_actual_stress_usd
-                                        except ValueError as val_err:
+                                        except Exception as val_err:
                                             self.services.logger.error(
                                                 f"[Stage 5] 🚨 Fatal risk calculator error during post-fill check: {val_err}. "
                                                 f"Risk budget cannot be established for open position {symbol}. Emergency protecting position."

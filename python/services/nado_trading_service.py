@@ -553,6 +553,8 @@ class NadoTradingService(BaseTradingService):
         logger.info(f"[NadoTradingService] 🚀 Routing {direction} {symbol} to Nado DEX...")
         
         actual_entry_price = entry_price
+        filled = False
+        actual_filled_x18 = 0
         
         try:
             import time
@@ -963,6 +965,7 @@ class NadoTradingService(BaseTradingService):
                             "detected_at": time.time(),
                             "status": "PENDING_ORDER_RECONCILIATION"
                         }
+                        self._save_pending_reconciliations()
                         self._save_state()
                         self.last_execution_status = "PENDING_ORDER_RECONCILIATION"
                     else:
@@ -1071,18 +1074,45 @@ class NadoTradingService(BaseTradingService):
                             "symbol": symbol
                         }
                         return False
-                except ValueError as calc_err:
+                except Exception as calc_err:
                     logger.error(
                         f"[NadoTradingService] ❌ Fatal risk calculator error during fill verification: {calc_err}. "
                         f"Refusing to leave position with unverified risk open; emergency closing immediately."
                     )
-                    close_ok, _ = await self.emergency_protect_risk_breach(
+                    close_ok, actual_exit = await self.emergency_protect_risk_breach(
                         symbol=symbol,
                         approved_risk=approved_budget,
                         actual_risk=total_actual_loss
                     )
                     self.last_execution_status = "ABORTED_CALC_ERROR" if close_ok else "RISK_BREACH_UNRESOLVED"
-                    self.last_execution_details = {"reason": "RISK_CALCULATOR_ERROR", "error": str(calc_err)}
+                    self.last_execution_details = {
+                        "reason": "RISK_CALCULATOR_ERROR",
+                        "error": str(calc_err),
+                        "error_type": type(calc_err).__name__,
+                        "close_confirmed": close_ok,
+                        "exit_price": actual_exit if close_ok else None
+                    }
+                    if not close_ok:
+                        if symbol in self.active_positions:
+                            self.active_positions[symbol]["protection_state"] = "RISK_BREACH_UNRESOLVED"
+                        self.pending_reconciliations[symbol] = {
+                            "symbol": symbol,
+                            "base_symbol": base_symbol,
+                            "product_id": product_id,
+                            "subaccount": self.default_subaccount_id,
+                            "direction": direction.upper(),
+                            "entry_price": actual_entry_price,
+                            "contracts": actual_base_amount,
+                            "status": "RISK_BREACH_UNRESOLVED",
+                            "reason": "RISK_CALC_ERROR_CLOSE_FAILED",
+                            "detected_at": time.time()
+                        }
+                        try:
+                            self._save_positions()
+                            self._save_pending_reconciliations()
+                            self._save_state()
+                        except Exception as save_err:
+                            logger.error(f"[NadoTradingService] Failed to persist emergency state: {save_err}")
                     return False
             else:
                 logger.error(
@@ -1305,6 +1335,55 @@ class NadoTradingService(BaseTradingService):
             }
             return True
         except Exception as e:
+            # Check if order was already filled before the exception occurred
+            is_post_fill = bool(locals().get("filled") or (locals().get("actual_filled_x18", 0) != 0) or (symbol in self.active_positions))
+            if is_post_fill:
+                logger.critical(
+                    f"[NadoTradingService] 🚨 CRITICAL UNEXPECTED POST-FILL EXCEPTION for {symbol}: {e}. "
+                    f"Position is active on-chain, but post-fill processing raised {type(e).__name__}. "
+                    f"Initiating emergency protection immediately to prevent unbounded risk."
+                )
+                try:
+                    close_ok, actual_exit = await self.emergency_protect_risk_breach(
+                        symbol=symbol,
+                        approved_risk=locals().get("approved_budget", 0.0),
+                        actual_risk=locals().get("total_actual_loss", 0.0)
+                    )
+                except Exception as em_err:
+                    logger.critical(f"[NadoTradingService] ❌ Failed to execute emergency protection on post-fill error: {em_err}")
+                    close_ok, actual_exit = False, 0.0
+
+                self.last_execution_status = "ABORTED_POST_FILL_ERROR" if close_ok else "RISK_BREACH_UNRESOLVED"
+                self.last_execution_details = {
+                    "reason": "UNEXPECTED_POST_FILL_EXCEPTION",
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "close_confirmed": close_ok,
+                    "exit_price": actual_exit if close_ok else None
+                }
+                if not close_ok:
+                    if symbol in self.active_positions:
+                        self.active_positions[symbol]["protection_state"] = "RISK_BREACH_UNRESOLVED"
+                    self.pending_reconciliations[symbol] = {
+                        "symbol": symbol,
+                        "base_symbol": base_symbol if 'base_symbol' in locals() else symbol.split('-')[0].upper(),
+                        "product_id": locals().get("product_id"),
+                        "subaccount": self.default_subaccount_id,
+                        "direction": str(direction).upper(),
+                        "entry_price": locals().get("actual_entry_price", entry_price),
+                        "contracts": locals().get("actual_base_amount", locals().get("amount_base", 0.0)),
+                        "status": "RISK_BREACH_UNRESOLVED",
+                        "reason": "POST_FILL_EXCEPTION_CLOSE_FAILED",
+                        "detected_at": time.time()
+                    }
+                    try:
+                        self._save_positions()
+                        self._save_pending_reconciliations()
+                        self._save_state()
+                    except Exception as save_err:
+                        logger.error(f"[NadoTradingService] Failed to persist outer emergency state: {save_err}")
+                return False
+
             logger.error(f"[NadoTradingService] ⚠️ Failed to place order: {e}")
             self.last_execution_status = "REJECTED_BY_EXCHANGE"
             self.last_execution_details = {"reason": str(e), "error_type": type(e).__name__}

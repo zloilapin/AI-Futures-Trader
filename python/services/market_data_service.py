@@ -765,7 +765,10 @@ class MarketDataService:
             for p in markets.perp_products:
                 if p.product_id == product_id:
                     try:
-                        open_interest = float(p.open_interest_x18) / 1e18
+                        if hasattr(p, 'state') and hasattr(p.state, 'open_interest') and p.state.open_interest is not None:
+                            open_interest = float(p.state.open_interest) / 1e18
+                        elif hasattr(p, 'open_interest_x18') and p.open_interest_x18 is not None:
+                            open_interest = float(p.open_interest_x18) / 1e18
                     except Exception:
                         pass
                     break
@@ -780,6 +783,11 @@ class MarketDataService:
                 vid = str(product_id)
                 if vid in snap.funding_rates:
                     funding_rate = float(snap.funding_rates[vid]) / 1e18
+                if open_interest is None and hasattr(snap, 'open_interests') and vid in snap.open_interests:
+                    try:
+                        open_interest = float(snap.open_interests[vid]) / 1e18
+                    except Exception:
+                        pass
                     
             if funding_rate is None or open_interest is None:
                 self._log(f"⚠️ [MarketDataService] Missing critical risk data OI ({open_interest}) or Funding ({funding_rate}) for {symbol}. VETO triggered.", level="debug")
