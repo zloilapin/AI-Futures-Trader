@@ -128,7 +128,7 @@ class MarketDataService:
             
         self._log(f"⚠️ [MarketDataService] Nado Client not initialized. Cannot fetch active perps.")
         # Fallback list if API fails
-        return [{"symbol": s, "vol24h": 0, "change24h": 0} for s in ["BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "LINK", "AVAX"]]
+        return [{"symbol": f"{s}-USD", "volumeQuote": 0.0} for s in ["BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "LINK", "AVAX"]]
 
 
     def _normalize_candles(self, raw_candles: List[Any]) -> List[Dict[str, float]]:
@@ -176,10 +176,12 @@ class MarketDataService:
             240: IndexerCandlesticksGranularity.FOUR_HOURS,
             1440: IndexerCandlesticksGranularity.ONE_DAY
         }
+        granularity_target = tf_map.get(interval_min, IndexerCandlesticksGranularity.FIFTEEN_MINUTES)
+        min_candles = 200 if interval_min == 15 else 50
         params = IndexerCandlesticksParams(
             product_id=self.product_map[base_symbol],
-            granularity=tf_map.get(interval_min, IndexerCandlesticksGranularity.FIFTEEN_MINUTES),
-            limit=max(limit, 50)
+            granularity=granularity_target,
+            limit=max(limit, min_candles)
         )
         try:
             candles = await asyncio.to_thread(self.nado_client.market.get_candlesticks, params)
@@ -191,6 +193,11 @@ class MarketDataService:
                 "volume": float(c.volume) / 1e18
             } for c in reversed(candles.candlesticks)]
             if parsed:
+                if cache_key in self._candle_cache:
+                    cached_time, cached_candles = self._candle_cache[cache_key]
+                    # Do not overwrite a longer cached list with a shorter one within TTL
+                    if len(cached_candles) > len(parsed) and (now - cached_time < self.CANDLE_CACHE_TTL):
+                        parsed = cached_candles
                 self._candle_cache[cache_key] = (now, parsed)
             return parsed[-limit:] if parsed else []
         except Exception as e:
@@ -201,7 +208,7 @@ class MarketDataService:
 
     async def _fetch_ohlc_interval(self, symbol: str, interval_min: int) -> dict:
         if getattr(self, "is_nado", False) or True: # Force Nado
-            # CRITICAL: Fetch at least 50 candles so EMA-9 can properly converge. 20 is too few.
+            # Fetch at least 50 candles (or 200 for 15m) so EMA can properly converge
             candles = await self._fetch_nado_candles(symbol, interval_min, 50)
             if candles:
                 closes = [c["close"] for c in candles]
@@ -234,9 +241,10 @@ class MarketDataService:
                     elif current_price < ema_9 and ema_9 < ema_21 and (ema_21 - current_price) > (atr * 0.2):
                         trend = "BEARISH"
                 
-                # For compatibility with legacy logic, keep pct_diff calculation
-                pct_diff = ((current_price - closes[0]) / (closes[0] + 1e-9)) * 100
+                # Safe pct_diff calculation avoiding division by zero/epsilon artifacts
+                pct_diff = ((current_price - closes[0]) / closes[0]) * 100.0 if closes[0] > 0 else 0.0
                 
+                import time
                 vol = sum(c["volume"] for c in candles)
                 return {
                     "interval_min": interval_min,
@@ -244,7 +252,8 @@ class MarketDataService:
                     "trend": trend,
                     "change_pct": round(pct_diff, 2),
                     "volume": round(vol * current_price, 2),
-                    "candles_20": candles
+                    "candles_20": candles,
+                    "timestamp": time.time()
                 }
             self._log(f"⚠️ [MarketDataService] Nado candles empty for {symbol}. NO FALLBACK ALLOWED.")
             raise ValueError(f"Nado OHLCV data unavailable for {symbol}")
@@ -304,6 +313,7 @@ class MarketDataService:
 
     async def fetch_ohlcv(self, symbol: str, timeframe: str = "15m") -> Dict[str, Any]:
         """Fetches real candlestick data and computes price trend from Kraken."""
+        import time
         tf_map = {"15m": 15, "1h": 60, "4h": 240, "1d": 1440}
         interval_min = tf_map.get(timeframe.lower(), 15)
         res = await self._fetch_ohlc_interval(symbol, interval_min)
@@ -314,7 +324,8 @@ class MarketDataService:
             "current_price": res.get("current_price", 0.0),
             "trend": res.get("trend", "neutral").lower(),
             "recent_volume": res.get("volume", 0.0),
-            "candles_20": res.get("candles_20", [])
+            "candles_20": res.get("candles_20", []),
+            "timestamp": res.get("timestamp", time.time())
         }
 
     async def fetch_order_book(self, symbol: str) -> Dict[str, Any]:
@@ -323,6 +334,7 @@ class MarketDataService:
         if self.is_nado and self.nado_client:
             try:
                 import asyncio
+                import time
                 base_symbol = symbol.split('-')[0].upper()
                 product_id = self.product_map.get(base_symbol)
                 
@@ -340,12 +352,17 @@ class MarketDataService:
                         
                         best_bid = bids[0][0]
                         best_ask = asks[0][0]
-                        spread = round(best_ask - best_bid, 4)
-                        spread_pct = round((spread / best_bid) * 100, 4) if best_bid > 0 else 0.0
+                        raw_spread = max(0.0, best_ask - best_bid)
+                        spread = round(raw_spread, 8)
+                        spread_pct = round((raw_spread / best_bid) * 100, 4) if best_bid > 0 else 0.0
                         import math
                         mid_price = (best_bid + best_ask) / 2
-                        bid_vol = sum(size * math.exp(-100 * (abs(price - mid_price) / mid_price)) for price, size in bids)
-                        ask_vol = sum(size * math.exp(-100 * (abs(price - mid_price) / mid_price)) for price, size in asks)
+                        if mid_price > 0:
+                            bid_vol = sum(size * math.exp(-100 * (abs(price - mid_price) / mid_price)) for price, size in bids)
+                            ask_vol = sum(size * math.exp(-100 * (abs(price - mid_price) / mid_price)) for price, size in asks)
+                        else:
+                            bid_vol = sum(size for _, size in bids)
+                            ask_vol = sum(size for _, size in asks)
                         total_vol = bid_vol + ask_vol
                         imbalance = round((bid_vol - ask_vol) / (total_vol + 1e-8), 4)
                         
@@ -357,7 +374,8 @@ class MarketDataService:
                             "ask_volume": round(ask_vol, 2),
                             "imbalance": imbalance,
                             "best_bid": best_bid,
-                            "best_ask": best_ask
+                            "best_ask": best_ask,
+                            "timestamp": time.time()
                         }
                     else:
                         raise ValueError(f"Nado OrderBook is completely empty for {symbol} (No liquidity)")
@@ -543,11 +561,11 @@ class MarketDataService:
                         rsi_tail = rsi_series[-20:]
                         price_min1_idx = price_tail[:10].index(min(price_tail[:10]))
                         price_min2_idx = 10 + price_tail[10:].index(min(price_tail[10:]))
-                        if price_tail[price_min2_idx] < price_tail[price_min1_idx] and rsi_tail[price_min2_idx] > rsi_tail[price_min1_idx]:
-                            rsi_divergence = "bullish"
                         price_max1_idx = price_tail[:10].index(max(price_tail[:10]))
                         price_max2_idx = 10 + price_tail[10:].index(max(price_tail[10:]))
-                        if price_tail[price_max2_idx] > price_tail[price_max1_idx] and rsi_tail[price_max2_idx] < rsi_tail[price_max1_idx]:
+                        if price_tail[price_min2_idx] < price_tail[price_min1_idx] and rsi_tail[price_min2_idx] > rsi_tail[price_min1_idx]:
+                            rsi_divergence = "bullish"
+                        elif price_tail[price_max2_idx] > price_tail[price_max1_idx] and rsi_tail[price_max2_idx] < rsi_tail[price_max1_idx]:
                             rsi_divergence = "bearish"
 
                     # 11. MACD Crossover Detection
@@ -562,9 +580,9 @@ class MarketDataService:
                         elif prev_macd >= prev_signal and curr_macd < curr_signal:
                             macd_crossover = "bearish_cross"
 
-                    # 12. Liquidity Sweep Detection (wick > 60% of candle range on last 5 candles)
+                    # 12. Liquidity Sweep Detection (wick > 60% of candle range on last 5 CLOSED candles)
                     sweeps_detected = []
-                    for ci in range(-5, 0):
+                    for ci in range(-6, -1):
                         if abs(ci) <= len(candles):
                             c = candles[ci]
                             o, h, l, cl = float(c["open"]), float(c["high"]), float(c["low"]), float(c["close"])
@@ -830,7 +848,8 @@ class MarketDataService:
                 "open_interest": open_interest,
                 "open_interest_trend": oi_trend,
                 "funding_rate": round(funding_rate, 8),
-                "funding_rate_decimal": round(funding_rate, 8)
+                "funding_rate_decimal": round(funding_rate, 8),
+                "timestamp": current_time
             }
         except Exception as e:
             self._log(f"⚠️ [MarketDataService] Failed to fetch Nado OI/Funding for {symbol}: {e}")

@@ -185,3 +185,65 @@ async def test_indicator_agent_responds_to_macd_crossover_and_sweeps():
     assert "сбор ликвидности снизу" in res["reasoning"]
     assert "VWAP" in res["reasoning"]
     assert "ADX" in res["reasoning"]
+
+
+# =========================================================================
+# 5. ORDER BOOK SUB-DOLLAR PRECISION & CANDLE REPAINTING GUARDS
+# =========================================================================
+
+@pytest.mark.asyncio
+async def test_order_book_subdollar_spread_precision_and_timestamp(dummy_market_service):
+    """Verifies that sub-dollar asset spreads (e.g. $0.05) are not truncated to 0.0 and timestamp is present."""
+    dummy_market_service.product_map["DOGE"] = 3
+    mock_liquidity = MagicMock()
+    # Best ask: 0.05005, Best bid: 0.05000 -> raw spread: 0.00005 (0.1% spread)
+    mock_liquidity.bids = [(int(0.05000 * 1e18), int(1000 * 1e18))]
+    mock_liquidity.asks = [(int(0.05005 * 1e18), int(1000 * 1e18))]
+    dummy_market_service.nado_client.market.get_market_liquidity = MagicMock(return_value=mock_liquidity)
+
+    ob = await dummy_market_service.fetch_order_book("DOGE-USD")
+    assert ob["spread"] > 0.0, "Spread should not be prematurely truncated to 0.0"
+    assert round(ob["spread"], 5) == 0.00005
+    assert ob["spread_pct"] > 0.09 and ob["spread_pct"] < 0.11
+    assert "timestamp" in ob and ob["timestamp"] > 0
+
+
+@pytest.mark.asyncio
+async def test_liquidity_sweep_evaluates_only_closed_candles(dummy_market_service):
+    """Verifies that wicks on live in-progress candle are ignored to prevent repainting."""
+    # 40 candles: normal candles except:
+    # - candle[-1] (live bar) has a massive upper wick (should be IGNORED)
+    # - candle[-2] (last completed bar) has a massive lower wick (should be DETECTED)
+    candles = [{"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 10.0} for _ in range(40)]
+    
+    # Completed bar - lower sweep: lower wick = 100.0 - 90.0 = 10.0, range = 102 - 90 = 12.0 (83% of range)
+    candles[-2] = {"open": 101.0, "high": 102.0, "low": 90.0, "close": 100.0, "volume": 50.0}
+    
+    # Live bar - upper wick: upper wick = 120.0 - 100.0 = 20.0, range = 120 - 98 = 22.0 (90% of range)
+    candles[-1] = {"open": 99.0, "high": 120.0, "low": 98.0, "close": 100.0, "volume": 50.0}
+
+    dummy_market_service._fetch_nado_candles = AsyncMock(return_value=candles)
+    indicators = await dummy_market_service.fetch_indicators("BTC-USD")
+    sweeps = indicators["algo_signals"]["liquidity_sweeps"]
+    
+    # Should detect the completed bar lower sweep (bullish)
+    detected_bars = [s["bar"] for s in sweeps]
+    assert -2 in detected_bars, "Completed candle [-2] lower sweep should be detected"
+    assert -1 not in detected_bars, "Live candle [-1] wick must NOT be counted as a confirmed sweep"
+
+
+@pytest.mark.asyncio
+async def test_candle_cache_preserves_longer_history_on_concurrent_fetch(dummy_market_service):
+    """Verifies that a smaller limit fetch does not shrink an existing longer cached history."""
+    now = time.time()
+    dummy_market_service._candle_cache[("BTC", 15)] = (
+        now,
+        [{"open": 100.0, "high": 105.0, "low": 95.0, "close": 102.0, "volume": 1.0} for _ in range(200)]
+    )
+    
+    # Fetch 50 candles
+    c = await dummy_market_service._fetch_nado_candles("BTC-USD", 15, 50)
+    assert len(c) == 50
+    # Cache must still retain the full 200 candles
+    assert len(dummy_market_service._candle_cache[("BTC", 15)][1]) == 200
+

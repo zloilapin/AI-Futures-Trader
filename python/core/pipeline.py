@@ -247,19 +247,42 @@ class TradingPipeline:
             self.services.logger.error(f"[Stage 1] Ошибка выбора Universe: {e}. Используем резервный список.")
             selected_assets = []
 
+        # Canonical normalization & mapping against active perps
+        valid_symbols_map = {}
+        if active_perps:
+            for p in active_perps:
+                sym = p.get("symbol", "")
+                if sym:
+                    valid_symbols_map[sym.upper()] = sym
+                    base = sym.replace('/', '-').split('-')[0].upper()
+                    valid_symbols_map[base] = sym
+                    valid_symbols_map[f"{base}-USD"] = sym
+
+        normalized_selected = []
+        for s in selected_assets:
+            if not isinstance(s, str):
+                continue
+            clean = s.strip().upper()
+            base = clean.replace('/', '-').split('-')[0]
+            if clean in valid_symbols_map:
+                normalized_selected.append(valid_symbols_map[clean])
+            elif f"{base}-USD" in valid_symbols_map:
+                normalized_selected.append(valid_symbols_map[f"{base}-USD"])
+            elif base in valid_symbols_map:
+                normalized_selected.append(valid_symbols_map[base])
+            elif not active_perps:
+                # If active_perps unavailable, ensure standard BASE-USD
+                normalized_selected.append(f"{base}-USD")
+
+        selected_assets = list(dict.fromkeys(normalized_selected))
+
+        # Fallback if LLM failed, returned empty, or all selected symbols were invalid
         if not selected_assets:
-            # Fallback to top 6 by 24h volume directly from the exchange if LLM fails
             if active_perps:
                 selected_assets = [p["symbol"] for p in active_perps[:6]]
             else:
                 selected_assets = ["BTC-USD", "ETH-USD", "SOL-USD"]
-
-        # Очищаем от дубликатов с сохранением приоритета от LLM
-        selected_assets = list(dict.fromkeys(selected_assets))
-
-        if active_perps:
-            valid_symbols = {p["symbol"] for p in active_perps}
-            selected_assets = [s for s in selected_assets if s in valid_symbols]
+            selected_assets = list(dict.fromkeys(selected_assets))
 
         self.services.logger.info(f"🎯 Отобраны уникальные валидные активы для сканирования: {', '.join(selected_assets)}")
         portfolio_data = await self.services.trading_service.get_portfolio_summary()

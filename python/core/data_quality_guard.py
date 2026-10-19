@@ -96,6 +96,8 @@ class DataQualityGuard:
             candles_15m = price_data.get("candles_20")
             if not isinstance(candles_15m, list) or not candles_15m:
                 return False, "MISSING_OHLCV_DATA"
+            if len(candles_15m) < 20:
+                return False, f"INSUFFICIENT_CANDLES ({len(candles_15m)} < 20)"
                 
             prev_ts_sec = None
             interval_sec = 15 * 60 # 15 minutes

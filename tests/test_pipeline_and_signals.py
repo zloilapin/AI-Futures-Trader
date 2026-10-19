@@ -299,3 +299,75 @@ async def test_pipeline_injects_price_increment_into_derivatives_data(dummy_agen
     assert market_data["derivatives_data"]["price_increment"] == 1.0
     assert market_data["derivatives_data"]["strict_metadata"] is True
 
+
+@pytest.mark.asyncio
+async def test_universe_symbol_normalization_and_mapping(dummy_agents, dummy_services):
+    """Verifies that UniverseAgent returning base symbols, lowercase, or slash-separated tickers are properly normalized."""
+    dummy_services.trading_service.get_market_limits = AsyncMock(return_value={})
+    pipeline = TradingPipeline(dummy_agents, dummy_services, "NADO")
+    now = time.time()
+    dummy_services.fetcher.fetch_all_market_data = AsyncMock(return_value={
+        "price_data": {"current_price": 60000.0, "timestamp": now},
+        "order_book_data": {"spread_pct": 0.05, "best_bid": 59990.0, "best_ask": 60010.0},
+        "indicators": {"atr_14": 500.0},
+        "derivatives_data": {"open_interest": 100.0, "funding_rate": 0.0001}
+    })
+    dummy_agents.regime.analyze = AsyncMock(return_value={"regime": "RANGE_CHOPPY", "recommended_profile": "BALANCED"})
+    dummy_agents.reflector.get_lessons = MagicMock(return_value=[])
+
+    # Exchange provides canonical symbols
+    dummy_services.fetcher.fetch_active_perps = AsyncMock(return_value=[
+        {"symbol": "BTC-USD", "volumeQuote": 1000000},
+        {"symbol": "ETH-USD", "volumeQuote": 800000},
+        {"symbol": "SOL-USD", "volumeQuote": 500000},
+        {"symbol": "DOGE-USD", "volumeQuote": 300000}
+    ])
+    # LLM returns variations: base ticker, lowercase with dash, slash-separated
+    dummy_agents.universe.analyze = AsyncMock(return_value={
+        "selected_pairs": ["BTC", "eth-usd", "SOL/USD", "DOGE"]
+    })
+    dummy_agents.scanner.analyze = AsyncMock(return_value={"proceed": False, "reasoning": "Stop at scanner"})
+
+    await pipeline.run_cycle(cycle_number=1, force_scan=True)
+
+    # Check the call arguments to fetch_all_market_data
+    scanned_args = [call[0][0] for call in dummy_services.fetcher.fetch_all_market_data.call_args_list]
+    assert "BTC-USD" in scanned_args
+    assert "ETH-USD" in scanned_args
+    assert "SOL-USD" in scanned_args
+    assert "DOGE-USD" in scanned_args
+
+
+@pytest.mark.asyncio
+async def test_universe_post_filter_fallback_on_unrecognized_tickers(dummy_agents, dummy_services):
+    """Verifies that if LLM hallucinates symbols not on Nado, fallback selects top active perps instead of scanning 0 assets."""
+    dummy_services.trading_service.get_market_limits = AsyncMock(return_value={})
+    pipeline = TradingPipeline(dummy_agents, dummy_services, "NADO")
+    now = time.time()
+    dummy_services.fetcher.fetch_all_market_data = AsyncMock(return_value={
+        "price_data": {"current_price": 60000.0, "timestamp": now},
+        "order_book_data": {"spread_pct": 0.05, "best_bid": 59990.0, "best_ask": 60010.0},
+        "indicators": {"atr_14": 500.0},
+        "derivatives_data": {"open_interest": 100.0, "funding_rate": 0.0001}
+    })
+    dummy_agents.regime.analyze = AsyncMock(return_value={"regime": "RANGE_CHOPPY", "recommended_profile": "BALANCED"})
+    dummy_agents.reflector.get_lessons = MagicMock(return_value=[])
+
+    dummy_services.fetcher.fetch_active_perps = AsyncMock(return_value=[
+        {"symbol": "BTC-USD", "volumeQuote": 1000000},
+        {"symbol": "ETH-USD", "volumeQuote": 800000}
+    ])
+    # LLM hallucinates non-existent tokens
+    dummy_agents.universe.analyze = AsyncMock(return_value={
+        "selected_pairs": ["NONEXISTENT1", "FAKECOIN2"]
+    })
+    dummy_agents.scanner.analyze = AsyncMock(return_value={"proceed": False, "reasoning": "Stop at scanner"})
+
+    await pipeline.run_cycle(cycle_number=1, force_scan=True)
+
+    # Post-filter fallback should have activated and scanned the active perps
+    scanned_args = [call[0][0] for call in dummy_services.fetcher.fetch_all_market_data.call_args_list]
+    assert "BTC-USD" in scanned_args
+    assert "ETH-USD" in scanned_args
+
+

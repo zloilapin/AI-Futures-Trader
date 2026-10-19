@@ -104,3 +104,12 @@ def test_empty_or_corrupt_data_does_not_crash():
     assert guard.validate("ETH-USD", {}) == (False, "EMPTY_MARKET_DATA")
     assert guard.validate("ETH-USD", None) == (False, "EMPTY_MARKET_DATA")
     assert guard.validate("ETH-USD", {"price_data": "corrupt"}) == (False, "MISSING_PRICE_DATA")
+
+def test_insufficient_candles_rejected():
+    guard = DataQualityGuard()
+    data = get_valid_mock_market_data()
+    data["price_data"]["candles_20"] = data["price_data"]["candles_20"][:5] # Only 5 candles
+    valid, reason = guard.validate("ETH-USD", data)
+    assert valid is False
+    assert "INSUFFICIENT_CANDLES" in reason
+
