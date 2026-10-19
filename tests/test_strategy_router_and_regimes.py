@@ -1219,4 +1219,191 @@ def test_strategy_router_relative_momentum_leader_long():
     assert "Лидер рынка" in profile.reasoning
 
 
+def test_full_alignment_trend_enforcement_and_analyst_opposition():
+    """
+    Stage 3 Audit Verification:
+    In FULL_ALIGNMENT, the strategy direction MUST strictly align with the MTF trend.
+    If analysts are in counter-trend opposition, new entries MUST be rejected (has_directional_signal=False).
+    """
+    market_data_bear = {
+        "multi_timeframe": {"mtf_alignment": "FULL_ALIGNMENT", "trend_1h": "BEARISH"},
+        "indicators": {"bb_position_pct": 50.0, "volume_spike_pct": 20.0, "donchian_high": 110.0, "donchian_low": 90.0},
+        "price_data": {"current_price": 95.0},
+        "derivatives_data": {"open_interest_trend": "neutral"}
+    }
+    # Analysts vote BULLISH against the BEARISH 3-TF alignment
+    analyst_reports_bull = [
+        {"agent_name": "Trend_Agent", "signal": "BULLISH"},
+        {"agent_name": "Price_Action_Agent", "signal": "BULLISH"}
+    ]
+
+    profile_bear_opposed = StrategyRouter.evaluate(
+        "ETH-USD", market_data_bear, analyst_reports_bull, {}, detected_regime="TRENDING_BEAR"
+    )
+    assert profile_bear_opposed.has_directional_signal is False
+    assert "ОТКЛОНЕН" in profile_bear_opposed.reasoning
+    assert "медвежьей оппозиции" not in profile_bear_opposed.reasoning # Opposing analysts are bullish
+    assert "бычьей оппозиции" in profile_bear_opposed.reasoning
+
+    # Now with analyst agreement (Bears >= Bulls) in BEARISH trend
+    analyst_reports_bear = [
+        {"agent_name": "Trend_Agent", "signal": "BEARISH"},
+        {"agent_name": "Price_Action_Agent", "signal": "BEARISH"}
+    ]
+    profile_bear_agreed = StrategyRouter.evaluate(
+        "ETH-USD", market_data_bear, analyst_reports_bear, {}, detected_regime="TRENDING_BEAR"
+    )
+    assert profile_bear_agreed.has_directional_signal is True
+    assert profile_bear_agreed.strategy_mode == "TREND_FOLLOWING"
+    assert profile_bear_agreed.direction_bias == "SHORT"
+
+    # And vice-versa: BULLISH MTF with bearish analyst opposition
+    market_data_bull = {
+        "multi_timeframe": {"mtf_alignment": "FULL_ALIGNMENT", "trend_1h": "BULLISH"},
+        "indicators": {"bb_position_pct": 50.0, "volume_spike_pct": 20.0, "donchian_high": 110.0, "donchian_low": 90.0},
+        "price_data": {"current_price": 105.0},
+        "derivatives_data": {"open_interest_trend": "neutral"}
+    }
+    profile_bull_opposed = StrategyRouter.evaluate(
+        "ETH-USD", market_data_bull, analyst_reports_bear, {}, detected_regime="TRENDING_BULL"
+    )
+    assert profile_bull_opposed.has_directional_signal is False
+    assert "ОТКЛОНЕН" in profile_bull_opposed.reasoning
+    assert "медвежьей оппозиции" in profile_bull_opposed.reasoning
+
+
+def test_donchian_zero_or_corrupt_bounds_no_phantom_breakout():
+    """
+    Stage 3 Audit Verification:
+    If donchian_high or donchian_low are 0 (corrupt/missing telemetry),
+    positive current price MUST NOT trigger a phantom BREAKOUT.
+    """
+    market_data_corrupt = {
+        "multi_timeframe": {"mtf_alignment": "TRANSITION", "trend_1h": "BULLISH"},
+        "indicators": {
+            "volume_spike_pct": 250.0,
+            "donchian_high": 0.0, # Corrupt / uninitialized
+            "donchian_low": 0.0,
+            "last_closed_candle_close": 100.0
+        },
+        "price_data": {"current_price": 100.0},
+        "derivatives_data": {"open_interest_trend": "rising"}
+    }
+    valid_reports = [
+        {"agent_name": "Price_Action_Agent", "signal": "BULLISH"},
+        {"agent_name": "Order_Book_Agent", "signal": "BULLISH"}
+    ]
+
+    profile = StrategyRouter.evaluate(
+        "BTC-USD", market_data_corrupt, valid_reports, {}, detected_regime="RANGE_CHOPPY"
+    )
+    # Must NOT be classified as BREAKOUT
+    assert profile.strategy_mode != "BREAKOUT"
+
+
+def test_none_or_missing_indicators_and_btc_telemetry_safe_handling():
+    """
+    Stage 3 Audit Verification:
+    Evaluating router with None or missing indicator values must not crash with TypeError.
+    """
+    market_data_none = {
+        "multi_timeframe": {"mtf_alignment": "MIXED_CHOP", "trend_1h": None},
+        "indicators": {
+            "bb_position_pct": None,
+            "bb_width_pct": None,
+            "volume_spike_pct": None,
+            "donchian_high": None,
+            "donchian_low": None,
+            "asset_return_24h": None
+        },
+        "price_data": {"current_price": None},
+        "derivatives_data": {"open_interest_trend": None}
+    }
+    macro_cache_incomplete = {
+        "BTC-USD": {
+            "indicators": None,
+            "multi_timeframe": None
+        }
+    }
+    valid_reports = [
+        {"agent_name": "Price_Action_Agent", "signal": "NEUTRAL"}
+    ]
+
+    # Should not throw TypeError on None comparisons
+    profile = StrategyRouter.evaluate(
+        "SOL-USD", market_data_none, valid_reports, macro_cache_incomplete, detected_regime="RANGE_CHOPPY"
+    )
+    assert profile is not None
+    assert profile.has_directional_signal is False
+
+
+def test_mixed_chop_mean_reversion_macro_trend_directional_veto():
+    """
+    Stage 3 Audit Verification:
+    In MIXED_CHOP:
+    - In TRENDING_BULL macro, MEAN_REVERSION SHORT from upper band is BLOCKED (prevent squeeze).
+    - In TRENDING_BEAR macro, MEAN_REVERSION LONG from lower band is BLOCKED (prevent knife catching).
+    """
+    # 1. Upper band in TRENDING_BULL macro
+    market_data_upper = {
+        "multi_timeframe": {"mtf_alignment": "MIXED_CHOP", "trend_1h": "BULLISH"},
+        "indicators": {
+            "bb_position_pct": 92.0, # Overbought upper band
+            "bb_width_pct": 3.0,
+            "volume_spike_pct": 20.0,
+            "donchian_high": 110.0,
+            "donchian_low": 90.0,
+            "last_closed_candle_close": 105.0
+        },
+        "price_data": {"current_price": 105.0},
+        "derivatives_data": {"open_interest_trend": "neutral"}
+    }
+    valid_reports_bear = [{"agent_name": "Price_Action_Agent", "signal": "BEARISH"}]
+
+    profile_short_bull_macro = StrategyRouter.evaluate(
+        "SOL-USD", market_data_upper, valid_reports_bear, {}, detected_regime="TRENDING_BULL"
+    )
+    assert profile_short_bull_macro.has_directional_signal is False
+    assert "заблокирован в макро-режиме TRENDING_BULL" in profile_short_bull_macro.reasoning
+
+    # In RANGE_CHOPPY macro, same setup is allowed
+    profile_short_range_macro = StrategyRouter.evaluate(
+        "SOL-USD", market_data_upper, valid_reports_bear, {}, detected_regime="RANGE_CHOPPY"
+    )
+    assert profile_short_range_macro.has_directional_signal is True
+    assert profile_short_range_macro.strategy_mode == "MEAN_REVERSION"
+    assert profile_short_range_macro.direction_bias == "SHORT"
+
+    # 2. Lower band in TRENDING_BEAR macro
+    market_data_lower = {
+        "multi_timeframe": {"mtf_alignment": "MIXED_CHOP", "trend_1h": "BEARISH"},
+        "indicators": {
+            "bb_position_pct": 8.0, # Oversold lower band
+            "bb_width_pct": 3.0,
+            "volume_spike_pct": 20.0,
+            "donchian_high": 110.0,
+            "donchian_low": 90.0,
+            "last_closed_candle_close": 92.0
+        },
+        "price_data": {"current_price": 92.0},
+        "derivatives_data": {"open_interest_trend": "neutral"}
+    }
+    valid_reports_bull = [{"agent_name": "Price_Action_Agent", "signal": "BULLISH"}]
+
+    profile_long_bear_macro = StrategyRouter.evaluate(
+        "SOL-USD", market_data_lower, valid_reports_bull, {}, detected_regime="TRENDING_BEAR"
+    )
+    assert profile_long_bear_macro.has_directional_signal is False
+    assert "заблокирован в макро-режиме TRENDING_BEAR" in profile_long_bear_macro.reasoning
+
+    # In RANGE_CHOPPY macro, same setup is allowed
+    profile_long_range_macro = StrategyRouter.evaluate(
+        "SOL-USD", market_data_lower, valid_reports_bull, {}, detected_regime="RANGE_CHOPPY"
+    )
+    assert profile_long_range_macro.has_directional_signal is True
+    assert profile_long_range_macro.strategy_mode == "MEAN_REVERSION"
+    assert profile_long_range_macro.direction_bias == "LONG"
+
+
+
 
