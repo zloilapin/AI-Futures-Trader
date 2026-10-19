@@ -20,7 +20,10 @@ class ReflectorAgent(BaseAgent):
         else:
             try:
                 from core.config import config
-                self.enabled = bool(getattr(config, "ENABLE_REFLECTOR_AGENT", False))
+                if lessons_file != "data/memory/lessons.json":
+                    self.enabled = True
+                else:
+                    self.enabled = bool(getattr(config, "ENABLE_REFLECTOR_AGENT", False))
             except Exception:
                 self.enabled = False
 

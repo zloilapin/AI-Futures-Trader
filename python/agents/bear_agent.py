@@ -42,6 +42,11 @@ class BearAgent(BaseAgent):
         try:
             res = await self.generate_json(full_prompt, required_keys=["thesis_score", "bearish_arguments", "summary"])
             if isinstance(res, dict) and res.get("signal") != "ERROR" and "thesis_score" in res:
+                try:
+                    score = float(res.get("thesis_score", 0))
+                    res["thesis_score"] = max(0, min(10, int(score)))
+                except (ValueError, TypeError):
+                    res["thesis_score"] = 0
                 return res
             self.logger.warning(f"[{self.name}] LLM returned invalid thesis schema or ERROR: {res}")
         except Exception as e:

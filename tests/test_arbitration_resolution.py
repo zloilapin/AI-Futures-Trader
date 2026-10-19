@@ -209,3 +209,78 @@ async def test_ceo_hold_bypasses_escalation_without_unbound_error():
     assert verdict["disputed_arbitration"] is False
     assert "conviction" in verdict
     assert "entry_quality" in verdict
+
+
+@pytest.mark.asyncio
+async def test_bull_bear_thesis_score_sanitization():
+    """
+    Stage 4 Audit Verification:
+    Ensures BullAgent and BearAgent sanitize thesis_score to clamped integer 0..10.
+    """
+    from agents.bull_agent import BullAgent
+    from agents.bear_agent import BearAgent
+
+    logger = MagicMock()
+    llm = MagicMock()
+
+    bull = BullAgent(logger, llm)
+    bull.generate_json = AsyncMock(return_value={
+        "thesis_score": "15.7",
+        "bullish_arguments": ["Target broken out"],
+        "summary": "Strong bull"
+    })
+    res_bull = await bull.analyze({"symbol": "BTC-USD"})
+    assert res_bull["thesis_score"] == 10 # Clamped to 10
+
+    # Negative float string
+    bear = BearAgent(logger, llm)
+    bear.generate_json = AsyncMock(return_value={
+        "thesis_score": "-4.2",
+        "bearish_arguments": ["Downtrend intact"],
+        "summary": "Strong bear"
+    })
+    res_bear = await bear.analyze({"symbol": "BTC-USD"})
+    assert res_bear["thesis_score"] == 0 # Clamped to 0
+
+
+def test_ceo_independent_risk_rules_mtf_normalization_and_derivatives():
+    """
+    Stage 4 Audit Verification:
+    Verifies that _evaluate_independent_risk_rules normalizes informal MTF trend strings
+    and correctly resolves derivatives_data from nested market_data.
+    """
+    logger = MagicMock()
+    ceo = CEOAgent(logger, MagicMock(), MagicMock())
+
+    analyst_reports = [
+        {"agent_name": "Indicator_Agent", "signal": "BEARISH"},
+        {"agent_name": "Candle_Agent", "signal": "BEARISH"}
+    ]
+
+    # Test 1: Trend strings like 'strong_bullish' / 'uptrend' are normalized and block SHORT
+    market_context_countertrend = {
+        "multi_timeframe_context": {
+            "tf_1h": {"trend": "strong_bullish"},
+            "tf_4h": {"trend": "uptrend"}
+        }
+    }
+    approved, reason, metrics = ceo._evaluate_independent_risk_rules(analyst_reports, market_context_countertrend, "SHORT")
+    assert approved is False
+    assert "Контртренд" in reason
+
+    # Test 2: Funding rate inside nested market_data is detected and blocks overcrowded SHORT
+    market_context_nested_derivatives = {
+        "multi_timeframe_context": {
+            "tf_1h": {"trend": "bearish"},
+            "tf_4h": {"trend": "bearish"}
+        },
+        "market_data": {
+            "derivatives_data": {
+                "funding_rate": -0.0008 # Overcrowded short funding
+            }
+        }
+    }
+    approved_fund, reason_fund, _ = ceo._evaluate_independent_risk_rules(analyst_reports, market_context_nested_derivatives, "SHORT")
+    assert approved_fund is False
+    assert "Фандинг перегружен в шорт" in reason_fund
+

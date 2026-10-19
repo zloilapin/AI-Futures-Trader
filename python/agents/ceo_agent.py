@@ -464,23 +464,21 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
         tf_1h = mtf_ctx.get("tf_1h", {}) if isinstance(mtf_ctx, dict) and isinstance(mtf_ctx.get("tf_1h"), dict) else {}
         tf_4h = mtf_ctx.get("tf_4h", {}) if isinstance(mtf_ctx, dict) and isinstance(mtf_ctx.get("tf_4h"), dict) else {}
         
-        trend_1h = str(
+        norm_1h = normalize_mtf_trend(
             (tf_1h.get("trend") if isinstance(tf_1h, dict) else None)
             or mtf_ctx.get("trend_1h")
-            or "neutral"
-        ).lower()
-        trend_4h = str(
+        )
+        norm_4h = normalize_mtf_trend(
             (tf_4h.get("trend") if isinstance(tf_4h, dict) else None)
             or mtf_ctx.get("trend_4h")
-            or "neutral"
-        ).lower()
+        )
 
         if candidate == "SHORT":
-            if trend_1h == "bullish" and trend_4h == "bullish":
-                return False, "Контртренд: 1h и 4h таймфреймы оба бычьи", {"trend_1h": trend_1h, "trend_4h": trend_4h}
+            if norm_1h == "BULLISH" and norm_4h == "BULLISH":
+                return False, "Контртренд: 1h и 4h таймфреймы оба бычьи", {"trend_1h": norm_1h, "trend_4h": norm_4h}
         elif candidate == "LONG":
-            if trend_1h == "bearish" and trend_4h == "bearish":
-                return False, "Контртренд: 1h и 4h таймфреймы оба медвежьи", {"trend_1h": trend_1h, "trend_4h": trend_4h}
+            if norm_1h == "BEARISH" and norm_4h == "BEARISH":
+                return False, "Контртренд: 1h и 4h таймфреймы оба медвежьи", {"trend_1h": norm_1h, "trend_4h": norm_4h}
 
         # 3. RSI Extrema Check
         rsi, fear_greed = self._extract_market_metrics(market_context or {})
@@ -491,7 +489,11 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                 return False, f"Экстремальная перекупленность для лонга (RSI={rsi:.1f} > 75)", {"rsi": rsi}
 
         # 4. Derivatives Funding Check
-        derivatives = market_context.get("derivatives_data", {}) if isinstance(market_context, dict) else {}
+        derivatives = (
+            (market_context.get("derivatives_data") if isinstance(market_context, dict) else None)
+            or ((market_context.get("market_data") or {}).get("derivatives_data") if isinstance(market_context, dict) else None)
+            or {}
+        )
         funding = derivatives.get("funding_rate") or derivatives.get("funding_rate_decimal")
         if funding is not None:
             try:
@@ -507,8 +509,8 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
             "supporting": supporting_analysts,
             "opposing": opposing_analysts,
             "rsi": rsi,
-            "trend_1h": trend_1h,
-            "trend_4h": trend_4h
+            "trend_1h": norm_1h or "NEUTRAL",
+            "trend_4h": norm_4h or "NEUTRAL"
         }
 
     def _extract_market_metrics(self, data: Dict[str, Any]) -> Tuple[float | None, float | None]:

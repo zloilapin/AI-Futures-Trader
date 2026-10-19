@@ -634,6 +634,8 @@ class TradingPipeline:
                     "indicators": market_data.get("indicators", {}),
                     "news_data": market_data.get("news_data", {}),
                     "price_data": market_data.get("price_data", {}),
+                    "derivatives_data": market_data.get("derivatives_data", {}),
+                    "market_data": market_data,
                     "current_price": current_price,
                     "is_pullback_retest": is_retest
                 }
