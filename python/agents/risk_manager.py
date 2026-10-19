@@ -354,6 +354,15 @@ class RiskManager(BaseAgent):
         elif conviction < min_conviction:
             return self._build_veto_result("LOW_CONFIDENCE", f"Conviction {conviction} is below profile threshold {min_conviction}", trade_action)
 
+        # Gate 1.5: Macro Regime Integrity Veto (Fail-Closed Independent Risk Layer)
+        # If macro regime is unconfirmed, corrupt, or telemetry is lost (UNKNOWN or DATA_INSUFFICIENT),
+        # strictly veto opening of ANY new positions regardless of candidate quality or available margin.
+        norm_macro = str(macro_regime or "").strip().upper()
+        if norm_macro in ["UNKNOWN", "DATA_INSUFFICIENT"]:
+            msg = f"New position entry strictly blocked: Macro market regime is {norm_macro} (telemetry unconfirmed)."
+            self.logger.warning(f"[{self.name}] 🚫 UNKNOWN_MACRO_REGIME VETO: {msg}")
+            return self._build_veto_result("UNKNOWN_MACRO_REGIME", msg, trade_action)
+
         # ═══ Stage 2: Portfolio Health & Defense-in-Depth Gates ═══
 
         # Gate 2.1: Max Daily Drawdown & Subaccount Health Veto Gate (P1 Finding 2 & P2 Finding 9)

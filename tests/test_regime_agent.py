@@ -441,11 +441,72 @@ def test_defect_2_strategy_router_blocks_all_strategies_in_unknown_regime():
 
 
 @pytest.mark.asyncio
-async def test_risk_manager_directional_cluster_cap_enforces_limit_in_unknown_regime(mock_logger, mock_llm):
+async def test_mtf_synonyms_up_down_accepted_and_normalized(mock_logger, mock_llm):
     """
-    Architectural Risk Verification:
-    RiskManager must treat UNKNOWN macro regime with strict limit of 2 concurrent directional positions,
-    NEVER falling into the 3-position branch intended for verified TRENDING markets.
+    P2 Verification:
+    If feed or exchange outputs 'UP' / 'DOWN' / 'FLAT',
+    RegimeAgent must accept them, normalize them to canonical BULLISH/BEARISH/NEUTRAL,
+    and compute valid trend scores rather than failing validation.
+    """
+    agent = RegimeAgent(mock_logger, mock_llm)
+
+    btc_up = make_raw_asset_data("BTC-USD", 94000.0, "FULL_ALIGNMENT", 0.5, 55.0, "up", 0.0001, trend="UP", er_14=0.4)
+    eth_up = make_raw_asset_data("ETH-USD", 2600.0, "FULL_ALIGNMENT", 0.5, 55.0, "up", 0.0001, trend="UP", er_14=0.4)
+
+    res = await agent.analyze({"btc_data": btc_up, "eth_data": eth_up})
+    assert res["data_valid"] is True
+    assert res["regime"] == "TRENDING"
+    assert res["recommended_profile"] == "AGGRESSIVE"
+
+
+@pytest.mark.asyncio
+async def test_risk_manager_strictly_vetoes_new_entries_in_unknown_regime(mock_logger, mock_llm):
+    """
+    P1 Verification:
+    RiskManager must act as an independent defense-in-depth safety layer:
+    When macro_regime is UNKNOWN or DATA_INSUFFICIENT, ANY new position entry (trade_action='ENTER')
+    must be strictly VETOED with veto_category='UNKNOWN_MACRO_REGIME',
+    even with 0 active positions, abundant margin, and perfect conviction.
+    """
+    from agents.risk_manager import RiskManager
+
+    rm = RiskManager(mock_logger, mock_llm)
+    ceo_decision = {"symbol": "BTC-USD", "decision": "LONG", "conviction": 90, "trade_action": "ENTER"}
+    portfolio = {
+        "total_usd": 10000.0,
+        "available_margin": 10000.0,
+        "active_positions": {} # 0 open positions!
+    }
+    market_data = {
+        "price_data": {"current_price": 60000.0},
+        "indicators": {"atr_14": 2.0, "atr_pct": 1.0, "er_14": 0.4, "rsi_14": 50.0},
+        "market_parameters": {"min_size": 0.001, "price_increment": 1.0, "size_increment": 0.001}
+    }
+
+    # 1. Test UNKNOWN macro regime
+    verdict_unknown = await rm.analyze(
+        ceo_decision, portfolio, market_data,
+        effective_profile="BALANCED", macro_regime="UNKNOWN"
+    )
+    assert verdict_unknown["approved"] is False
+    assert verdict_unknown["veto_category"] == "UNKNOWN_MACRO_REGIME"
+    assert "UNKNOWN" in verdict_unknown["reasoning"]
+
+    # 2. Test DATA_INSUFFICIENT macro regime
+    verdict_insufficient = await rm.analyze(
+        ceo_decision, portfolio, market_data,
+        effective_profile="BALANCED", macro_regime="DATA_INSUFFICIENT"
+    )
+    assert verdict_insufficient["approved"] is False
+    assert verdict_insufficient["veto_category"] == "UNKNOWN_MACRO_REGIME"
+
+
+@pytest.mark.asyncio
+async def test_risk_manager_directional_cluster_cap_enforces_limit_in_non_trending_regime(mock_logger, mock_llm):
+    """
+    Gate 2.2b Verification:
+    In non-trending regimes (e.g. RANGE_CHOPPY), RiskManager permits up to 2 positions in the same direction,
+    vetoing a 3rd directional position with DIRECTIONAL_CLUSTER_CAP.
     """
     from agents.risk_manager import RiskManager
 
@@ -465,13 +526,76 @@ async def test_risk_manager_directional_cluster_cap_enforces_limit_in_unknown_re
         "market_parameters": {"min_size": 0.001, "price_increment": 1.0, "size_increment": 0.001}
     }
 
-    # Under UNKNOWN regime with 2 existing LONGs, 3rd LONG must be VETOED by DIRECTIONAL_CLUSTER_CAP
+    # Under RANGE_CHOPPY with 2 existing LONGs, 3rd LONG must be VETOED by DIRECTIONAL_CLUSTER_CAP
     verdict = await rm.analyze(
         ceo_decision, portfolio, market_data,
-        effective_profile="BALANCED", macro_regime="UNKNOWN"
+        effective_profile="BALANCED", macro_regime="RANGE_CHOPPY"
     )
     assert verdict["approved"] is False
     assert verdict["veto_category"] == "DIRECTIONAL_CLUSTER_CAP"
+
+
+@pytest.mark.asyncio
+async def test_e2e_pipeline_stage0_telemetry_failure_fails_closed():
+    """
+    E2E Integration Verification:
+    Traces the entire pipeline defense chain:
+    Stage 0 (Regime Detection) -> Stage 3 (Strategy Router) -> Stage 5 (Risk Manager).
+    When RegimeAgent fails closed on corrupted/missing BTC data:
+      1. Stage 0 outputs regime='UNKNOWN', profile='CONSERVATIVE'.
+      2. StrategyRouter enforces UNKNOWN_REGIME_VETO (has_directional_signal=False).
+      3. RiskManager independently enforces UNKNOWN_MACRO_REGIME veto (approved=False).
+    """
+    from core.strategy_router import StrategyRouter
+    from agents.risk_manager import RiskManager
+
+    logger = MagicMock()
+    llm = MagicMock()
+    regime_agent = RegimeAgent(logger, llm)
+    risk_manager = RiskManager(logger, llm)
+
+    # 1. Corrupted input to RegimeAgent (missing MTF)
+    raw_btc_corrupt = make_raw_asset_data("BTC-USD", 94000.0, "MIXED_CHOP", 0.5, 50.0, "flat", 0.0001)
+    raw_btc_corrupt["multi_timeframe"] = {}
+    raw_eth = make_raw_asset_data("ETH-USD", 2600.0, "MIXED_CHOP", 0.5, 50.0, "flat", 0.0001)
+
+    regime_res = await regime_agent.analyze({"btc_data": raw_btc_corrupt, "eth_data": raw_eth})
+    assert regime_res["regime"] == "UNKNOWN"
+    assert regime_res["recommended_profile"] == "CONSERVATIVE"
+    assert regime_res["data_valid"] is False
+
+    # 2. Pipeline Stage 0 sets detected_regime='UNKNOWN', profile='CONSERVATIVE'
+    detected_regime = regime_res["regime"]
+    detected_profile = regime_res["recommended_profile"]
+
+    # 3. StrategyRouter evaluates candidate under UNKNOWN regime
+    cand_data = {
+        "multi_timeframe": {"mtf_alignment": "FULL_ALIGNMENT", "trend_1h": "BULLISH"},
+        "indicators": {"donchian_high": 100.0, "donchian_low": 80.0, "volume_spike_pct": 200.0},
+        "price_data": {"current_price": 105.0}
+    }
+    router_res = StrategyRouter.evaluate(
+        "SOL-USD", cand_data, [{"agent_name": "Tech_Agent", "signal": "BULLISH"}], {},
+        detected_regime=detected_regime, profile=detected_profile
+    )
+    assert router_res.has_directional_signal is False
+    assert router_res.strategy_mode == "UNKNOWN_REGIME_VETO"
+
+    # 4. If trade proposal somehow reached RiskManager, RiskManager strictly vetos it
+    ceo_proposal = {"symbol": "SOL-USD", "decision": "LONG", "conviction": 85, "trade_action": "ENTER"}
+    portfolio = {"total_usd": 5000.0, "available_margin": 5000.0, "active_positions": {}}
+    market_data = {
+        "price_data": {"current_price": 105.0},
+        "indicators": {"atr_14": 2.0, "atr_pct": 1.0},
+        "market_parameters": {"min_size": 0.01}
+    }
+    rm_res = await risk_manager.analyze(
+        ceo_proposal, portfolio, market_data,
+        effective_profile=detected_profile, macro_regime=detected_regime
+    )
+    assert rm_res["approved"] is False
+    assert rm_res["veto_category"] == "UNKNOWN_MACRO_REGIME"
+
 
 
 

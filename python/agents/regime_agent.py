@@ -31,7 +31,22 @@ class RegimeAgent(BaseAgent):
         "FULL_ALIGNMENT", "TRANSITION", "COUNTER_TREND_WARNING",
         "MIXED_CHOP", "PARTIAL_ALIGNMENT"
     }
-    VALID_TRENDS = {"BULLISH", "BEARISH", "NEUTRAL"}
+    # Accept canonical labels as well as standard exchange/feed synonyms
+    VALID_TRENDS = {"BULLISH", "BEARISH", "NEUTRAL", "UP", "DOWN", "FLAT"}
+
+    @classmethod
+    def _normalize_trend(cls, val: Any) -> Optional[str]:
+        """Maps diverse trend labels (UP/DOWN/FLAT/BULLISH/BEARISH/NEUTRAL) to canonical representation."""
+        if not val:
+            return None
+        s = str(val).strip().upper()
+        if s in ["BULLISH", "UP", "LONG"]:
+            return "BULLISH"
+        if s in ["BEARISH", "DOWN", "SHORT"]:
+            return "BEARISH"
+        if s in ["NEUTRAL", "FLAT", "SIDEWAYS", "CHOP"]:
+            return "NEUTRAL"
+        return None
 
     @classmethod
     def _is_valid_macro_asset(cls, asset: Dict[str, Any]) -> bool:
@@ -109,10 +124,14 @@ class RegimeAgent(BaseAgent):
             t4h = raw_mtf.get("trend_4h") or (raw_mtf.get("tf_4h", {}).get("trend") if isinstance(raw_mtf.get("tf_4h"), dict) else None)
             alignment_raw = raw_mtf.get("mtf_alignment")
 
+            norm_15 = self._normalize_trend(t15)
+            norm_1h = self._normalize_trend(t1h)
+            norm_4h = self._normalize_trend(t4h)
+
             mtf_trends = {
-                "15m": str(t15).upper() if t15 else None,
-                "1h": str(t1h).upper() if t1h else None,
-                "4h": str(t4h).upper() if t4h else None
+                "15m": norm_15,
+                "1h": norm_1h,
+                "4h": norm_4h
             }
             alignment = str(alignment_raw).upper() if alignment_raw else None
         else:
