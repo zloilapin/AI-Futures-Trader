@@ -186,7 +186,8 @@ class TradingPipeline:
         # СТАДИЯ 0: REGIME DETECTION (Адаптивный профиль риска)
         self.services.logger.info("[Stage 0] Regime Agent определяет фазу рынка (BTC/ETH)...")
         macro_cache = {}
-        detected_regime = "RANGE_CHOPPY"
+        detected_regime = "UNKNOWN"
+        detected_profile = "CONSERVATIVE"
         try:
             btc_data = await self.services.fetcher.fetch_all_market_data("BTC-USD")
             eth_data = await self.services.fetcher.fetch_all_market_data("ETH-USD")
@@ -199,17 +200,17 @@ class TradingPipeline:
             }
             regime_verdict = await self.agents.regime.analyze(regime_payload)
             
-            detected_regime = regime_verdict.get("regime", "RANGE_CHOPPY")
-            detected_profile = regime_verdict.get("recommended_profile", "BALANCED")
+            detected_regime = regime_verdict.get("regime", "UNKNOWN")
+            detected_profile = regime_verdict.get("recommended_profile", "CONSERVATIVE")
             regime_reasoning = regime_verdict.get("reasoning_en", "")
             
             # Динамически меняем профиль на этот цикл (но с ограничением сверху)
             original_profile = config.TRADING_PROFILE
             profile_ranks = {"CONSERVATIVE": 1, "BALANCED": 2, "AGGRESSIVE": 3}
             orig_rank = profile_ranks.get(original_profile, 2)
-            detected_rank = profile_ranks.get(detected_profile, 2)
+            detected_rank = profile_ranks.get(detected_profile, 1 if detected_regime == "UNKNOWN" else 2)
             
-            # Защита: RegimeAgent может только ПОНИЖАТЬ риск во время шторма
+            # Защита: RegimeAgent может только ПОНИЖАТЬ риск во время шторма или при неизвестном режиме
             if detected_rank > orig_rank:
                 effective_profile = original_profile
                 self.services.logger.info(f"[Macro Regime] LLM proposed {detected_profile}, but bounded to {original_profile}.")
@@ -223,8 +224,11 @@ class TradingPipeline:
             print(f"🛡️ [Risk Profile] Профиль риска на этот цикл: {profile}")
             self.services.logger.info(f"[Macro Regime] {detected_regime} -> {profile}. Reason: {regime_reasoning}")
         except Exception as e:
-            print(f"⚠️ [Macro Regime] Ошибка при определении режима: {e}. Используем базовый профиль {profile}.")
-            self.services.logger.error(f"[Macro Regime] Failed to detect regime: {e}")
+            detected_regime = "UNKNOWN"
+            profile = "CONSERVATIVE"
+            self._effective_profile = "CONSERVATIVE"
+            print(f"⚠️ [Macro Regime] Ошибка при определении режима: {e}. Применён защитный профиль CONSERVATIVE (режим UNKNOWN).")
+            self.services.logger.error(f"[Macro Regime] Failed to detect regime: {e}. Failsafe CONSERVATIVE engaged.")
 
         # СТАДИЯ 1: UNIVERSE (Выбор активов)
         self.services.logger.info("[Stage 1] Universe Agent сканирует DEX на наличие ликвидных активов...")

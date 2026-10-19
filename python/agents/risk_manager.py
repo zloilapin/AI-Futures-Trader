@@ -501,9 +501,9 @@ class RiskManager(BaseAgent):
             self.logger.warning(f"[{self.name}] 🚫 MAX_CONCURRENT_POSITIONS VETO: {msg}")
             return self._build_veto_result("MAX_CONCURRENT_POSITIONS", msg, trade_action)
 
-        # Gate 2.2b: Directional Cluster Cap in Choppy/Transition Regimes
-        # Prevents opening all positions in the same direction when market lacks a clear macro trend.
-        if macro_regime in ["RANGE_CHOPPY", "TRANSITION", "HIGH_VOLATILITY"]:
+        # Gate 2.2b: Directional Cluster Cap in Non-Trending / Choppy / Unknown Regimes
+        # Prevents opening all positions in the same direction unless market is in a confirmed TRENDING regime.
+        if str(macro_regime).upper() != "TRENDING":
             same_dir_count = 0
             for p in unique_positions:
                 p_dir = str(p.get("direction", p.get("side", ""))).upper()

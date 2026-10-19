@@ -1,6 +1,6 @@
 import os
 import json
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from agents.base_agent import BaseAgent
 from core.logger import TradeLogger
@@ -15,12 +15,62 @@ class RegimeAgent(BaseAgent):
     def __init__(self, logger: TradeLogger, llm_client: LLMClient):
         super().__init__("Regime_Agent", logger, llm_client)
 
+    @staticmethod
+    def _safe_finite_float(val: Any, default: Optional[float] = None) -> Optional[float]:
+        """Safely parses a value to a finite float, rejecting NaN, Inf, None, and unparseable types."""
+        if val is None:
+            return default
+        try:
+            import math
+            f = float(val)
+            return f if math.isfinite(f) else None
+        except (ValueError, TypeError):
+            return None
+
+    @classmethod
+    def _is_valid_macro_asset(cls, asset: Dict[str, Any]) -> bool:
+        """
+        Validates that extracted macro metrics are present, complete, and numerically sound.
+        Rejects empty dictionaries, NaN, Inf, non-positive prices, and out-of-bound indicators.
+        """
+        if not isinstance(asset, dict) or not asset:
+            return False
+
+        try:
+            price = cls._safe_finite_float(asset.get("price"))
+            if price is None or price <= 0:
+                return False
+
+            atr = cls._safe_finite_float(asset.get("atr_pct"))
+            if atr is None or atr < 0:
+                return False
+
+            rsi = cls._safe_finite_float(asset.get("rsi_14"))
+            if rsi is None or not (0.0 <= rsi <= 100.0):
+                return False
+
+            er = cls._safe_finite_float(asset.get("er_14"))
+            if er is None or not (0.0 <= er <= 1.0):
+                return False
+
+            fr = cls._safe_finite_float(asset.get("funding_rate"))
+            if fr is None:
+                return False
+
+            mtf_trends = asset.get("mtf_trends")
+            if not isinstance(mtf_trends, dict):
+                return False
+
+            return True
+        except Exception:
+            return False
+
     def _extract_asset_macro(self, raw_asset: Dict[str, Any]) -> Dict[str, Any]:
         """
         Extracts strictly essential macro risk metrics for an asset (BTC or ETH),
         completely stripping raw candles, order book, and deep arrays.
         """
-        if not isinstance(raw_asset, dict):
+        if not isinstance(raw_asset, dict) or not raw_asset:
             return {}
 
         # If already formatted summary
@@ -33,21 +83,21 @@ class RegimeAgent(BaseAgent):
         derivatives = raw_asset.get("derivatives_data", {}) or {}
         news = raw_asset.get("news_data", {}) or {}
 
-        price = price_data.get("current_price") or raw_asset.get("current_price", 0.0)
+        price = self._safe_finite_float(price_data.get("current_price") or raw_asset.get("current_price"))
 
         t15 = mtf.get("trend_15m") or mtf.get("tf_15m", {}).get("trend", "NEUTRAL")
         t1h = mtf.get("trend_1h") or mtf.get("tf_1h", {}).get("trend", "NEUTRAL")
         t4h = mtf.get("trend_4h") or mtf.get("tf_4h", {}).get("trend", "NEUTRAL")
         alignment = mtf.get("mtf_alignment", "MIXED_CHOP")
 
-        atr_pct = float(indicators.get("atr_pct", 0.0) or 0.0)
-        rsi_14 = float(indicators.get("rsi_14", 50.0) or 50.0)
-        er_14 = float(indicators.get("er_14", 0.0) or 0.0)
+        atr_pct = self._safe_finite_float(indicators.get("atr_pct"))
+        rsi_14 = self._safe_finite_float(indicators.get("rsi_14"))
+        er_14 = self._safe_finite_float(indicators.get("er_14"))
         ema_trend = indicators.get("ema_trend", "neutral")
         macd_label = indicators.get("macd_label") or indicators.get("macd_signal", "neutral")
 
-        funding_rate = float(derivatives.get("funding_rate", 0.0) or derivatives.get("funding_rate_hourly", 0.0) or 0.0)
-        open_interest_usd = float(derivatives.get("open_interest_usd", 0.0) or 0.0)
+        funding_rate = self._safe_finite_float(derivatives.get("funding_rate", derivatives.get("funding_rate_hourly", 0.0)), 0.0)
+        open_interest_usd = self._safe_finite_float(derivatives.get("open_interest_usd", 0.0), 0.0)
         news_sentiment = news.get("overall_sentiment") or news.get("sentiment_score") or "neutral"
 
         return {
@@ -72,6 +122,8 @@ class RegimeAgent(BaseAgent):
         """
         Builds the clean macro summary strictly for BTC and ETH without raw data bloat.
         """
+        if not isinstance(data, dict):
+            return {"BTC": {}, "ETH": {}}
         btc_raw = data.get("btc_data") or data.get("BTC") or {}
         eth_raw = data.get("eth_data") or data.get("ETH") or {}
 
@@ -89,10 +141,32 @@ class RegimeAgent(BaseAgent):
         btc_summary = macro_summary.get("BTC", {})
         eth_summary = macro_summary.get("ETH", {})
 
+        btc_valid = self._is_valid_macro_asset(btc_summary)
+        eth_valid = self._is_valid_macro_asset(eth_summary)
+
+        if not btc_valid or not eth_valid:
+            invalid_assets = []
+            if not btc_valid:
+                invalid_assets.append("BTC")
+            if not eth_valid:
+                invalid_assets.append("ETH")
+            reasoning = (
+                f"INSUFFICIENT_MACRO_DATA: Telemetry missing or invalid for {', '.join(invalid_assets)}. "
+                f"Cannot establish macro regime with statistical confidence. Engaging failsafe CONSERVATIVE profile."
+            )
+            self.logger.warning(f"[{self.name}] ⚠️ {reasoning}")
+            return {
+                "regime": "UNKNOWN",
+                "recommended_profile": "CONSERVATIVE",
+                "reasoning_en": reasoning,
+                "data_valid": False,
+                "invalid_assets": invalid_assets
+            }
+
         def calculate_asset_scores(summary: Dict[str, Any]) -> Dict[str, float]:
-            atr = float(summary.get("atr_pct", 0.0) or 0.0)
-            fr_pct = abs(float(summary.get("funding_rate", 0.0) or 0.0)) * 100
-            er = float(summary.get("er_14", 0.0) or 0.0)
+            atr = float(summary.get("atr_pct") or 0.0)
+            fr_pct = abs(float(summary.get("funding_rate") or 0.0)) * 100
+            er = float(summary.get("er_14") or 0.0)
             align = summary.get("mtf_alignment", "MIXED_CHOP")
             rsi = float(summary.get("rsi_14", 50.0) or 50.0)
             ema_trend = str(summary.get("ema_trend", "neutral")).lower()

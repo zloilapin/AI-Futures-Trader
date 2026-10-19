@@ -99,9 +99,9 @@ class StrategyRouter:
             return StrategyProfile(False, "TREND_FOLLOWING", "NEUTRAL", "ОТКЛОНЕН (TRANSITION, но нет чистого консенсуса).")
 
         if mtf_alignment == "MIXED_CHOP":
-            # Safety Guard: In high volatility macro regime, mean reversion is dangerous (risk of breakout/liquidation cascade)
-            if detected_regime == "HIGH_VOLATILITY":
-                return StrategyProfile(False, "MEAN_REVERSION", "NEUTRAL", f"ОТКЛОНЕН (MEAN_REVERSION заблокирован в макро-режиме HIGH_VOLATILITY, bb_pos={bb_position_pct}%).")
+            # Safety Guard: In high volatility or unknown/degraded macro regimes, mean reversion is dangerous
+            if detected_regime in ["HIGH_VOLATILITY", "UNKNOWN", "DATA_INSUFFICIENT"]:
+                return StrategyProfile(False, "MEAN_REVERSION", "NEUTRAL", f"ОТКЛОНЕН (MEAN_REVERSION заблокирован в макро-режиме {detected_regime}, bb_pos={bb_position_pct}%).")
 
             # Mean Reversion requires sufficient channel width (at least 1.5% band width)
             # to offer room for profit between the band edge and the middle mean.
