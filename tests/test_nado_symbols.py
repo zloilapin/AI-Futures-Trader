@@ -80,13 +80,15 @@ def test_is_already_tracked_check():
 
 
 @pytest.mark.asyncio
-async def test_sync_with_exchange_trigger_orders():
+async def test_sync_with_exchange_trigger_orders(tmp_path):
     service = NadoTradingService.__new__(NadoTradingService)
     service.logger = MagicMock()
     service.is_connected = True
     service.default_subaccount_id = "0x123"
     service.product_map = {"ETH": 4, "ETH-USD": 4}
     service.active_positions = {}
+    service._load_positions = MagicMock(return_value={})
+    service.positions_file = str(tmp_path / "test_active_positions.json")
     
     # Mock positions from exchange
     service.get_active_positions = AsyncMock(return_value=[{

@@ -908,7 +908,8 @@ class RiskManager(BaseAgent):
         kelly_mult = self._calculate_kelly_multiplier(win_rate, hist_payoff, total_trades) if total_trades >= 15 else 1.0
 
         # 4. Conviction and Action Multipliers (Signal Edge)
-        conf_mult = self._get_conviction_multiplier(min_conviction, conviction)
+        conv_for_risk = float(_extract_cand_field(ceo_decision, "conviction_for_risk", conviction) or conviction)
+        conf_mult = self._get_conviction_multiplier(min_conviction, max(conviction, int(conv_for_risk)))
         action_mult = 0.75 if trade_action == "REDUCE_SIZE" else 1.0
 
         # Cohort Determination for mathematical expectancy analytics (Groups A, B, C, D):
@@ -916,7 +917,7 @@ class RiskManager(BaseAgent):
         # B: High Conviction (>= min_conviction + 10), Reduced Size (action == REDUCE_SIZE)
         # C: Low Conviction (< min_conviction + 10), Full Size (action == ENTER)
         # D: Low Conviction (< min_conviction + 10), Reduced Size (action == REDUCE_SIZE)
-        is_high_conv = conviction >= (min_conviction + 10)
+        is_high_conv = conv_for_risk >= (min_conviction + 10)
         is_full_size = (trade_action != "REDUCE_SIZE")
         if is_high_conv and is_full_size:
             cohort = "A"

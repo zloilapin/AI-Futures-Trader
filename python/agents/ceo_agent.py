@@ -1,6 +1,6 @@
 import json
 import logging
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Tuple, Optional, Callable
 import os
 import re
 
@@ -307,6 +307,10 @@ def apply_breakout_penalty_override(
         ceo_decision["conviction"] = int(new_entry_quality)
         ceo_decision["action"] = new_action
         ceo_decision["trade_action"] = new_action
+        if "final_status" in ceo_decision:
+            ceo_decision["final_status"] = "APPROVED_ENTER" if new_action == "ENTER" else new_action
+        if "conviction_for_risk" not in ceo_decision:
+            ceo_decision["conviction_for_risk"] = dir_conf
 
         if isinstance(ceo_decision.get("risk_breakdown"), dict):
             ceo_decision["risk_breakdown"]["total"] = int(capped_penalty)
@@ -314,6 +318,202 @@ def apply_breakout_penalty_override(
                 ceo_decision["risk_breakdown"]["price_extension"] = int(capped_penalty)
 
     return ceo_decision
+
+
+class CEOEscalationPatch:
+    # Пороги прямого доверия Primary CEO (qwen-plus / qwen-2.5-72b) без вызова 8B-арбитра
+    DIRECT_ENTER_MIN_CONF: float = 75.0
+    DIRECT_ENTER_MIN_QUAL: float = 70.0   # Было 80.0 — из-за этого сливались сделки с Qual=75% (#35, #42, #45)
+    DIRECT_REDUCE_MIN_CONF: float = 75.0
+    DIRECT_REDUCE_MIN_QUAL: float = 60.0
+
+    # Допустимая погрешность математики у 8B-арбитра: EntryQuality == DirConf + RiskPenalty
+    MATH_TOLERANCE: float = 3.0
+
+    @classmethod
+    def should_bypass_escalation(cls, primary_decision: Dict[str, Any]) -> Tuple[bool, str]:
+        """
+        Определяет, нужно ли пропустить вызов слабой модели (llama-3.1-8b),
+        чтобы защитить сильные сигналы от ложного вето и сэкономить API.
+        """
+        action = str(primary_decision.get("action", primary_decision.get("trade_action", "HOLD"))).upper()
+        direction = str(primary_decision.get("decision", "HOLD")).upper()
+        dir_conf = float(primary_decision.get("dir_conf", primary_decision.get("directional_confidence", 0.0)))
+        entry_qual = float(primary_decision.get("entry_quality", primary_decision.get("conviction", 0.0)))
+
+        # 1. Нейтральный рынок / отказ от входа со стороны Primary CEO
+        if action == "HOLD" or direction == "HOLD" or entry_qual <= 35.0:
+            return True, "decided HOLD or low quality. Bypassing escalation to save API costs."
+
+        # 2. Чистый сигнал ENTER от старшей модели (Циклы #35, #42, #45 больше не блокируются)
+        if (
+            action == "ENTER"
+            and dir_conf >= cls.DIRECT_ENTER_MIN_CONF
+            and entry_qual >= cls.DIRECT_ENTER_MIN_QUAL
+        ):
+            return True, (
+                f"High-conviction ENTER (DirConf={dir_conf:.0f}%, EntryQuality={entry_qual:.0f}% >= "
+                f"{cls.DIRECT_ENTER_MIN_QUAL:.0f}%). Bypassing 8B escalation to prevent false downgrade."
+            )
+
+        # 3. Уверенный REDUCE_SIZE (защита от триггера COHORT_D_NEGATIVE_EXPECTANCY в Risk Manager)
+        if (
+            action == "REDUCE_SIZE"
+            and dir_conf >= cls.DIRECT_REDUCE_MIN_CONF
+            and entry_qual >= cls.DIRECT_REDUCE_MIN_QUAL
+        ):
+            return True, (
+                f"Solid REDUCE_SIZE (DirConf={dir_conf:.0f}%, EntryQuality={entry_qual:.0f}%). "
+                f"Preserving Primary CEO metrics for Stage 5 Risk Manager."
+            )
+
+        return False, "Borderline setup — escalating to arbiter."
+
+    @classmethod
+    def validate_arbiter_math(cls, arbiter_resp: Dict[str, Any]) -> bool:
+        """
+        Проверяет ответ meta-llama/llama-3.1-8b-instruct на математическую адекватность
+        и целостность полей.
+        """
+        if not arbiter_resp or not isinstance(arbiter_resp, dict):
+            return False
+
+        try:
+            arb_dir = str(arbiter_resp.get("decision", "")).upper().strip()
+            arb_conf = float(arbiter_resp.get("dir_conf", arbiter_resp.get("directional_confidence", -1.0)))
+            arb_qual = float(arbiter_resp.get("entry_quality", arbiter_resp.get("conviction", -1.0)))
+            arb_pen = float(arbiter_resp.get("risk_penalty", arbiter_resp.get("risk_penalties", 0.0)))
+        except (ValueError, TypeError):
+            return False
+
+        # Проверка диапазонов
+        if arb_dir not in ("LONG", "SHORT", "HOLD"):
+            return False
+        if not (0.0 <= arb_conf <= 100.0) or not (0.0 <= arb_qual <= 100.0):
+            return False
+        if arb_qual > arb_conf + cls.MATH_TOLERANCE:
+            # Качество входа не может быть выше базовой уверенности в направлении
+            return False
+
+        # Если арбитр вернул конкретный штраф, проверяем формулу: Qual = max(0, Conf - |Penalty|)
+        if arb_pen != 0.0:
+            expected_qual = max(0.0, arb_conf - abs(arb_pen))
+            if abs(arb_qual - expected_qual) > cls.MATH_TOLERANCE:
+                return False
+
+        return True
+
+    @classmethod
+    def resolve_with_escalation(
+        cls,
+        symbol: str,
+        primary_decision: Dict[str, Any],
+        router_metadata: Dict[str, Any],
+        call_arbiter_fn: Optional[Callable[[], Dict[str, Any]]] = None
+    ) -> Dict[str, Any]:
+        """
+        Полный цикл принятия решения CEO:
+        1. Применяет Breakout Override (если стратегия пробойная).
+        2. Проверяет условие обхода эскалации.
+        3. При вызове арбитра страхует от математических галлюцинаций БЕЗ сброса в HOLD.
+        """
+        logger = logging.getLogger("CEO_Agent")
+        # Шаг 1: Коррекция штрафа для импульсных пробоев (из предыдущего патча)
+        decision = apply_breakout_penalty_override(primary_decision.copy(), router_metadata)
+
+        primary_action = str(decision.get("action", decision.get("trade_action", "HOLD"))).upper()
+        primary_dir = str(decision.get("decision", "HOLD")).upper()
+        primary_conf = float(decision.get("dir_conf", decision.get("directional_confidence", 0.0)))
+        primary_qual = float(decision.get("entry_quality", decision.get("conviction", 0.0)))
+
+        # Шаг 2: Проверяем, нужен ли вообще арбитр
+        bypass, bypass_reason = cls.should_bypass_escalation(decision)
+        if bypass or call_arbiter_fn is None:
+            logger.info(f"[CEO_Agent] {symbol}: {bypass_reason}")
+            decision["final_status"] = (
+                "APPROVED_ENTER" if primary_action == "ENTER" else primary_action
+            )
+            # Сохраняем оригинальный conviction для Risk Manager (Cohort D check)
+            decision["conviction_for_risk"] = primary_conf
+            decision["conviction"] = int(primary_qual)
+            decision["escalated"] = False
+            decision["disputed_arbitration"] = False
+            return decision
+
+        # Шаг 3: Вызов арбитра эскалации (meta-llama/llama-3.1-8b-instruct)
+        try:
+            arbiter_resp = call_arbiter_fn()
+        except Exception as e:
+            logger.warning(
+                f"[CEO_Agent] {symbol}: Ошибка вызова арбитра ({e}). "
+                f"Сохраняем вердикт Primary CEO: {primary_action}."
+            )
+            decision["final_status"] = (
+                "APPROVED_ENTER" if primary_action == "ENTER" else primary_action
+            )
+            decision["conviction_for_risk"] = primary_conf
+            decision["conviction"] = int(primary_qual)
+            decision["escalated"] = False
+            decision["disputed_arbitration"] = False
+            return decision
+
+        # Шаг 4: Валидация математики арбитра (ИСПРАВЛЕНИЕ БАГА ЦИКЛОВ #12, #43-#47)
+        if not cls.validate_arbiter_math(arbiter_resp):
+            logger.warning(
+                f"[CEO_Agent] {symbol}: Арбитр meta-llama/llama-3.1-8b-instruct допустил "
+                f"математическую нестыковку. Не аннулируем сигнал — сохраняем {primary_action}."
+            )
+            # КРИТИЧЕСКИЙ ФИКС: возвращаем исходный primary_action (например, WAIT_FOR_PULLBACK
+            # или REDUCE_SIZE), а НЕ сбрасываем его в "HOLD"!
+            decision["final_status"] = (
+                "APPROVED_ENTER" if primary_action == "ENTER" else primary_action
+            )
+            decision["conviction_for_risk"] = primary_conf
+            decision["conviction"] = int(primary_qual)
+            decision["action"] = primary_action
+            decision["trade_action"] = primary_action
+            decision["decision"] = primary_dir
+            decision["escalated"] = True
+            decision["disputed_arbitration"] = False
+            decision["escalation_note"] = "MATH_ERROR_FALLBACK_TO_PRIMARY"
+            return decision
+
+        arb_dir = str(arbiter_resp.get("decision", "HOLD")).upper()
+        arb_conf = float(arbiter_resp.get("dir_conf", arbiter_resp.get("directional_confidence", 0.0)))
+        arb_qual = float(arbiter_resp.get("entry_quality", arbiter_resp.get("conviction", 0.0)))
+
+        logger.info(
+            f"[CEO_Agent] Escalation (meta-llama/llama-3.1-8b-instruct) "
+            f"Final Decision: {arb_dir} (DirConf: {arb_conf:.0f}%, EntryQuality: {arb_qual:.0f}%)"
+        )
+
+        decision["escalated"] = True
+
+        # Шаг 5: Мягкая агрегация мнений для пограничных сетапов (WAIT_FOR_PULLBACK / REDUCE_SIZE)
+        # Если 8B-модель дает прямой противоположный сигнал (например, LONG против SHORT у Primary)
+        # с уверенностью выше 30% — понижаем до WAIT_FOR_PULLBACK, но не убиваем метрики Primary
+        if arb_dir not in ("HOLD", primary_dir) and arb_conf >= 30.0:
+            decision["action"] = "WAIT_FOR_PULLBACK"
+            decision["trade_action"] = "WAIT_FOR_PULLBACK"
+            decision["final_status"] = "WAIT_FOR_PULLBACK"
+            decision["disputed_arbitration"] = True
+            decision["conviction_for_risk"] = primary_conf
+            decision["conviction"] = int(min(primary_qual, arb_qual))
+            decision["entry_quality"] = min(primary_qual, arb_qual)
+        else:
+            # Сохраняем действие старшей модели, а уверенность усредняем с весом 80% на Primary CEO и 20% на 8B
+            blended_conf = round(0.80 * primary_conf + 0.20 * arb_conf, 1)
+            decision["conviction_for_risk"] = max(primary_conf, blended_conf)
+            decision["conviction"] = int(round(0.80 * primary_qual + 0.20 * arb_qual))
+            decision["entry_quality"] = decision["conviction"]
+            decision["action"] = primary_action
+            decision["trade_action"] = primary_action
+            decision["disputed_arbitration"] = (arb_dir != primary_dir and arb_dir != "HOLD")
+            decision["final_status"] = (
+                "APPROVED_ENTER" if primary_action == "ENTER" else primary_action
+            )
+
+        return decision
 
 
 class CEOAgent(BaseAgent):
@@ -445,29 +645,23 @@ class CEOAgent(BaseAgent):
         esc_conv_log = "N/A"
         disputed_arbitration = False
         
-        router_direction = str(data.get("direction_bias", "NEUTRAL")).upper()
-        router_strategy = str(data.get("strategy_mode", "TREND_FOLLOWING")).upper()
-        has_math_conflict = bool(score_res.get("math_conflict", False))
-        is_strong_router_candidate = router_direction in ["LONG", "SHORT"] and router_strategy in ["BREAKOUT", "RELATIVE_MOMENTUM"]
+        conviction_for_risk = float(primary_dir_conf)
+        final_status = "HOLD" if decision == "HOLD" else ("APPROVED_ENTER" if trade_action == "ENTER" else trade_action)
 
-        if decision == "HOLD" and not has_math_conflict and not is_strong_router_candidate:
-            self.logger.info(f"[{self.name}] Primary CEO decided HOLD (neutral market). Bypassing escalation to save API costs.")
-            print(f"⏩ [Escalation Bypassed] Рынок не имеет явного тренда (HOLD). Вторая модель ({getattr(self.escalation_llm, 'model_name', 'Escalation')}) не вызывается для экономии API.")
+        # Step 2: Check escalation bypass via CEOEscalationPatch matrix
+        bypass, bypass_reason = CEOEscalationPatch.should_bypass_escalation(ceo_eval_payload)
+        if bypass:
+            self.logger.info(f"[{self.name}] {symbol}: {bypass_reason}")
+            print(f"⏩ [Escalation Bypassed] {bypass_reason}")
         elif not self.escalation_llm:
             self.logger.info(f"[{self.name}] Escalation LLM is not configured. Bypassing escalation.")
             print("⏩ [Escalation Bypassed] Эскалационная модель не настроена. Эскалация отменена.")
         elif getattr(self.llm_client, "model_name", "Primary") == getattr(self.escalation_llm, "model_name", "Escalation"):
             self.logger.info(f"[{self.name}] Primary and Escalation models are identical ({getattr(self.llm_client, 'model_name', 'Primary')}). Bypassing escalation to prevent echo chamber.")
             print(f"⏩ [Escalation Bypassed] Основная и эскалационная модели совпали ({getattr(self.llm_client, 'model_name', 'Primary')}). Эскалация отменена (предотвращение эхо-камеры).")
-        elif decision in ["LONG", "SHORT"] and (conviction >= 80 or (trade_action == "ENTER" and conviction >= 70)):
-            self.logger.info(f"[{self.name}] Strong Primary CEO signal {decision} (EntryQuality {conviction}%, Action {trade_action}). Bypassing escalation.")
-            print(f"⏩ [Escalation Bypassed] Надежный сигнал Primary CEO ({decision}, Conviction: {conviction}%, Action: {trade_action}). Вторая модель ({getattr(self.escalation_llm, 'model_name', 'Escalation')}) не вызывается.")
-        elif decision in ["LONG", "SHORT"] and conviction < 60 and directional_confidence < 60:
-            self.logger.info(f"[{self.name}] Entry Quality low ({decision} {conviction}% < 60%). Bypassing escalation.")
-            print(f"⏩ [Escalation Bypassed] Слишком низкое качество входа Primary CEO ({conviction}% < 60%). Пропуск сделки (HOLD/WAIT).")
         else:
             escalated = True
-            escalation_cause = "Math conflict detected" if has_math_conflict else (f"Strong router {router_strategy} {router_direction} vs Primary HOLD" if decision == "HOLD" else f"Conviction {conviction}% (60-79%)")
+            escalation_cause = f"Borderline setup ({trade_action}, Conviction {conviction}%, DirConf {directional_confidence}%)"
             self.logger.info(f"[{self.name}] {escalation_cause}. Escalating to {self.escalation_llm.model_name}...")
             print(f"⚠️ [Escalation] Спорный сетап ({escalation_cause}). Подключаем {self.escalation_llm.model_name} для финального вердикта...")
             
@@ -537,10 +731,27 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                     k3_breakdown = esc_response.get("score_breakdown", {})
                     esc_score_res = self._validate_and_compute_score(esc_raw_decision, k3_breakdown, market_context=data)
                     
-                    if esc_score_res.get("math_conflict", False):
-                        # Format/arithmetic inconsistency by arbitrator
-                        # Rule: "Ошибка формата или арифметики у арбитра не должна считаться доказательством неправильности исходного сигнала."
-                        self.logger.warning(f"[{self.name}] Арбитр {self.escalation_llm.model_name} допустил математическую нестыковку. Не аннулируем сигнал Primary CEO.")
+                    esc_conf_candidate = float(esc_score_res.get("directional_confidence", esc_response.get("directional_confidence", 0.0)))
+                    esc_qual_candidate = float(esc_score_res.get("entry_quality", esc_response.get("entry_quality", 0.0)))
+                    esc_pen_candidate = float(esc_score_res.get("risk_penalties", esc_response.get("risk_score", 0.0)))
+
+                    arb_eval_dict = {
+                        "decision": esc_raw_decision,
+                        "dir_conf": esc_conf_candidate,
+                        "directional_confidence": esc_conf_candidate,
+                        "entry_quality": esc_qual_candidate,
+                        "conviction": esc_qual_candidate,
+                        "risk_penalty": esc_pen_candidate,
+                        "risk_penalties": esc_pen_candidate
+                    }
+
+                    # Step 4: Validate arbiter math (FIX FOR CYCLES #12, #43-#47)
+                    if esc_score_res.get("math_conflict", False) or not CEOEscalationPatch.validate_arbiter_math(arb_eval_dict):
+                        self.logger.warning(
+                            f"[{self.name}] {symbol}: Арбитр {self.escalation_llm.model_name} допустил "
+                            f"математическую нестыковку. Не аннулируем сигнал — сохраняем {primary_trade_action}."
+                        )
+                        print(f"🛡️ [Arbitration Fallback] Арбитр допустил математическую нестыковку. Не аннулируем сигнал — сохраняем {primary_trade_action} ({primary_decision}).")
                         arbitration_failed = True
                         arbitration_error = "Arbitrator score breakdown math conflict"
                     else:
@@ -591,28 +802,46 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                 directional_confidence = primary_dir_conf
                 entry_quality = primary_entry_quality
                 trade_action = primary_trade_action
+                conviction_for_risk = primary_dir_conf
+                final_status = "APPROVED_ENTER" if primary_trade_action == "ENTER" else primary_trade_action
+                disputed_arbitration = False
                 reasoning = f"[Primary CEO: {primary_raw_reasoning}]\n\n[ARBITRATION BYPASSED: Arbitrator {getattr(self.escalation_llm, 'model_name', 'Escalation')} encountered an error ({arbitration_error}). Retained Primary CEO verdict.]"
 
-            # Case 1: Full Consensus (both models agree)
+            # Case 1: Direct Conflict with Opposing Signal (e.g. LONG vs SHORT with conf >= 30%)
+            elif esc_decision not in ("HOLD", primary_decision) and esc_dir_conf >= 30.0:
+                decision = primary_decision
+                trade_action = "WAIT_FOR_PULLBACK"
+                final_status = "WAIT_FOR_PULLBACK"
+                disputed_arbitration = True
+                conviction_for_risk = primary_dir_conf
+                conviction = int(min(primary_entry_quality, esc_entry_qual))
+                entry_quality = conviction
+                directional_confidence = primary_dir_conf
+                print(f"⚠️ [Escalation Disagreement] Арбитр дал противоположный сигнал ({esc_decision} {esc_dir_conf}% vs Primary {primary_decision}). Понижаем статус до WAIT_FOR_PULLBACK.")
+
+            # Case 2: Full Consensus (both models agree on direction)
             elif esc_decision == primary_decision:
                 decision = esc_decision
                 conviction = int((primary_conviction * 0.6) + (esc_conviction * 0.4))
                 directional_confidence = int((primary_dir_conf * 0.6) + (esc_dir_conf * 0.4))
                 entry_quality = int((primary_entry_quality * 0.6) + (esc_entry_qual * 0.4))
+                conviction_for_risk = max(primary_dir_conf, float(directional_confidence))
                 if conviction < 60:
                     if directional_confidence >= 70:
                         trade_action = "WAIT_FOR_PULLBACK"
                     else:
                         trade_action = "HOLD"
+                        decision = "HOLD"
                 elif conviction >= 75:
                     trade_action = "ENTER"
                 elif directional_confidence >= 75 and conviction < 70:
                     trade_action = "WAIT_FOR_PULLBACK"
                 else:
                     trade_action = "REDUCE_SIZE"
+                final_status = "APPROVED_ENTER" if trade_action == "ENTER" else trade_action
                 print(f"🤝 [Consensus] Модели пришли к согласию! Подтвержден {decision}. Conviction: {conviction}% (Primary: {primary_conviction}%, Esc: {esc_conviction}%) | Entry Quality: {entry_quality}% | Action: {trade_action}")
 
-            # Case 2: Model Conflict (both models produced valid decisions, but disagree)
+            # Case 3: Model Disagreement where Arbiter is HOLD or Low Conviction
             else:
                 disputed_arbitration = True
                 dispute_reason = f"Конфликт моделей ({primary_decision} vs {esc_decision})"
@@ -637,8 +866,10 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                     conviction = min(chosen_conv, 65)
                     directional_confidence = chosen_dir
                     entry_quality = conviction
+                    conviction_for_risk = primary_dir_conf
                     # Force REDUCE_SIZE to prevent full-size exposure on disputed trade
                     trade_action = "REDUCE_SIZE"
+                    final_status = "REDUCE_SIZE"
                     reasoning += f"\n\n[INDEPENDENT RISK ARBITRATION APPROVED: {risk_rationale}. Sizing capped to REDUCE_SIZE (Conviction {conviction}%).]"
                     self.logger.info(f"[{self.name}] Независимые правила риска ОДОБРИЛИ {decision}: {risk_rationale}. Action: REDUCE_SIZE.")
                     print(f"✅ [Arbitration Gate] Независимые правила риска ПОДТВЕРДИЛИ {decision}: {risk_rationale}. Допуск с защитным объемом (REDUCE_SIZE, {conviction}%).")
@@ -649,6 +880,7 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                     entry_quality = 0
                     directional_confidence = 0
                     trade_action = "HOLD"
+                    final_status = "HOLD"
                     final_hold_category = "INDEPENDENT_RISK_REJECTION"
                     reasoning += f"\n\n[INDEPENDENT RISK ARBITRATION REJECTED: {risk_rationale}. Trade converted to HOLD.]"
                     self.logger.info(f"[{self.name}] Независимые правила риска ОТКЛОНИЛИ {target_candidate}: {risk_rationale}. Итог: HOLD.")
@@ -682,6 +914,8 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
             "risk_breakdown": score_res.get("risk_breakdown", {}),
             "trade_action": trade_action,
             "action": trade_action,
+            "final_status": final_status,
+            "conviction_for_risk": conviction_for_risk,
             "reasoning_en": reasoning,
             "reasoning_ru": llm_response.get("reasoning_ru", ""),
             "consensus_summary": llm_response.get("consensus_summary", ""),

@@ -67,6 +67,7 @@ class FinalTradeDecision:
     reasoning_en: str = ""
     reasoning_ru: str = ""
     raw_ceo_verdict: Mapping[str, Any] = field(default_factory=dict)
+    conviction_for_risk: Optional[float] = None
 
     def __post_init__(self):
         # Deep defensive conversion of raw_ceo_verdict to guarantee nested immutability
@@ -110,6 +111,7 @@ class FinalTradeDecision:
             "hold_category": self.rejection_tag if self.decision == "HOLD" else None,
             "directional_confidence": self.directional_confidence,
             "entry_quality": self.entry_quality,
+            "conviction_for_risk": self.conviction_for_risk,
             "reasoning_en": self.reasoning_en,
             "reasoning_ru": self.reasoning_ru,
         })

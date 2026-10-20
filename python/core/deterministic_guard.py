@@ -305,5 +305,6 @@ class DeterministicGuard:
             entry_quality=entry_qual,
             reasoning_en=reasoning_en,
             reasoning_ru=reasoning_ru,
-            raw_ceo_verdict=ceo_proposal
+            raw_ceo_verdict=ceo_proposal,
+            conviction_for_risk=float(ceo_proposal.get("conviction_for_risk", conviction) or conviction)
         )
