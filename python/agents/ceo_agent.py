@@ -1,4 +1,5 @@
 import json
+import logging
 from typing import Dict, Any, Tuple, Optional
 import os
 import re
@@ -60,6 +61,259 @@ def normalize_mtf_trend(raw_trend: Any) -> Optional[str]:
     if s in ["neutral", "flat", "chop", "mixed_chop", "sideways", "range", "consolidation", "neutral_trend", "range_bound", "rangebound"]:
         return "NEUTRAL"
     return None
+
+
+def extract_router_metadata(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Extracts or normalizes router metadata from pipeline market_context / data payload.
+    """
+    if not isinstance(data, dict):
+        return {}
+
+    strategy_type = str(data.get("strategy_type") or data.get("strategy_mode") or "").upper()
+    indicators = data.get("indicators") if isinstance(data.get("indicators"), dict) else (
+        (data.get("market_data") or {}).get("indicators") if isinstance(data.get("market_data"), dict) else {}
+    )
+    if not isinstance(indicators, dict):
+        indicators = {}
+
+    vol_pct = 100.0
+    for k in ["volume_pct", "volume_spike_pct", "vol_pct"]:
+        if k in data and data[k] is not None:
+            try:
+                vol_pct = float(data[k])
+                break
+            except (ValueError, TypeError):
+                pass
+        elif k in indicators and indicators[k] is not None:
+            try:
+                vol_pct = float(indicators[k])
+                break
+            except (ValueError, TypeError):
+                pass
+
+    curr_price = 0.0
+    for k in ["current_price", "price"]:
+        if k in data and data[k] is not None:
+            try:
+                curr_price = float(data[k])
+                break
+            except (ValueError, TypeError):
+                pass
+    if curr_price == 0.0 and isinstance(data.get("price_data"), dict):
+        try:
+            curr_price = float(data["price_data"].get("current_price", 0.0))
+        except (ValueError, TypeError):
+            pass
+
+    breakout_lvl = 0.0
+    for k in ["breakout_level", "breakout_lvl", "level"]:
+        if k in data and data[k] is not None:
+            try:
+                breakout_lvl = float(data[k])
+                break
+            except (ValueError, TypeError):
+                pass
+
+    direction_bias = str(data.get("direction_bias", "")).upper()
+    if breakout_lvl <= 0:
+        if direction_bias == "SHORT" and "donchian_low" in indicators:
+            try:
+                breakout_lvl = float(indicators["donchian_low"])
+            except (ValueError, TypeError):
+                pass
+        elif "donchian_high" in indicators:
+            try:
+                breakout_lvl = float(indicators["donchian_high"])
+            except (ValueError, TypeError):
+                pass
+
+    if breakout_lvl <= 0 and data.get("router_reasoning"):
+        m = re.search(r'(?:Пробой|breakout)\s+([\d\.]+)', str(data.get("router_reasoning")), re.IGNORECASE)
+        if m:
+            try:
+                breakout_lvl = float(m.group(1))
+            except (ValueError, TypeError):
+                pass
+
+    ob_bias = "NEUTRAL"
+    for k in ["orderbook_bias", "ob_bias"]:
+        if k in data and data[k]:
+            ob_bias = str(data[k]).upper()
+            break
+    if ob_bias == "NEUTRAL":
+        reports = data.get("subordinate_analyst_reports") or []
+        for r in reports:
+            if isinstance(r, dict) and r.get("agent_name") == "Order_Book_Agent":
+                sig = str(r.get("signal", "")).upper()
+                if "BULL" in sig or "LONG" in sig:
+                    ob_bias = "BULL"
+                elif "BEAR" in sig or "SHORT" in sig:
+                    ob_bias = "BEAR"
+                break
+
+    max_chase_pct = 1.5
+    if "max_chase_pct" in data:
+        try:
+            max_chase_pct = float(data["max_chase_pct"])
+        except (ValueError, TypeError):
+            pass
+
+    return {
+        "strategy_type": strategy_type,
+        "volume_pct": vol_pct,
+        "breakout_level": breakout_lvl,
+        "current_price": curr_price,
+        "orderbook_bias": ob_bias,
+        "max_chase_pct": max_chase_pct
+    }
+
+
+def apply_breakout_penalty_override(
+    ceo_decision: Dict[str, Any],
+    router_metadata: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Корректирует ложные штрафы Mean-Reversion (RiskPenalty -20..-25) от LLM,
+    если Strategy Router передал валидный импульсный сетап BREAKOUT.
+    
+    Ожидаемые поля в router_metadata:
+    - strategy_type: str ("BREAKOUT", "FULL_ALIGNMENT", "MEAN_REVERSION", ...)
+    - volume_pct: float (например, 403.66 для 403.66%)
+    - breakout_level: float (уровень пробоя, например 82145.0)
+    - current_price: float (текущая цена, например 82469.0)
+    - orderbook_bias: str ("BULL", "BEAR", "NEUTRAL")
+    - max_chase_pct: float (макс. допустимый уход цены от пробоя, по умолчанию 1.5%)
+    """
+    if not isinstance(ceo_decision, dict) or not isinstance(router_metadata, dict):
+        return ceo_decision
+
+    strategy_type = str(
+        router_metadata.get("strategy_type") or router_metadata.get("strategy_mode", "")
+    ).upper()
+    if "BREAKOUT" not in strategy_type:
+        return ceo_decision
+
+    direction = str(
+        ceo_decision.get("decision") or ceo_decision.get("signal", "HOLD")
+    ).upper()
+    if direction not in ("LONG", "SHORT"):
+        return ceo_decision
+
+    try:
+        dir_conf = float(
+            ceo_decision.get("dir_conf", ceo_decision.get("directional_confidence", 0.0))
+        )
+    except (ValueError, TypeError):
+        dir_conf = 0.0
+
+    try:
+        raw_penalty = float(
+            ceo_decision.get("risk_penalty", ceo_decision.get("risk_penalties", 0.0))
+        )
+    except (ValueError, TypeError):
+        raw_penalty = 0.0
+
+    action = str(ceo_decision.get("action", ceo_decision.get("trade_action", "HOLD"))).upper()
+
+    try:
+        vol_pct = float(
+            router_metadata.get("volume_pct", router_metadata.get("volume_spike_pct", 100.0))
+        )
+    except (ValueError, TypeError):
+        vol_pct = 100.0
+
+    try:
+        breakout_lvl = float(router_metadata.get("breakout_level", 0.0))
+    except (ValueError, TypeError):
+        breakout_lvl = 0.0
+
+    try:
+        curr_price = float(
+            router_metadata.get("current_price", router_metadata.get("price", 0.0))
+        )
+    except (ValueError, TypeError):
+        curr_price = 0.0
+
+    raw_ob = str(
+        router_metadata.get("orderbook_bias", router_metadata.get("ob_bias", "NEUTRAL"))
+    ).upper()
+    if "BULL" in raw_ob:
+        ob_bias = "BULL"
+    elif "BEAR" in raw_ob:
+        ob_bias = "BEAR"
+    else:
+        ob_bias = "NEUTRAL"
+
+    try:
+        max_chase_pct = float(router_metadata.get("max_chase_pct", 1.5))
+    except (ValueError, TypeError):
+        max_chase_pct = 1.5
+
+    # 1. Считаем, насколько далеко цена улетела от уровня пробоя (Chase Distance)
+    if breakout_lvl > 0 and curr_price > 0:
+        chase_dist_pct = abs(curr_price - breakout_lvl) / breakout_lvl * 100.0
+    else:
+        chase_dist_pct = 0.0
+
+    # 2. Проверяем отсутствие встречного блока в стакане
+    opposing_ob = (
+        (direction == "LONG" and ob_bias == "BEAR") or
+        (direction == "SHORT" and ob_bias == "BULL")
+    )
+
+    # 3. Условие чистого пробоя (Fresh High-Volume Breakout):
+    # Уверенность CEO >= 75%, Объем >= 180%, цена ушла от пробоя не далее max_chase_pct
+    is_fresh_impulse = (
+        dir_conf >= 75.0
+        and vol_pct >= 180.0
+        and chase_dist_pct <= max_chase_pct
+        and not opposing_ob
+    )
+
+    if is_fresh_impulse and abs(raw_penalty) >= 15.0:
+        # Ограничиваем максимальный штраф:
+        # -5 при экстремальном объеме (>=250% или стакан по тренду), иначе -10
+        is_trend_ob = (
+            (direction == "LONG" and ob_bias == "BULL") or
+            (direction == "SHORT" and ob_bias == "BEAR") or
+            raw_ob == direction[:4]
+        )
+        if vol_pct >= 250.0 or is_trend_ob:
+            capped_penalty = -5.0
+        else:
+            capped_penalty = -10.0
+
+        new_entry_quality = max(0.0, dir_conf + capped_penalty)
+
+        # Повышаем статус с WAIT_FOR_PULLBACK до активного входа
+        new_action = action
+        if action == "WAIT_FOR_PULLBACK":
+            new_action = "ENTER" if new_entry_quality >= 75.0 else "REDUCE_SIZE"
+
+        logger = logging.getLogger("CEO_Agent")
+        old_qual = ceo_decision.get('entry_quality', ceo_decision.get('conviction', new_entry_quality))
+        logger.info(
+            f"[CEO_Agent] Breakout Override applied: Vol={vol_pct:.1f}%, "
+            f"Chase={chase_dist_pct:.2f}% (<= {max_chase_pct}%). "
+            f"Penalty adjusted {raw_penalty} -> {capped_penalty}, "
+            f"EntryQuality: {old_qual}% -> {new_entry_quality}%, "
+            f"Action: {action} -> {new_action}"
+        )
+
+        ceo_decision["risk_penalty"] = capped_penalty
+        ceo_decision["risk_penalties"] = int(capped_penalty)
+        ceo_decision["entry_quality"] = new_entry_quality
+        ceo_decision["conviction"] = int(new_entry_quality)
+        ceo_decision["action"] = new_action
+        ceo_decision["trade_action"] = new_action
+
+        if isinstance(ceo_decision.get("risk_breakdown"), dict):
+            ceo_decision["risk_breakdown"]["total"] = int(capped_penalty)
+            if "price_extension" in ceo_decision["risk_breakdown"]:
+                ceo_decision["risk_breakdown"]["price_extension"] = int(capped_penalty)
+
+    return ceo_decision
 
 
 class CEOAgent(BaseAgent):
@@ -144,6 +398,29 @@ class CEOAgent(BaseAgent):
         trade_action = score_res["trade_action"]
         
         reasoning = llm_response.get("reasoning_en", "")
+
+        # --- BREAKOUT PENALTY OVERRIDE (Sanity Check on Fresh Impulses) ---
+        router_meta = extract_router_metadata(data)
+        ceo_eval_payload = {
+            "decision": decision,
+            "dir_conf": directional_confidence,
+            "directional_confidence": directional_confidence,
+            "risk_penalty": total_penalty,
+            "risk_penalties": total_penalty,
+            "entry_quality": entry_quality,
+            "conviction": conviction,
+            "action": trade_action,
+            "trade_action": trade_action,
+            "risk_breakdown": score_res.get("risk_breakdown", {})
+        }
+        ceo_eval_payload = apply_breakout_penalty_override(ceo_eval_payload, router_meta)
+        decision = ceo_eval_payload["decision"]
+        conviction = int(ceo_eval_payload["conviction"])
+        directional_confidence = int(ceo_eval_payload["directional_confidence"])
+        entry_quality = int(ceo_eval_payload["entry_quality"])
+        total_penalty = int(ceo_eval_payload["risk_penalties"])
+        trade_action = ceo_eval_payload["trade_action"]
+        risk_score = min(100, int((abs(total_penalty) / 40.0) * 100)) if total_penalty < 0 else 0
         
         if decision == "HOLD":
             log_detail = "Decision: HOLD (Conf: N/A)"
@@ -271,6 +548,25 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                         esc_conviction = esc_score_res["conviction"]
                         esc_dir_conf = esc_score_res["directional_confidence"]
                         esc_entry_qual = esc_score_res["entry_quality"]
+
+                        esc_eval_payload = {
+                            "decision": esc_decision,
+                            "dir_conf": esc_dir_conf,
+                            "directional_confidence": esc_dir_conf,
+                            "risk_penalty": esc_score_res["risk_penalties"],
+                            "risk_penalties": esc_score_res["risk_penalties"],
+                            "entry_quality": esc_entry_qual,
+                            "conviction": esc_conviction,
+                            "action": esc_score_res.get("trade_action", "ENTER" if esc_conviction >= 75 else "REDUCE_SIZE"),
+                            "trade_action": esc_score_res.get("trade_action", "ENTER" if esc_conviction >= 75 else "REDUCE_SIZE"),
+                            "risk_breakdown": esc_score_res.get("risk_breakdown", {})
+                        }
+                        esc_eval_payload = apply_breakout_penalty_override(esc_eval_payload, router_meta)
+                        esc_decision = esc_eval_payload["decision"]
+                        esc_conviction = int(esc_eval_payload["conviction"])
+                        esc_dir_conf = int(esc_eval_payload["directional_confidence"])
+                        esc_entry_qual = int(esc_eval_payload["entry_quality"])
+
                         esc_decision_log = esc_decision
                         esc_conv_log = esc_conviction
                         k3_reasoning = esc_response.get("reasoning_en", "")
@@ -374,15 +670,18 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
             except Exception as e:
                 self.logger.error(f"Failed to log confidence stats: {e}")
 
-        return {
+        final_verdict = {
             "decision": decision,
             "conviction": conviction,
             "directional_confidence": directional_confidence,
+            "dir_conf": directional_confidence,
             "entry_quality": entry_quality,
             "risk_score": risk_score,
             "risk_penalties": total_penalty,
+            "risk_penalty": total_penalty,
             "risk_breakdown": score_res.get("risk_breakdown", {}),
             "trade_action": trade_action,
+            "action": trade_action,
             "reasoning_en": reasoning,
             "reasoning_ru": llm_response.get("reasoning_ru", ""),
             "consensus_summary": llm_response.get("consensus_summary", ""),
@@ -395,6 +694,7 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
             "bull_status": data.get("bull_status", "OK"),
             "bear_status": data.get("bear_status", "OK")
         }
+        return apply_breakout_penalty_override(final_verdict, router_meta)
 
     def _determine_hold_category(self, analyst_reports: list, conviction: int) -> str:
         if conviction < 80 and conviction > 0:

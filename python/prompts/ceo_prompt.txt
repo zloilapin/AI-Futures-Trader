@@ -87,11 +87,34 @@ Risks are evaluated across four orthogonal, non-overlapping categories:
 
 The model MUST NOT assign a zero penalty to an objectively confirmed extreme risk.
 
-BREAKOUT EXCEPTION:
-When "strategy_mode" is "BREAKOUT" or "VOLATILITY_MOMENTUM" with volume spike confirmation:
-- Price breaking through or trading outside the outer Bollinger Band (bb_pos >= 90% or <= 10%) is expected and represents momentum confirmation, NOT an overextension. Do NOT penalize Bollinger Band extremes.
-- Cap "price_extension" risk penalty to at most -5 pts.
-- Do NOT output "WAIT_FOR_PULLBACK" for confirmed breakouts with volume expansion; trade action MUST be "ENTER" to catch impulsive momentum.
+============================================================
+КОНТЕКСТНО-ЗАВИСИМЫЕ ПРАВИЛА ОЦЕНКИ РИСКА (STRATEGY-SPECIFIC RISK PENALTY)
+============================================================
+
+Перед расчетом `RiskPenalty` и `EntryQuality` проверь поле `strategy_mode` / `strategy_type`, переданное от Strategy Router:
+
+#### РЕЖИМ А: Если `strategy_mode` / `strategy_type` == `BREAKOUT` (Пробой волатильности / уровня)
+В пробойной стратегии цена ОБЯЗАНА находиться у границы или за пределами канала Боллинджера (`bb_pos > 90%` для LONG или `bb_pos < 10%` для SHORT). Импульсные пробои с объемом `Vol > 200%` редко дают глубокий откат — ожидание отката (`WAIT_FOR_PULLBACK`) приводит к пропуску всего трендового движения.
+
+1. **ЗАПРЕТ НА ШТРАФ ЗА ПЕРЕКУПЛЕННОСТЬ/ПЕРЕПРОДАННОСТЬ:**
+   - Категорически ЗАПРЕЩЕНО начислять `RiskPenalty` за высокий `bb_pos` (>90%), пробой верхней полосы Боллинджера или `RSI` в зоне 65–82 (для LONG) / 18–35 (для SHORT), если пробой подтвержден объемом (`Vol >= 150%`).
+   - Нахождение цены на локальном экстремуме при пробое с высоким объемом — это признак силы сетапа (`RiskPenalty: 0` или `-5`), а НЕ причина для `WAIT_FOR_PULLBACK`.
+
+2. **ЗА ЧТО НАЧИСЛЯТЬ `RiskPenalty` В РЕЖИМЕ BREAKOUT:**
+   - **Слабый объем (`Vol < 140%`):** штраф `-15...-20` (высокий риск ложного пробоя).
+   - **Встречный дисбаланс стакана (`OB == BEAR` при LONG или `OB == BULL` при SHORT):** штраф `-10...-15`. Примечание: `OB == NEUTRAL` при `Vol > 200%` НЕ штрафуется (`0`), так как агрессивные рыночные ордера съедают лимиты.
+   - **Чрезмерное истощение импульса:** если цена уже ушла от уровня пробоя (`breakout_level`) более чем на `2.0 * ATR` (например, >2.5% для BTC/ETH или >4.0% для альткоинов за одну свечу) — штраф `-15...-20` и статус `WAIT_FOR_PULLBACK`.
+   - **Отторжение цены (Wick Rejection):** если текущая `price` откатилась обратно под `breakout_level` (для LONG) или над ним (для SHORT) — штраф `-25` и статус `HOLD`.
+
+3. **ПРАВИЛО ВЫБОРА ACTION ДЛЯ BREAKOUT:**
+   - Если `DirConf >= 75%`, `Vol >= 180%`, а дистанция от уровня пробоя `<= 1.5 * ATR` (или `<= 1.5%`), твой итоговый `RiskPenalty` должен быть в диапазоне `0...-10`, `EntryQuality >= 70%`, а `Action` — строго `ENTER` (или `REDUCE_SIZE`, если стоп шире нормы).
+   - Используй `WAIT_FOR_PULLBACK` в пробое ТОЛЬКО тогда, когда свеча пробоя уже растянулась более чем на `2.0 * ATR` от точки слома структуры.
+
+#### РЕЖИМ Б: Если `strategy_mode` == `MEAN_REVERSION` / `PULLBACK`
+Здесь применяются классические правила возврата к среднему:
+- `bb_pos > 95%` (Long) / `< 5%` (Short): Штраф `-15...-20` (Покупка хаев / продажа лоев).
+- `RSI > 70` (Long) / `< 30` (Short): Штраф `-10` (Перекупленность / перепроданность).
+- Низкий объем (`Vol < 130%`): Допустимо на отскоке от границы канала.
 
 
 ============================================================
@@ -112,7 +135,7 @@ RSI < 5:  Extreme statistical condition. Mandatory penalty: -15 to -20.
 
 IMPORTANT:
 Extreme RSI does NOT automatically imply an immediate reversal or counter-trend signal.
-However, it MUST reduce the confidence or entry quality of a new trend-following position.
+However, it MUST reduce the confidence or entry quality of a new trend-following position (Exception: confirmed BREAKOUT setups with volume >= 150% do not penalize RSI 65-82 for LONG or 18-35 for SHORT, as specified in the Breakout section above).
 
 ============================================================
 SENTIMENT EXTREMES

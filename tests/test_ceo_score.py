@@ -654,6 +654,189 @@ def test_mtf_unrecognized_strings_are_not_treated_as_valid_timeframes():
     assert res4["directional_confidence"] == 60
 
 
+def test_apply_breakout_penalty_override_cycles_56_to_58():
+    """
+    Validates apply_breakout_penalty_override on historical cycles #56-#58:
+    - #56 BTC-USD: Vol 217%, Breakout 82145, price 82469 (+0.39% chase <= 1.5%), OB=NEUTRAL.
+      DirConf 75%, Penalty -20 -> Capped to -10 -> Qual 65% (REDUCE_SIZE)
+    - #57 BTC-USD: Vol 403%, Breakout 82145, price 82796 (+0.79% chase <= 1.5%), OB=BULL.
+      DirConf 85%, Penalty -20 -> Capped to -5 -> Qual 80% (ENTER)
+    - #57 BNB-USD: Vol 262%, Breakout 733.57, price 739.19 (+0.76% chase <= 1.5%), OB=NEUTRAL.
+      DirConf 80%, Penalty -20 -> Capped to -5 -> Qual 75% (ENTER)
+    - #57 LIT-USD: Vol 586%, Breakout 3.2102, price 3.3406 (+4.06% chase > 1.5%), OB=NEUTRAL.
+      DirConf 72%, Penalty -25 -> NOT overridden (WAIT_FOR_PULLBACK)
+    """
+    from agents.ceo_agent import apply_breakout_penalty_override
+
+    # Cycle #56 BTC-USD
+    btc_56_ceo = {
+        "decision": "LONG",
+        "dir_conf": 75.0,
+        "risk_penalty": -20.0,
+        "entry_quality": 55.0,
+        "action": "WAIT_FOR_PULLBACK"
+    }
+    btc_56_router = {
+        "strategy_type": "BREAKOUT",
+        "volume_pct": 217.0,
+        "breakout_level": 82145.0,
+        "current_price": 82469.0, # +0.39% chase
+        "orderbook_bias": "NEUTRAL"
+    }
+    res_btc_56 = apply_breakout_penalty_override(btc_56_ceo, btc_56_router)
+    assert res_btc_56["risk_penalty"] == -10.0
+    assert res_btc_56["entry_quality"] == 65.0
+    assert res_btc_56["action"] == "REDUCE_SIZE"
+
+    # Cycle #57 BTC-USD
+    btc_57_ceo = {
+        "decision": "LONG",
+        "dir_conf": 85.0,
+        "risk_penalty": -20.0,
+        "entry_quality": 65.0,
+        "action": "WAIT_FOR_PULLBACK"
+    }
+    btc_57_router = {
+        "strategy_type": "BREAKOUT",
+        "volume_pct": 403.0,
+        "breakout_level": 82145.0,
+        "current_price": 82796.0, # +0.79% chase
+        "orderbook_bias": "BULL"
+    }
+    res_btc_57 = apply_breakout_penalty_override(btc_57_ceo, btc_57_router)
+    assert res_btc_57["risk_penalty"] == -5.0
+    assert res_btc_57["entry_quality"] == 80.0
+    assert res_btc_57["action"] == "ENTER"
+
+    # Cycle #57 BNB-USD
+    bnb_57_ceo = {
+        "decision": "LONG",
+        "dir_conf": 80.0,
+        "risk_penalty": -20.0,
+        "entry_quality": 60.0,
+        "action": "WAIT_FOR_PULLBACK"
+    }
+    bnb_57_router = {
+        "strategy_type": "BREAKOUT",
+        "volume_pct": 262.0,
+        "breakout_level": 733.57,
+        "current_price": 739.19, # +0.76% chase
+        "orderbook_bias": "NEUTRAL"
+    }
+    res_bnb_57 = apply_breakout_penalty_override(bnb_57_ceo, bnb_57_router)
+    assert res_bnb_57["risk_penalty"] == -5.0
+    assert res_bnb_57["entry_quality"] == 75.0
+    assert res_bnb_57["action"] == "ENTER"
+
+    # Cycle #57 LIT-USD (Overextended: chase 4.06% > 1.5%)
+    lit_57_ceo = {
+        "decision": "LONG",
+        "dir_conf": 72.0,
+        "risk_penalty": -25.0,
+        "entry_quality": 47.0,
+        "action": "WAIT_FOR_PULLBACK"
+    }
+    lit_57_router = {
+        "strategy_type": "BREAKOUT",
+        "volume_pct": 586.0,
+        "breakout_level": 3.2102,
+        "current_price": 3.3406, # +4.06% chase
+        "orderbook_bias": "NEUTRAL"
+    }
+    res_lit_57 = apply_breakout_penalty_override(lit_57_ceo, lit_57_router)
+    # Filter does NOT lift penalty on overextended chase (> 1.5%)
+    assert res_lit_57["risk_penalty"] == -25.0
+    assert res_lit_57["entry_quality"] == 47.0
+    assert res_lit_57["action"] == "WAIT_FOR_PULLBACK"
+
+
+def test_breakout_override_opposing_orderbook_and_low_volume():
+    """
+    Ensures override fails closed (does NOT upgrade) when:
+    1. Opposing order book is detected (e.g. BEAR book on LONG breakout).
+    2. Volume is insufficient (< 180%).
+    3. Directional confidence is low (< 75%).
+    """
+    from agents.ceo_agent import apply_breakout_penalty_override
+
+    # Case 1: Opposing order book
+    ceo_dec = {
+        "decision": "LONG",
+        "dir_conf": 80.0,
+        "risk_penalty": -20.0,
+        "entry_quality": 60.0,
+        "action": "WAIT_FOR_PULLBACK"
+    }
+    router_opposing = {
+        "strategy_type": "BREAKOUT",
+        "volume_pct": 350.0,
+        "breakout_level": 100.0,
+        "current_price": 100.5,
+        "orderbook_bias": "BEAR"
+    }
+    res_opp = apply_breakout_penalty_override(ceo_dec.copy(), router_opposing)
+    assert res_opp["action"] == "WAIT_FOR_PULLBACK"
+    assert res_opp["risk_penalty"] == -20.0
+
+    # Case 2: Volume < 180%
+    router_low_vol = {
+        "strategy_type": "BREAKOUT",
+        "volume_pct": 160.0,
+        "breakout_level": 100.0,
+        "current_price": 100.5,
+        "orderbook_bias": "NEUTRAL"
+    }
+    res_vol = apply_breakout_penalty_override(ceo_dec.copy(), router_low_vol)
+    assert res_vol["action"] == "WAIT_FOR_PULLBACK"
+    assert res_vol["risk_penalty"] == -20.0
+
+    # Case 3: DirConf < 75%
+    ceo_low_dir = {
+        "decision": "LONG",
+        "dir_conf": 70.0,
+        "risk_penalty": -20.0,
+        "entry_quality": 50.0,
+        "action": "WAIT_FOR_PULLBACK"
+    }
+    router_valid = {
+        "strategy_type": "BREAKOUT",
+        "volume_pct": 250.0,
+        "breakout_level": 100.0,
+        "current_price": 100.5,
+        "orderbook_bias": "NEUTRAL"
+    }
+    res_dir = apply_breakout_penalty_override(ceo_low_dir, router_valid)
+    assert res_dir["action"] == "WAIT_FOR_PULLBACK"
+    assert res_dir["risk_penalty"] == -20.0
+
+
+def test_extract_router_metadata_from_payload():
+    """
+    Tests extract_router_metadata correctly parses pipeline payload.
+    """
+    from agents.ceo_agent import extract_router_metadata
+
+    pipeline_payload = {
+        "strategy_mode": "BREAKOUT",
+        "direction_bias": "LONG",
+        "current_price": 82469.0,
+        "router_reasoning": "BREAKOUT LONG: Пробой 82145.0 с объемом 217%",
+        "indicators": {
+            "volume_spike_pct": 217.0,
+            "donchian_high": 82145.0
+        },
+        "subordinate_analyst_reports": [
+            {"agent_name": "Order_Book_Agent", "signal": "NEUTRAL"}
+        ]
+    }
+    meta = extract_router_metadata(pipeline_payload)
+    assert meta["strategy_type"] == "BREAKOUT"
+    assert meta["volume_pct"] == 217.0
+    assert meta["breakout_level"] == 82145.0
+    assert meta["current_price"] == 82469.0
+    assert meta["orderbook_bias"] == "NEUTRAL"
+
+
 
 
 
