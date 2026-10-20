@@ -133,10 +133,15 @@ class StrategyRouter:
             if detected_regime in ["HIGH_VOLATILITY", "UNKNOWN", "DATA_INSUFFICIENT"]:
                 return StrategyProfile(False, "MEAN_REVERSION", "NEUTRAL", f"ОТКЛОНЕН (MEAN_REVERSION заблокирован в макро-режиме {detected_regime}, bb_pos={bb_position_pct}%).")
 
-            # Mean Reversion requires sufficient channel width (at least 1.5% band width)
-            # to offer room for profit between the band edge and the middle mean.
-            if bb_width_pct < 1.5:
-                return StrategyProfile(False, "MEAN_REVERSION", "NEUTRAL", f"ОТКЛОНЕН (Канал Bollinger слишком узкий: {bb_width_pct:.2f}% < 1.5% для прибыльного Mean Reversion).")
+            # Mean Reversion requires sufficient channel width
+            # For major high-cap benchmark assets (BTC, ETH), channels naturally compress to 0.8%-1.2%
+            # during consolidation. We lower the threshold to 0.8% for BTC and ETH, while keeping
+            # 1.5% for mid/small-cap altcoins to cover taker fees and spread friction.
+            base_sym = symbol.split("-")[0].upper()
+            min_bb_width = 0.8 if base_sym in ["BTC", "ETH"] else 1.5
+            if bb_width_pct < min_bb_width:
+                return StrategyProfile(False, "MEAN_REVERSION", "NEUTRAL", f"ОТКЛОНЕН (Канал Bollinger слишком узкий: {bb_width_pct:.2f}% < {min_bb_width:.1f}% для прибыльного Mean Reversion).")
+
 
             # Macro Trend Directional Alignment:
             # - In TRENDING_BULL, do NOT short the top band (breakout risk). Only allow LONG from bottom band.

@@ -161,6 +161,8 @@ class CEOAgent(BaseAgent):
         primary_conviction = conviction
         primary_dir_conf = directional_confidence
         primary_entry_quality = entry_quality
+        primary_trade_action = trade_action
+        primary_raw_reasoning = reasoning
         escalated = False
         esc_decision_log = "N/A"
         esc_conv_log = "N/A"
@@ -180,9 +182,9 @@ class CEOAgent(BaseAgent):
         elif getattr(self.llm_client, "model_name", "Primary") == getattr(self.escalation_llm, "model_name", "Escalation"):
             self.logger.info(f"[{self.name}] Primary and Escalation models are identical ({getattr(self.llm_client, 'model_name', 'Primary')}). Bypassing escalation to prevent echo chamber.")
             print(f"⏩ [Escalation Bypassed] Основная и эскалационная модели совпали ({getattr(self.llm_client, 'model_name', 'Primary')}). Эскалация отменена (предотвращение эхо-камеры).")
-        elif decision in ["LONG", "SHORT"] and conviction >= 80:
-            self.logger.info(f"[{self.name}] High conviction {decision} (EntryQuality {conviction}% >= 80%). Bypassing escalation.")
-            print(f"⏩ [Escalation Bypassed] Качество входа Primary CEO достаточно высоко ({conviction}%). Вторая модель ({getattr(self.escalation_llm, 'model_name', 'Escalation')}) не вызывается.")
+        elif decision in ["LONG", "SHORT"] and (conviction >= 80 or (trade_action == "ENTER" and conviction >= 70)):
+            self.logger.info(f"[{self.name}] Strong Primary CEO signal {decision} (EntryQuality {conviction}%, Action {trade_action}). Bypassing escalation.")
+            print(f"⏩ [Escalation Bypassed] Надежный сигнал Primary CEO ({decision}, Conviction: {conviction}%, Action: {trade_action}). Вторая модель ({getattr(self.escalation_llm, 'model_name', 'Escalation')}) не вызывается.")
         elif decision in ["LONG", "SHORT"] and conviction < 60 and directional_confidence < 60:
             self.logger.info(f"[{self.name}] Entry Quality low ({decision} {conviction}% < 60%). Bypassing escalation.")
             print(f"⏩ [Escalation Bypassed] Слишком низкое качество входа Primary CEO ({conviction}% < 60%). Пропуск сделки (HOLD/WAIT).")
@@ -280,8 +282,23 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                     arbitration_error = f"Invalid decision value: {esc_raw_decision}"
 
             # --- ARBITRATION RESOLUTION ENGINE ---
+            if arbitration_failed:
+                # Rule: "Ошибка формата или арифметики у арбитра не должна считаться доказательством неправильности исходного сигнала."
+                # Arbitrator failed, so we strictly preserve Primary CEO's original verdict without converting to HOLD or discounting!
+                self.logger.warning(
+                    f"[{self.name}] 🛡️ Arbitrator failure ({arbitration_error}). "
+                    f"Preserving Primary CEO original verdict: {primary_decision} (Conviction: {primary_conviction}%, Action: {primary_trade_action})."
+                )
+                print(f"🛡️ [Arbitration Fallback] Арбитр допустил ошибку ({arbitration_error}). Сохраняем исходное решение Primary CEO: {primary_decision} (Conviction: {primary_conviction}%, Action: {primary_trade_action}).")
+                decision = primary_decision
+                conviction = primary_conviction
+                directional_confidence = primary_dir_conf
+                entry_quality = primary_entry_quality
+                trade_action = primary_trade_action
+                reasoning = f"[Primary CEO: {primary_raw_reasoning}]\n\n[ARBITRATION BYPASSED: Arbitrator {getattr(self.escalation_llm, 'model_name', 'Escalation')} encountered an error ({arbitration_error}). Retained Primary CEO verdict.]"
+
             # Case 1: Full Consensus (both models agree)
-            if not arbitration_failed and esc_decision == primary_decision:
+            elif esc_decision == primary_decision:
                 decision = esc_decision
                 conviction = int((primary_conviction * 0.6) + (esc_conviction * 0.4))
                 directional_confidence = int((primary_dir_conf * 0.6) + (esc_dir_conf * 0.4))
@@ -299,10 +316,10 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                     trade_action = "REDUCE_SIZE"
                 print(f"🤝 [Consensus] Модели пришли к согласию! Подтвержден {decision}. Conviction: {conviction}% (Primary: {primary_conviction}%, Esc: {esc_conviction}%) | Entry Quality: {entry_quality}% | Action: {trade_action}")
 
-            # Case 2: Model Conflict OR Arbitrator Format/Math Failure
+            # Case 2: Model Conflict (both models produced valid decisions, but disagree)
             else:
                 disputed_arbitration = True
-                dispute_reason = arbitration_error if arbitration_failed else f"Конфликт моделей ({primary_decision} vs {esc_decision})"
+                dispute_reason = f"Конфликт моделей ({primary_decision} vs {esc_decision})"
                 self.logger.warning(f"[{self.name}] {dispute_reason}. Передаем решение независимым правилам риска...")
                 
                 target_candidate = primary_decision if primary_decision in ["LONG", "SHORT"] else esc_decision
@@ -695,6 +712,9 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
 
         ema_pen = 0
         bb_pen = 0
+        strat_mode = str((market_context or {}).get("strategy_mode", "")).upper()
+        is_breakout_strategy = strat_mode in ["BREAKOUT", "VOLATILITY_MOMENTUM"]
+
         if market_context and isinstance(market_context, dict):
             indicators = market_context.get("indicators") if isinstance(market_context.get("indicators"), dict) else {}
             if isinstance(indicators, dict):
@@ -712,17 +732,23 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                 if ema_20 > 0 and cur_price > 0:
                     if dec == "LONG" and cur_price > ema_20:
                         dist_pct = ((cur_price - ema_20) / cur_price) * 100.0
-                        if dist_pct > max(1.2, 1.5 * atr_pct): ema_pen = -15
+                        if is_breakout_strategy:
+                            ema_pen = -5 if dist_pct > max(2.0, 2.5 * atr_pct) else 0
+                        elif dist_pct > max(1.2, 1.5 * atr_pct): ema_pen = -15
                         elif dist_pct > max(0.8, 1.0 * atr_pct): ema_pen = -8
                     elif dec == "SHORT" and cur_price < ema_20:
                         dist_pct = ((ema_20 - cur_price) / cur_price) * 100.0
-                        if dist_pct > max(1.2, 1.5 * atr_pct): ema_pen = -15
+                        if is_breakout_strategy:
+                            ema_pen = -5 if dist_pct > max(2.0, 2.5 * atr_pct) else 0
+                        elif dist_pct > max(1.2, 1.5 * atr_pct): ema_pen = -15
                         elif dist_pct > max(0.8, 1.0 * atr_pct): ema_pen = -8
 
-                if dec == "LONG" and bb_pos >= 92.0:
-                    bb_pen = -8
-                elif dec == "SHORT" and bb_pos <= 8.0:
-                    bb_pen = -8
+                # In confirmed breakout strategies, breaking Bollinger Bands is the signal, not an overextension
+                if not is_breakout_strategy:
+                    if dec == "LONG" and bb_pos >= 92.0:
+                        bb_pen = -8
+                    elif dec == "SHORT" and bb_pos <= 8.0:
+                        bb_pen = -8
 
         llm_pen_dict = breakdown.get("risk_penalties") if isinstance(breakdown, dict) and isinstance(breakdown.get("risk_penalties"), dict) else {}
         # Canonical category keys for extraction and recognition (Audit Point 4)
@@ -738,9 +764,15 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                 try: llm_ext = min(llm_ext, -abs(int(float(llm_pen_dict[k]))))
                 except (ValueError, TypeError): pass
 
+        if is_breakout_strategy:
+            # Prevent excessive price extension penalties during genuine breakout surges
+            llm_ext = max(-10, llm_ext)
+            if rsi_pen < -10:
+                rsi_pen = -10
+
         # Intra-category anti-double-counting: take the most severe price extension metric
         cat_price_extension = min(rsi_pen, ema_pen, bb_pen, llm_ext)
-        cat_price_extension = max(-25, cat_price_extension)
+        cat_price_extension = max(-10 if is_breakout_strategy else -25, cat_price_extension)
 
         # Category B: Macro Sentiment (Fear & Greed, euphoria/panic)
         fg_pen = 0

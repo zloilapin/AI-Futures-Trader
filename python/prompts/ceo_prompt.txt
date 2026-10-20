@@ -87,6 +87,13 @@ Risks are evaluated across four orthogonal, non-overlapping categories:
 
 The model MUST NOT assign a zero penalty to an objectively confirmed extreme risk.
 
+BREAKOUT EXCEPTION:
+When "strategy_mode" is "BREAKOUT" or "VOLATILITY_MOMENTUM" with volume spike confirmation:
+- Price breaking through or trading outside the outer Bollinger Band (bb_pos >= 90% or <= 10%) is expected and represents momentum confirmation, NOT an overextension. Do NOT penalize Bollinger Band extremes.
+- Cap "price_extension" risk penalty to at most -5 pts.
+- Do NOT output "WAIT_FOR_PULLBACK" for confirmed breakouts with volume expansion; trade action MUST be "ENTER" to catch impulsive momentum.
+
+
 ============================================================
 EXTREME RSI RULE
 ============================================================

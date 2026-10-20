@@ -147,40 +147,77 @@ class RiskManager(BaseAgent):
         else:
             return 1.25
 
-    def _calculate_drawdown_multiplier(self, streak: list) -> tuple[float, str]:
+    def _calculate_drawdown_multiplier(self, streak: list, daily_drawdown_pct: float = 0.0) -> tuple[float, str]:
         """
-        State Machine Drawdown Recovery:
-        - Consecutive losses:
-            >= 3 losses -> REDUCED_25 (0.25x)
-            == 2 losses -> REDUCED_50 (0.50x)
-        - Recovery transitions from REDUCED_25:
-            * Next is WIN -> RECOVERY_50 (0.50x probation)
-            * If next after probation is LOSS -> drops right back to REDUCED_25 (0.25x)!
-            * If next after probation is WIN -> full recovery to NORMAL (1.00x)!
+        Drawdown Recovery & Sizing Multiplier (Smooth Scale):
+        1. Account daily drawdown percentage:
+           - < 3%: 1.00x (routine intraday noise/normal single stop)
+           - 3% to 5%: 0.75x
+           - 5% to 10%: 0.50x
+           - >= 10%: 0.35x
+        2. Consecutive loss streak state machine:
+           - 0 losses (last was WIN): 1.00x
+           - 1 loss (single routine stop): 0.85x
+           - 2 consecutive losses: 0.60x
+           - >= 3 consecutive losses: 0.40x
+        3. Recovery transitions:
+           - Loss during probation after a 3-loss streak: 0.60x (not 0.25x deadlock)
+           - 1 win after 3 losses: 0.75x probation
+        Effective multiplier is min(pct_mult, streak_mult), clamped to >= 0.35x.
         """
+        # 1. Daily drawdown tier
+        if daily_drawdown_pct < 0.03:
+            dd_pct_mult = 1.00
+            dd_pct_msg = "NORMAL: Low drawdown (<3%)."
+        elif daily_drawdown_pct < 0.05:
+            dd_pct_mult = 0.75
+            dd_pct_msg = "MILD_DRAWDOWN: Daily drawdown 3-5%."
+        elif daily_drawdown_pct < 0.10:
+            dd_pct_mult = 0.50
+            dd_pct_msg = "MODERATE_DRAWDOWN: Daily drawdown 5-10%."
+        else:
+            dd_pct_mult = 0.35
+            dd_pct_msg = "SEVERE_DRAWDOWN: Daily drawdown >=10%."
+
+        # 2. Streak state machine
         if not streak:
-            return 1.0, "NORMAL"
+            streak_mult = 1.00
+            streak_msg = "NORMAL"
+        else:
+            consecutive_losses = 0
+            for res in reversed(streak):
+                if res == "LOSS":
+                    consecutive_losses += 1
+                else:
+                    break
 
-        consecutive_losses = 0
-        for res in reversed(streak):
-            if res == "LOSS":
-                consecutive_losses += 1
+            if consecutive_losses >= 3:
+                streak_mult = 0.40
+                streak_msg = "🚨 RED ALERT: 3+ losses in a row. Risk cut to 40%."
+            elif consecutive_losses == 2:
+                streak_mult = 0.50
+                streak_msg = "DRAWDOWN PROTECTION: 2 losses in a row. Risk cut to 50%."
+            elif consecutive_losses == 1:
+                # Check recovery probation state machine
+                if len(streak) >= 5 and streak[-5:-2] == ["LOSS", "LOSS", "LOSS"] and streak[-2] == "WIN":
+                    streak_mult = 0.60
+                    streak_msg = "PROBATION: Loss during recovery after 3-loss streak. Risk set to 60%."
+                else:
+                    streak_mult = 0.85
+                    streak_msg = "MILD_DRAWDOWN: 1 loss. Sizing at 85%."
             else:
-                break
+                # Last was WIN: check if recovering from 3 losses
+                if len(streak) >= 4 and streak[-4:-1] == ["LOSS", "LOSS", "LOSS"]:
+                    streak_mult = 0.75
+                    streak_msg = "PROBATION RECOVERY: 1 win after 3 losses. Risk kept at 75%."
+                else:
+                    streak_mult = 1.00
+                    streak_msg = "NORMAL"
 
-        if consecutive_losses >= 3:
-            return 0.25, "🚨 RED ALERT: 3+ losses in a row. Risk cut to 25%."
-        elif consecutive_losses == 2:
-            return 0.50, "DRAWDOWN PROTECTION: 2 losses in a row. Risk cut to 50%."
+        final_mult = max(0.35, min(dd_pct_mult, streak_mult))
+        final_msg = f"{streak_msg} | {dd_pct_msg} (Mult: {final_mult:.2f}x)"
+        return final_mult, final_msg
 
-        # Check recovery state machine
-        if len(streak) >= 4:
-            if streak[-1] == "LOSS" and len(streak) >= 5 and streak[-5:-2] == ["LOSS", "LOSS", "LOSS"] and streak[-2] == "WIN":
-                return 0.25, "🚨 FAILED RECOVERY: Loss during probation after 3-loss streak. Risk reset to 25%."
-            elif streak[-1] == "WIN" and streak[-4:-1] == ["LOSS", "LOSS", "LOSS"]:
-                return 0.50, "PROBATION RECOVERY: 1 win after 3 losses. Risk kept at 50%."
-
-        return 1.0, "NORMAL"
 
     def _calculate_kelly_multiplier(
         self,
@@ -836,7 +873,7 @@ class RiskManager(BaseAgent):
 
         # 2. Drawdown Streak Multiplier (Step-Wise Recovery)
         recent_streak = portfolio_data.get("recent_streak", [])
-        dd_mult, dd_msg = self._calculate_drawdown_multiplier(recent_streak)
+        dd_mult, dd_msg = self._calculate_drawdown_multiplier(recent_streak, daily_drawdown_pct)
         if dd_mult < 1.0:
             self.logger.warning(f"[{self.name}] {dd_msg}")
 
@@ -890,11 +927,21 @@ class RiskManager(BaseAgent):
         min_viable_risk = base_risk * 0.35  # Protect at least 35% of base risk to meet exchange minimums
 
         if dynamic_risk_pct < min_viable_risk:
-            msg = (f"Dynamic risk ({dynamic_risk_pct*100:.3f}%) fell below minimum viable risk "
-                   f"({min_viable_risk*100:.3f}%). Cumulative penalties (Signal x{signal_mult:.2f}, "
-                   f"DD x{dd_mult}, Qual x{quality_mult:.2f}, Kelly x{kelly_mult:.2f}) suppress viable trade edge. Vetoing to protect capital.")
-            self.logger.warning(f"[{self.name}] 🚫 PENALTY_SUPPRESSION VETO: {msg}")
-            return self._build_veto_result("PENALTY_SUPPRESSION", msg, trade_action)
+            # If trade is a clean, high-conviction ENTER signal (Cohort A) and not degraded by market friction (spread/volume),
+            # while account daily drawdown is safe (< 3%), clamp to min_viable_risk to prevent artificial deadlocks.
+            if trade_action == "ENTER" and cohort == "A" and market_mult >= 0.85 and daily_drawdown_pct < 0.03:
+                self.logger.info(
+                    f"[{self.name}] 🛡️ Soft floor applied: Dynamic risk ({dynamic_risk_pct*100:.3f}%) clamped to min_viable_risk "
+                    f"({min_viable_risk*100:.3f}%) for high-conviction Cohort A ENTER trade."
+                )
+                dynamic_risk_pct = min_viable_risk
+            else:
+                msg = (f"Dynamic risk ({dynamic_risk_pct*100:.3f}%) fell below minimum viable risk "
+                       f"({min_viable_risk*100:.3f}%). Cumulative penalties (Signal x{signal_mult:.2f}, "
+                       f"DD x{dd_mult}, Qual x{quality_mult:.2f}, Kelly x{kelly_mult:.2f}) suppress viable trade edge. Vetoing to protect capital.")
+                self.logger.warning(f"[{self.name}] 🚫 PENALTY_SUPPRESSION VETO: {msg}")
+                return self._build_veto_result("PENALTY_SUPPRESSION", msg, trade_action)
+
 
         dynamic_risk_pct = min(dynamic_risk_pct, risk_cap)
         
