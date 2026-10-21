@@ -142,3 +142,47 @@ def test_active_positions_deduplication_on_load(tmp_path):
         assert len(loaded) == 1
         assert "SOL-USD" in loaded
         assert "SOL" not in loaded
+
+@pytest.mark.asyncio
+async def test_update_stop_loss_falls_back_to_software_on_min_size():
+    """Verifies that update_stop_loss cleanly transitions to SOFTWARE_ONLY when position notional is below $100 min_size."""
+    service = NadoTradingService.__new__(NadoTradingService)
+    service.is_connected = True
+    service.product_map = {"XRP": 10, "XRP-USD": 10}
+    service.default_subaccount_id = "0xsub"
+    service.client = MagicMock()
+    service._get_market_parameters = MagicMock(return_value={
+        "price_increment_x18": int(0.0001 * 10**18),
+        "size_increment_x18": int(5.0 * 10**18),
+    })
+    service._save_positions = MagicMock()
+    service._cancel_trigger_digests = AsyncMock(return_value=True)
+
+    # 45 XRP at ~1.35 USD is $60.75 notional (< $100 min_size)
+    service.active_positions = {
+        "XRP-USD": {
+            "symbol": "XRP-USD",
+            "direction": "LONG",
+            "entry_price": 1.336,
+            "sl_price": 1.346,
+            "contracts": 45.0,
+            "sl_digest": "0xold_sl_digest",
+            "protection_state": "EXCHANGE_PROTECTED",
+            "sl_protection_mode": "EXCHANGE_PROTECTED",
+            "product_id": 10
+        }
+    }
+
+    res = await service.update_stop_loss(
+        symbol="XRP-USD",
+        new_sl_price=1.3495,
+        new_protection_state="BREAK_EVEN"
+    )
+
+    assert res is True
+    pos = service.active_positions["XRP-USD"]
+    assert pos["sl_price"] == 1.3495
+    assert pos["sl_protection_mode"] == "SOFTWARE_ONLY"
+    assert pos["protection_state"] == "SOFTWARE_BREAK_EVEN"
+    assert pos["sl_digest"] is None
+    service._cancel_trigger_digests.assert_awaited_once_with(10, ["0xold_sl_digest"], sender=None)

@@ -4567,6 +4567,24 @@ class NadoTradingService(BaseTradingService):
             sl_mode = "ceil" if direction == "SHORT" else "floor"
             exec_price_x18 = to_x18_aligned(exec_price, price_increment, mode=sl_mode)
             trigger_price_x18 = to_x18_aligned(new_sl_price, price_increment, mode=sl_mode)
+
+            # Check if order notional meets Nado DEX minimum trigger size ($100 USD)
+            trigger_notional_usd = amount_base * float(exec_price)
+            if trigger_notional_usd < 100.0:
+                logger.info(
+                    f"[NadoTradingService] ℹ️ Объем SL для {symbol} (${trigger_notional_usd:.2f}) ниже биржевого лимита Nado ($100). "
+                    f"Переход в SOFTWARE_ONLY защиту на уровне {new_sl_price:.4f} (Fast Monitor 5s + Sentinel)."
+                )
+                if sl_digest:
+                    await self._cancel_trigger_digests(product_id, [sl_digest], sender=sender)
+                    pos["sl_digest"] = None
+                pos["sl_price"] = new_sl_price
+                pos["sl_protection_mode"] = "SOFTWARE_ONLY"
+                pos["protection_state"] = "SOFTWARE_BREAK_EVEN" if new_protection_state == "BREAK_EVEN" else (new_protection_state or "SOFTWARE_PROTECTED")
+                pos["unverified_triggers"] = False
+                pos["sl_update_failed"] = False
+                self._save_positions()
+                return True
             
             max_trigger_retries = 3
             new_digest = None
@@ -4591,6 +4609,22 @@ class NadoTradingService(BaseTradingService):
                         raise ValueError("Missing digest in Nado response")
                 except Exception as e:
                     last_err = e
+                    err_msg = str(e)
+                    if "2094" in err_msg or "too small" in err_msg:
+                        logger.info(
+                            f"[NadoTradingService] ℹ️ Биржа отклонила SL для {symbol} из-за объема (${trigger_notional_usd:.2f} < $100 лимита биржи: error 2094). "
+                            f"Снятие старого биржевого триггера и переход в SOFTWARE_ONLY на уровне {new_sl_price:.4f}."
+                        )
+                        if sl_digest:
+                            await self._cancel_trigger_digests(product_id, [sl_digest], sender=sender)
+                            pos["sl_digest"] = None
+                        pos["sl_price"] = new_sl_price
+                        pos["sl_protection_mode"] = "SOFTWARE_ONLY"
+                        pos["protection_state"] = "SOFTWARE_BREAK_EVEN" if new_protection_state == "BREAK_EVEN" else (new_protection_state or "SOFTWARE_PROTECTED")
+                        pos["unverified_triggers"] = False
+                        pos["sl_update_failed"] = False
+                        self._save_positions()
+                        return True
                     logger.warning(f"[NadoTradingService] ⚠️ On-chain SL placement attempt {attempt+1}/{max_trigger_retries} failed for {symbol}: {e}")
                     if attempt < max_trigger_retries - 1:
                         await asyncio.sleep(0.5)
