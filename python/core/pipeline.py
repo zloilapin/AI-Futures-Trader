@@ -318,6 +318,8 @@ class TradingPipeline:
                 selected_assets = [pri_sym] + selected_assets
                 print(f"🎯 [Pullback Priority] {pri_sym} добавлен первым в очередь анализа (PULLBACK_RETEST).")
 
+        self._last_universe_symbols = list(selected_assets)
+
         # ИТЕРАЦИЯ ПО ВСЕМ АКТИВАМ
         for symbol in selected_assets:
             # QW #5: Check if we've reached the maximum number of concurrent positions
@@ -1336,8 +1338,11 @@ class TradingPipeline:
 
         now_ts = time.time()
         core_symbols = ["BTC-USD", "ETH-USD", "SOL-USD"]
+        # Expand FastRadar to top selected universe assets (0 LLM token cost)
+        universe_symbols = [s for s in getattr(self, "_last_universe_symbols", []) if isinstance(s, str)]
+        radar_symbols = list(dict.fromkeys(core_symbols + universe_symbols[:5]))
 
-        for symbol in core_symbols:
+        for symbol in radar_symbols:
             if now_ts < self._fast_radar_cooldowns.get(symbol, 0):
                 continue
 
@@ -1559,20 +1564,23 @@ class TradingPipeline:
         """
         indicators = market_data.get("indicators", {}) if isinstance(market_data, dict) else {}
         ema_20 = float(indicators.get("ema_20") or 0.0)
+        atr_14 = float(indicators.get("atr_14") or 0.0)
+        min_pullback_dist = max(0.5 * atr_14, current_price * 0.003) if atr_14 > 0 else (current_price * 0.008)
+        inval_dist = 1.2 * atr_14 if atr_14 > 0 else (current_price * 0.015)
 
-        # Pullback target calculation
+        # Dynamic pullback target calculation tied to asset volatility (ATR)
         if decision == "LONG":
-            if ema_20 > 0 and ema_20 < current_price:
+            if ema_20 > 0 and ema_20 < (current_price - min_pullback_dist):
                 target_pullback_price = ema_20
             else:
-                target_pullback_price = round(current_price * 0.992, 4)  # ~0.8% pullback
-            invalidation_price = round(target_pullback_price * 0.985, 4)  # 1.5% below target breaks setup
+                target_pullback_price = round(current_price - min_pullback_dist, 4)
+            invalidation_price = round(target_pullback_price - inval_dist, 4)
         else:  # SHORT
-            if ema_20 > 0 and ema_20 > current_price:
+            if ema_20 > 0 and ema_20 > (current_price + min_pullback_dist):
                 target_pullback_price = ema_20
             else:
-                target_pullback_price = round(current_price * 1.008, 4)  # ~0.8% bounce/pullback
-            invalidation_price = round(target_pullback_price * 1.015, 4)  # 1.5% above target breaks setup
+                target_pullback_price = round(current_price + min_pullback_dist, 4)
+            invalidation_price = round(target_pullback_price + inval_dist, 4)
 
         now_ts = time.time()
         self._pullback_watchlist[symbol] = {

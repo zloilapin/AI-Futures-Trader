@@ -23,6 +23,33 @@ class PartialCloseResult:
     fee_usd: float = 0.0
     is_estimated_fee: bool = True
 
+from decimal import Decimal
+
+def to_x18_aligned(val: Union[float, int, str, Decimal], increment_x18: int = 0, mode: str = "floor") -> int:
+    """
+    Safely converts numeric value to 18-decimal fixed-point integer (x18)
+    using Decimal to prevent IEEE-754 floating point precision loss and truncation artifacts.
+    Supports directional alignment ('floor' or 'ceil') with step increment.
+    """
+    if val is None:
+        return 0
+    try:
+        if isinstance(val, (float, int)):
+            if not math.isfinite(val):
+                return 0
+            val_str = str(round(float(val), 8))
+        else:
+            val_str = str(val).strip()
+        raw_x18 = int(Decimal(val_str) * Decimal(10**18))
+    except Exception:
+        return 0
+
+    if increment_x18 <= 0:
+        return raw_x18
+    if mode == "ceil":
+        return ((raw_x18 + increment_x18 - 1) // increment_x18) * increment_x18
+    return (raw_x18 // increment_x18) * increment_x18
+
 class NadoTradingService(BaseTradingService):
     """
     Adapter for executing trades on Nado DEX (Ink L2).
@@ -456,11 +483,12 @@ class NadoTradingService(BaseTradingService):
         clean_sym = symbol.replace('/', '-').strip().upper()
         base_sym = clean_sym.split('-')[0]
         canonical_sym = f"{base_sym}-USD"
-        
+        symbol = canonical_sym  # Canonicalize symbol to prevent dual-key memory/disk desync
+
         # Guard: Strict duplicate position prevention
-        if any(k in self.active_positions for k in [canonical_sym, base_sym, clean_sym, symbol]):
+        if any(k in self.active_positions for k in [canonical_sym, base_sym, clean_sym]):
             logger.warning(
-                f"[NadoTradingService] ⚠️ Позиция по {symbol} ({canonical_sym}) уже открыта в active_positions! "
+                f"[NadoTradingService] ⚠️ Позиция по {symbol} уже открыта в active_positions! "
                 f"Блокировка дублирующего ордера для защиты капитала."
             )
             self.last_execution_status = "DUPLICATE_POSITION_BLOCKED"
@@ -870,14 +898,19 @@ class NadoTradingService(BaseTradingService):
                 print(f"❌ [NadoTradingService] Ошибка размещения ордера на бирже: {err_str}")
                 if "2070" in err_str and "maximum open interest" in err_str:
                     logger.warning(f"[NadoTradingService] ⚠️ Market OI limit reached for {symbol} (Testnet limitation). Order rejected.")
+                    self.last_execution_status = "OI_LIMIT_REACHED"
                 else:
                     logger.error(f"[NadoTradingService] ❌ Order placement failed: {e}")
+                    self.last_execution_status = "REJECTED_BY_EXCHANGE"
+                self.last_execution_details = {"reason": err_str, "symbol": symbol}
                 return False
                 
             digest = res.data.digest if res.data else None
             
             if not digest:
                 logger.error(f"[NadoTradingService] ❌ Order placement failed, no digest returned.")
+                self.last_execution_status = "REJECTED_BY_EXCHANGE"
+                self.last_execution_details = {"reason": "NO_DIGEST_RETURNED", "symbol": symbol}
                 return False
                 
             logger.info(f"[NadoTradingService] ✅ Order Accepted by Sequencer. Digest: {digest}")
@@ -1014,8 +1047,6 @@ class NadoTradingService(BaseTradingService):
                 "cohort": cohort or "UNKNOWN",
                 "applied_multipliers": applied_multipliers or {}
             }
-            if canonical_sym != symbol:
-                self.active_positions[canonical_sym] = self.active_positions[symbol]
             self._save_positions()
 
             # --- Guaranteed Risk Parameters Initialized Prior to Any Execution Branches (P1-1) ---
@@ -1173,13 +1204,10 @@ class NadoTradingService(BaseTradingService):
             if sl_price > 0:
                 exec_price = sl_price * 0.9 if direction.upper() == "LONG" else sl_price * 1.1
                 
-                # Convert to integer x18 representation FIRST to avoid float math imprecision
-                exec_price_x18 = int(exec_price * 10**18)
-                trigger_price_x18 = int(sl_price * 10**18)
-                
-                # Round perfectly using integer arithmetic
-                exec_price_x18 = (exec_price_x18 // price_increment) * price_increment
-                trigger_price_x18 = (trigger_price_x18 // price_increment) * price_increment
+                # Direction-aware safe Decimal x18 conversion to avoid IEEE-754 precision loss
+                sl_mode = "ceil" if direction.upper() == "SHORT" else "floor"
+                exec_price_x18 = to_x18_aligned(exec_price, price_increment, mode=sl_mode)
+                trigger_price_x18 = to_x18_aligned(sl_price, price_increment, mode=sl_mode)
                 
                 try:
                     sl_res = await asyncio.to_thread(
@@ -1211,11 +1239,9 @@ class NadoTradingService(BaseTradingService):
             if tp_price > 0:
                 exec_price = tp_price * 0.9 if direction.upper() == "LONG" else tp_price * 1.1
                 
-                exec_price_x18 = int(exec_price * 10**18)
-                trigger_price_x18 = int(tp_price * 10**18)
-                
-                exec_price_x18 = (exec_price_x18 // price_increment) * price_increment
-                trigger_price_x18 = (trigger_price_x18 // price_increment) * price_increment
+                tp_mode = "floor" if direction.upper() == "SHORT" else "ceil"
+                exec_price_x18 = to_x18_aligned(exec_price, price_increment, mode=tp_mode)
+                trigger_price_x18 = to_x18_aligned(tp_price, price_increment, mode=tp_mode)
                 
                 tp_digest = None
                 try:
@@ -1289,8 +1315,6 @@ class NadoTradingService(BaseTradingService):
                 "native_tp_placed": has_native_tp,
                 "native_triggers_placed": bool(has_native_sl and has_native_tp)
             })
-            if canonical_sym != symbol and canonical_sym in self.active_positions:
-                self.active_positions[canonical_sym] = self.active_positions[symbol]
             if tp_price > 0:
                 try:
                     self.initialize_partial_tp_plan(symbol)
@@ -1469,12 +1493,21 @@ class NadoTradingService(BaseTradingService):
             logger.error(f"[NadoTradingService] ⚠️ Failed to save active positions to disk: {e}")
 
     def _load_positions(self) -> dict:
-        """Loads persisted active positions from disk."""
+        """Loads persisted active positions from disk, ensuring deduplication to canonical symbols."""
         try:
             from core.state_store import StateStore
             state_file = "data/memory/active_positions.json"
             data = StateStore.load(state_file)
-            return data if isinstance(data, dict) else {}
+            if not isinstance(data, dict):
+                return {}
+            # Deduplicate dual-keys (e.g. SOL and SOL-USD) into single canonical instances
+            clean_positions = {}
+            for k, v in data.items():
+                if isinstance(v, dict):
+                    canon_k = f"{k.replace('/', '-').split('-')[0].upper()}-USD"
+                    if canon_k not in clean_positions or k == canon_k:
+                        clean_positions[canon_k] = v
+            return clean_positions
         except Exception as e:
             logger.error(f"[NadoTradingService] ⚠️ Failed to load active positions from disk: {e}")
             return {}
@@ -1951,6 +1984,7 @@ class NadoTradingService(BaseTradingService):
         max_timestamp: Optional[float] = None,
         excluded_digests: Optional[Set[str]] = None,
         target_digest: Optional[str] = None,
+        open_digest: Optional[str] = None,
         limit: int = 50,
         allow_missing_timestamp: bool = True
     ) -> Dict[str, Any]:
@@ -1965,6 +1999,7 @@ class NadoTradingService(BaseTradingService):
         4. Unique non-empty digest requirement on all matched fills to prevent unverified replay.
         5. Fee verification: fallback estimated fees flag is_exact=False.
         6. Ambiguity rejection: if multiple clusters match, refuses to guess and leaves trade pending.
+        7. Strict open_digest boundary: stops scanning as soon as the position's opening order is hit.
         """
         default_res = {
             "is_exact": False,
@@ -2010,11 +2045,19 @@ class NadoTradingService(BaseTradingService):
 
             # 1. Collect and validate candidate closing fills
             candidates = []
+            target_open_dig = str(open_digest).strip().lower() if open_digest else None
+
             for order in hist.orders:
                 raw_dig = getattr(order, "digest", "") or ""
                 dig_str = str(raw_dig).strip()
                 dig_lower = dig_str.lower()
                 has_valid_digest = bool(dig_str and dig_lower != "none")
+
+                # Boundary Guard: Indexer orders are reverse-chronological.
+                # Once we encounter the position's open_digest, stop scanning immediately!
+                if target_open_dig and has_valid_digest and dig_lower == target_open_dig:
+                    logger.debug(f"[NadoTradingService] 🛑 Reached open_digest ({open_digest}) in historical scan. Stopping.")
+                    break
 
                 # Skip previously processed or explicitly excluded digests (e.g. TP tiers)
                 if has_valid_digest and dig_lower in skip_digests:
@@ -2312,6 +2355,7 @@ class NadoTradingService(BaseTradingService):
                 excluded = set(pending.get("excluded_digests", []))
                 excluded.update(getattr(self, "processed_fill_digests", set()))
 
+                open_d = pending.get("open_digest") or pending.get("order_digest") or pending.get("digest")
                 recon = await self._reconcile_closing_fills_from_history(
                     subaccount=subaccount,
                     product_id=product_id,
@@ -2322,6 +2366,7 @@ class NadoTradingService(BaseTradingService):
                     min_timestamp=min_ts,
                     max_timestamp=max_ts,
                     excluded_digests=excluded,
+                    open_digest=open_d,
                     allow_missing_timestamp=True
                 )
 
@@ -2606,6 +2651,7 @@ class NadoTradingService(BaseTradingService):
                             expected_contracts=expected_contracts,
                             close_timestamp=close_time,
                             excluded_digests=excluded_digests,
+                            open_digest=open_d,
                             allow_missing_timestamp=True
                         )
                         if recon.get("is_exact"):
@@ -2771,6 +2817,7 @@ class NadoTradingService(BaseTradingService):
                             min_timestamp=min_ts,
                             max_timestamp=time.time() + 60.0,
                             excluded_digests=excluded_digests,
+                            open_digest=open_d,
                             allow_missing_timestamp=True
                         )
 
@@ -2890,10 +2937,8 @@ class NadoTradingService(BaseTradingService):
                 error=f"Requested close size {contracts_to_close} is below market min_size {min_size}."
             )
 
-        # Calculate base amount in x18
-        amount_x18 = int(contracts_to_close * 10**18)
-        # Floor strictly down to size_increment
-        amount_x18 = (amount_x18 // size_increment) * size_increment
+        # Calculate base amount in x18 safely with Decimal to prevent precision loss / dust
+        amount_x18 = to_x18_aligned(contracts_to_close, size_increment, mode="floor")
         if amount_x18 <= 0:
             return PartialCloseResult(success=False, error="Order amount is zero after size_increment alignment.")
 
@@ -2903,15 +2948,13 @@ class NadoTradingService(BaseTradingService):
         if direction == "LONG":
             order_amount_x18 = -amount_x18
             limit_price = current_price * (1.0 - max_slippage_pct)
+            price_x18 = to_x18_aligned(limit_price, price_increment, mode="floor")
         elif direction == "SHORT":
             order_amount_x18 = amount_x18
             limit_price = current_price * (1.0 + max_slippage_pct)
+            price_x18 = to_x18_aligned(limit_price, price_increment, mode="ceil")
         else:
             return PartialCloseResult(success=False, error=f"Invalid position direction: {direction}")
-
-        # Align limit price to price_increment
-        price_x18 = int(limit_price * 10**18)
-        price_x18 = (price_x18 // price_increment) * price_increment
 
         # Build appendix with reduce_only=True
         try:
@@ -3245,7 +3288,7 @@ class NadoTradingService(BaseTradingService):
         
         # Update trigger amount for remaining contracts
         direction_str = str(pos.get("direction", "LONG")).upper()
-        rem_x18 = int(plan.remaining_contracts * 10**18)
+        rem_x18 = to_x18_aligned(plan.remaining_contracts)
         pos["trigger_amount_x18"] = str(-rem_x18 if direction_str == "LONG" else rem_x18)
         
         # Accumulate slice realized PnL
@@ -4513,7 +4556,7 @@ class NadoTradingService(BaseTradingService):
             else:
                 amount_base = abs(float(pos.get("trigger_amount_x18", 0))) / 1e18
 
-            amount_x18_val = int(amount_base * 10**18)
+            amount_x18_val = to_x18_aligned(amount_base)
             trigger_amount_str = str(-amount_x18_val if direction == "LONG" else amount_x18_val)
             pos["trigger_amount_x18"] = trigger_amount_str
                 
@@ -4521,11 +4564,9 @@ class NadoTradingService(BaseTradingService):
             # This ensures zero gap of vulnerability on the exchange!
             exec_price = new_sl_price * 0.9 if direction == "LONG" else new_sl_price * 1.1
             
-            exec_price_x18 = int(exec_price * 10**18)
-            trigger_price_x18 = int(new_sl_price * 10**18)
-            
-            exec_price_x18 = (exec_price_x18 // price_increment) * price_increment
-            trigger_price_x18 = (trigger_price_x18 // price_increment) * price_increment
+            sl_mode = "ceil" if direction == "SHORT" else "floor"
+            exec_price_x18 = to_x18_aligned(exec_price, price_increment, mode=sl_mode)
+            trigger_price_x18 = to_x18_aligned(new_sl_price, price_increment, mode=sl_mode)
             
             max_trigger_retries = 3
             new_digest = None

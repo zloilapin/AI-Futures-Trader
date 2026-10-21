@@ -15,6 +15,7 @@ python/data/
 *.log
 bot_debug_log.txt
 dump_trades.py
+tests/scratch_logs/
 
 # =========================
 # Дампы, чаты и большие экспорты

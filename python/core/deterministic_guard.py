@@ -194,20 +194,30 @@ class DeterministicGuard:
 
         # 4. Funding Rate Gate (Deterministic derivative protection)
         if is_actionable and market_data:
-            funding_rate = float(((market_data.get("derivatives_data") or {}).get("funding_rate")) or 0.0)
-            if decision == "LONG" and funding_rate > 0.0005: # > 0.05%
+            derivatives = market_data.get("derivatives_data") or {}
+            funding_rate = float(derivatives.get("funding_rate_hourly") or derivatives.get("funding_rate") or 0.0)
+            
+            # Contrarian funding bonus: when market crowd pays our trade direction
+            if (decision == "LONG" and funding_rate < -0.00005) or (decision == "SHORT" and funding_rate > 0.00005):
+                conviction = min(100, conviction + 5)
+                if logger:
+                    logger.info(f"[System_Core] 💎 Contrarian funding advantage detected ({funding_rate*100:+.4f}%/h). Conviction boosted +5 -> {conviction}%.")
+
+            # Hard funding veto: reject trades paying exorbitant fees (> 0.02%/hr = ~0.48%/day)
+            funding_veto_threshold = 0.0002
+            if decision == "LONG" and funding_rate > funding_veto_threshold:
                 is_actionable = False
                 guard_status = "BLOCKED"
                 rejection_tag = "FUNDING_VETO"
-                guard_reason = f"Фандинг гейт: Запрет LONG при экстремально положительном фандинге ({funding_rate*100:.3f}%)"
+                guard_reason = f"Фандинг гейт: Запрет LONG при экстремально высоком фандинге ({funding_rate*100:.3f}%/ч). Переплата съест риск."
                 print(f"⏸️ Пропуск {symbol}. {guard_reason}")
                 if logger:
                     logger.info(f"[System_Core] {guard_reason}")
-            elif decision == "SHORT" and funding_rate < -0.0005: # < -0.05%
+            elif decision == "SHORT" and funding_rate < -funding_veto_threshold:
                 is_actionable = False
                 guard_status = "BLOCKED"
                 rejection_tag = "FUNDING_VETO"
-                guard_reason = f"Фандинг гейт: Запрет SHORT при экстремально отрицательном фандинге ({funding_rate*100:.3f}%)"
+                guard_reason = f"Фандинг гейт: Запрет SHORT при экстремально отрицательном фандинге ({funding_rate*100:.3f}%/ч). Переплата съест риск."
                 print(f"⏸️ Пропуск {symbol}. {guard_reason}")
                 if logger:
                     logger.info(f"[System_Core] {guard_reason}")
@@ -272,6 +282,29 @@ class DeterministicGuard:
                         print(f"⏸️ Пропуск {symbol}. {guard_reason}")
                     except UnicodeEncodeError:
                         pass
+                    if logger:
+                        logger.info(f"[System_Core] {guard_reason}")
+
+        # 5.2. Climatic Breakout Protection: Avoid buying the absolute tip of a wick when RSI is parabolic
+        if is_actionable and market_data and strategy_mode == "BREAKOUT":
+            indicators = market_data.get("indicators") or {}
+            raw_rsi = indicators.get("rsi_14")
+            rsi = float(raw_rsi) if raw_rsi is not None else None
+            if rsi is not None:
+                if decision == "LONG" and rsi > 80.0:
+                    trade_action = "WAIT_FOR_PULLBACK"
+                    is_actionable = False
+                    guard_status = "PULLBACK_WATCHLIST"
+                    rejection_tag = "WAIT_FOR_PULLBACK"
+                    guard_reason = f"Климатический пробой: RSI={rsi:.1f} > 80. Покупка вершины свечи запрещена. Переведено в WAIT_FOR_PULLBACK для входа на ретесте уровня."
+                    if logger:
+                        logger.info(f"[System_Core] {guard_reason}")
+                elif decision == "SHORT" and rsi < 20.0:
+                    trade_action = "WAIT_FOR_PULLBACK"
+                    is_actionable = False
+                    guard_status = "PULLBACK_WATCHLIST"
+                    rejection_tag = "WAIT_FOR_PULLBACK"
+                    guard_reason = f"Климатический пробой: RSI={rsi:.1f} < 20. Продажа дна паники запрещена. Переведено в WAIT_FOR_PULLBACK для входа на ретесте уровня."
                     if logger:
                         logger.info(f"[System_Core] {guard_reason}")
 
