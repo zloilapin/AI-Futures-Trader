@@ -2575,7 +2575,7 @@ class NadoTradingService(BaseTradingService):
                         else:
                             return False, 0.0
                     else:
-                        logger.warning(f"[NadoTradingService] ⚠️ bypass_check=True, but failed to fetch positions from Indexer: {fetch_err}. PnL will be 0.")
+                        logger.info(f"[NadoTradingService] ℹ️ bypass_check=True: позиция {symbol} не найдена в активных ордерах Indexer ({fetch_err}). Сверка PnL будет выполнена по истории сделок...")
                         positions = []
 
                 target_pos = next((p for p in positions if p["symbol"].split('-')[0].upper() == base_symbol), None)
@@ -2589,7 +2589,7 @@ class NadoTradingService(BaseTradingService):
                         else:
                             return False, 0.0
                     else:
-                        logger.warning(f"[NadoTradingService] ⚠️ bypass_check=True, but position {symbol} not found in Indexer. PnL will be 0.")
+                        logger.info(f"[NadoTradingService] ℹ️ bypass_check=True: позиция {symbol} уже закрыта на бирже. Точный PnL вычисляется через историю Indexer...")
                             
                 # Fire close_position via SDK
                 try:
