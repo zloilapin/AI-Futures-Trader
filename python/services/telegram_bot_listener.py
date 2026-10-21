@@ -366,15 +366,17 @@ class TelegramBotListener:
                             elif "message" in result:
                                     message = result.get("message", {})
                                     text = message.get("text", "")
+                                    from_user = message.get("from", {})
                                     sender_chat_id = str(message.get("chat", {}).get("id", ""))
+                                    user_name = f"{from_user.get('first_name', '')} {from_user.get('last_name', '')}".strip() or "Аноним"
+                                    username_str = f"@{from_user.get('username')}" if from_user.get('username') else "без @username"
                                     
                                     if text.startswith("/"):
-                                        allowed_str = ", ".join(self.allowed_chat_ids) if self.allowed_chat_ids else str(self.chat_id)
-                                        print(f"📨 [TelegramListener] Входящая команда: '{text}' от chat_id={sender_chat_id} (разрешенные: {allowed_str})")
                                         if sender_chat_id in self.allowed_chat_ids or sender_chat_id == str(self.chat_id):
+                                            print(f"📨 [TelegramListener] Команда '{text}' от авторизованного пользователя: {user_name} ({username_str}, chat_id={sender_chat_id})")
                                             await self.handle_command(text, sender_chat_id=sender_chat_id)
                                         else:
-                                            print(f"⚠️ [TelegramListener] Команда '{text}' от ЧУЖОГО чата {sender_chat_id}, игнорируем.")
+                                            print(f"⚠️ [TelegramListener] Команда '{text}' от ЧУЖОГО пользователя: {user_name} ({username_str}, chat_id={sender_chat_id}), игнорируем.")
                     else:
                         error_body = await resp.text()
                         print(f"❌ [TelegramListener] Ошибка polling (HTTP {resp.status}): {error_body[:300]}")
