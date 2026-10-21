@@ -4,25 +4,30 @@
 .env
 *.pem
 *.key
-# Никаких приватных ключей кошельков или сид-фраз в репозитории!
+.agents/plugins/project-mcps/mcp_config.json
 
 # =========================
-# Память и Логи бота
+# Память, данные и состояние бота
 # =========================
 logs/
-data/memory/
-python/data/memory/cycle_*.json
-python/data/memory/active_positions.json
-python/data/memory/nado_state.json
-python/data/memory/diagnostics.json
-python/data/memory/lessons.json
-python/data/memory/pending_reconciliations.json
-python/data/memory/processed_fills.json
-python/data/memory/trade_journal.json
-python/data/memory/*.jsonl
+data/
+python/data/
 *.log
 bot_debug_log.txt
 dump_trades.py
+
+# =========================
+# Дампы, чаты и большие экспорты
+# =========================
+chat_data.json
+chat_text.txt
+extracted_chat.txt
+all_logs.md
+python/all_logs.md
+FULL_CODEBASE_FOR_GEMINI.md
+CORE_CODEBASE_FOR_GEMINI.md
+AI-Futures-Trader-for-Gemini/
+AI-Futures-Trader-for-Gemini.zip
 
 # =========================
 # Python окружение
@@ -64,6 +69,5 @@ env/
 # =========================
 .DS_Store
 Thumbs.db
-data/positions.json
 scratch/
 archive/

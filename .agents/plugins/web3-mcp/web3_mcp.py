@@ -7,7 +7,7 @@ from web3 import Web3
 mcp = MCPServer("Ink-Web3-Explorer")
 
 RPC_URL = "https://rpc-gel-sepolia.inkonchain.com"
-w3 = Web3(Web3.HTTPProvider(RPC_URL))
+w3 = Web3(Web3.HTTPProvider(RPC_URL, request_kwargs={"timeout": 10}))
 
 @mcp.tool()
 def get_transaction_receipt(tx_hash: str) -> str:
