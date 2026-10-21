@@ -10,7 +10,10 @@ class TelegramBotListener:
     """
     def __init__(self, trading_service, trigger_scan_callback: Optional[Callable[[], Awaitable[None]]] = None):
         self.bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-        self.chat_id = os.getenv("TELEGRAM_CHAT_ID")
+        raw_chat_id = str(os.getenv("TELEGRAM_CHAT_ID", "") or "")
+        self.allowed_chat_ids = [cid.strip() for cid in raw_chat_id.replace(";", ",").split(",") if cid.strip()]
+        self.chat_id = self.allowed_chat_ids[0] if self.allowed_chat_ids else ""
+        self._current_sender_chat_id = None
         self.trading_service = trading_service
         self.trigger_scan_callback = trigger_scan_callback
         self.offset = 0
@@ -20,13 +23,14 @@ class TelegramBotListener:
         self._background_tasks = set()  # Prevent GC of background tasks
         self.is_scanning = False
 
-    async def _send_reply(self, text: str, reply_markup: dict = None):
-        if not self.send_url or not self.chat_id:
-            print(f"⚠️ [TelegramListener] _send_reply: send_url или chat_id не задан! send_url={bool(self.send_url)}, chat_id={bool(self.chat_id)}")
+    async def _send_reply(self, text: str, reply_markup: dict = None, target_chat_id: str = None):
+        dest_chat_id = target_chat_id or getattr(self, "_current_sender_chat_id", None) or self.chat_id
+        if not self.send_url or not dest_chat_id:
+            print(f"⚠️ [TelegramListener] _send_reply: send_url или chat_id не задан! send_url={bool(self.send_url)}, chat_id={bool(dest_chat_id)}")
             return
         safe_text = text[:3980] + "\n...[TRUNCATED]" if text and len(text) > 4000 else (text or "")
         payload = {
-            "chat_id": self.chat_id,
+            "chat_id": dest_chat_id,
             "text": safe_text,
             "parse_mode": "Markdown",
             "disable_web_page_preview": True
@@ -38,7 +42,7 @@ class TelegramBotListener:
             session = await SessionManager.get()
             async with session.post(self.send_url, json=payload) as resp:
                 if resp.status == 200:
-                    print(f"✅ [TelegramListener] Ответ отправлен в Telegram (Markdown).")
+                    print(f"✅ [TelegramListener] Ответ отправлен в Telegram (chat_id={dest_chat_id}).")
                 else:
                     error_text = await resp.text()
                     print(f"⚠️ [TelegramListener] Markdown ответ не прошёл (HTTP {resp.status}): {error_text[:200]}")
@@ -54,9 +58,13 @@ class TelegramBotListener:
             print(f"❌ [TelegramListener] Ошибка отправки ответа: {e}")
 
     async def handle_command(self, text: str, sender_chat_id: str = None):
-        if sender_chat_id and str(sender_chat_id) != str(self.chat_id):
-            print(f"⛔ [TelegramListener] Доступ запрещен для chat_id={sender_chat_id}")
-            return
+        if sender_chat_id:
+            if sender_chat_id not in self.allowed_chat_ids and str(sender_chat_id) != str(self.chat_id):
+                print(f"⛔ [TelegramListener] Доступ запрещен для chat_id={sender_chat_id}")
+                return
+            self._current_sender_chat_id = sender_chat_id
+        else:
+            self._current_sender_chat_id = self.chat_id
         if not text or not str(text).strip():
             return
         parts = text.strip().split()
@@ -350,7 +358,7 @@ class TelegramBotListener:
                                 cb_id = callback_query.get("id")
                                 cb_chat_id = str(callback_query.get("message", {}).get("chat", {}).get("id", ""))
                                 
-                                if cb_chat_id == str(self.chat_id):
+                                if cb_chat_id in self.allowed_chat_ids or cb_chat_id == str(self.chat_id):
                                     await self.handle_callback(cb_id, cb_data, cb_chat_id)
                                 else:
                                     print(f"⚠️ [TelegramListener] Кнопка от чужого чата {cb_chat_id}")
@@ -361,9 +369,10 @@ class TelegramBotListener:
                                     sender_chat_id = str(message.get("chat", {}).get("id", ""))
                                     
                                     if text.startswith("/"):
-                                        print(f"📨 [TelegramListener] Входящая команда: '{text}' от chat_id={sender_chat_id} (ожидается: {self.chat_id})")
-                                        if sender_chat_id == str(self.chat_id):
-                                            await self.handle_command(text)
+                                        allowed_str = ", ".join(self.allowed_chat_ids) if self.allowed_chat_ids else str(self.chat_id)
+                                        print(f"📨 [TelegramListener] Входящая команда: '{text}' от chat_id={sender_chat_id} (разрешенные: {allowed_str})")
+                                        if sender_chat_id in self.allowed_chat_ids or sender_chat_id == str(self.chat_id):
+                                            await self.handle_command(text, sender_chat_id=sender_chat_id)
                                         else:
                                             print(f"⚠️ [TelegramListener] Команда '{text}' от ЧУЖОГО чата {sender_chat_id}, игнорируем.")
                     else:
