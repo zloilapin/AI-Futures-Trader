@@ -17,6 +17,7 @@ import json
 import time
 import tempfile
 from typing import Dict, Any, Optional, List, Tuple
+from datetime import datetime, timezone
 from eth_account import Account
 from eth_account.messages import encode_structured_data
 
@@ -27,6 +28,40 @@ from tools.nado_link_signer_helper import (
     MAINNET_CHAIN_ID,
     MAINNET_ENDPOINT
 )
+
+# Individual risk profile presets per production multi-user copy-trading requirements
+RISK_PROFILES = {
+    "conservative": {
+        "risk_mode": "conservative",
+        "risk_per_trade_pct": 0.9,
+        "max_slots": 1,
+        "max_leverage": 5.0,
+        "tp_r_target": 1.8,
+        "be_trigger_r": 0.60,
+        "trail_activation_r": 1.00,
+        "only_high_conviction": True,
+    },
+    "balanced": {
+        "risk_mode": "balanced",
+        "risk_per_trade_pct": 1.6,
+        "max_slots": 2,
+        "max_leverage": 8.0,
+        "tp_r_target": 3.0,
+        "be_trigger_r": 0.75,
+        "trail_activation_r": 1.35,
+        "only_high_conviction": False,
+    },
+    "aggressive": {
+        "risk_mode": "aggressive",
+        "risk_per_trade_pct": 2.6,
+        "max_slots": 3,
+        "max_leverage": 12.0,
+        "tp_r_target": 3.8,
+        "be_trigger_r": 0.90,
+        "trail_activation_r": 1.60,
+        "only_high_conviction": False,
+    }
+}
 
 
 class TraderRegistry:
@@ -47,6 +82,39 @@ class TraderRegistry:
         if dir_name and not os.path.exists(dir_name):
             os.makedirs(dir_name, exist_ok=True)
 
+    def _normalize_trader_entry(self, trader: Dict[str, Any]) -> Dict[str, Any]:
+        """Ensures all risk profile and target fields exist with safe defaults."""
+        if not isinstance(trader, dict):
+            return trader
+        mode = trader.get("risk_mode")
+        if not mode:
+            legacy_prof = str(trader.get("risk_profile", "BALANCED")).lower()
+            mode = legacy_prof if legacy_prof in RISK_PROFILES else "balanced"
+        preset = RISK_PROFILES.get(mode, RISK_PROFILES["balanced"])
+
+        defaults = {
+            "risk_mode": mode,
+            "risk_per_trade_pct": preset["risk_per_trade_pct"],
+            "max_slots": preset["max_slots"],
+            "max_leverage": preset["max_leverage"],
+            "tp_r_target": preset["tp_r_target"],
+            "be_trigger_r": preset["be_trigger_r"],
+            "trail_activation_r": preset["trail_activation_r"],
+            "only_high_conviction": preset["only_high_conviction"],
+            "max_daily_drawdown_pct": 4.0,
+            "target_equity_usd": 0.0,
+            "target_equity_reached": False,
+            "daily_drawdown_paused": False,
+            "daily_start_equity": 0.0,
+            "daily_reset_date": "",
+            "late_join_policy": "next_signal_only",
+            "connected_at": trader.get("created_at", time.time())
+        }
+        for k, v in defaults.items():
+            if k not in trader:
+                trader[k] = v
+        return trader
+
     def load_traders(self) -> Dict[str, Dict[str, Any]]:
         """Loads all connected traders from storage."""
         if not os.path.exists(self.storage_path) or os.path.getsize(self.storage_path) == 0:
@@ -54,7 +122,9 @@ class TraderRegistry:
         try:
             with open(self.storage_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                return data if isinstance(data, dict) else {}
+                if isinstance(data, dict):
+                    return {k: self._normalize_trader_entry(v) for k, v in data.items()}
+                return {}
         except Exception as e:
             print(f"⚠️ [TraderRegistry] Error loading traders from {self.storage_path}: {e}")
             return {}
@@ -202,6 +272,7 @@ class TraderRegistry:
 
         traders = self.load_traders()
         now_ts = time.time()
+        preset = RISK_PROFILES.get("balanced", {})
         trader_entry = {
             "chat_id": c_id,
             "owner_address": clean_owner,
@@ -211,10 +282,27 @@ class TraderRegistry:
             "signature": signature,
             "nonce": int(nonce),
             "copy_enabled": True,
-            "max_risk_pct": float(max_risk_pct),
+            "risk_mode": "balanced",
+            "risk_per_trade_pct": float(preset.get("risk_per_trade_pct", 1.6)),
+            "max_slots": int(preset.get("max_slots", 2)),
+            "max_leverage": float(preset.get("max_leverage", 8.0)),
+            "tp_r_target": float(preset.get("tp_r_target", 3.0)),
+            "be_trigger_r": float(preset.get("be_trigger_r", 0.75)),
+            "trail_activation_r": float(preset.get("trail_activation_r", 1.35)),
+            "only_high_conviction": bool(preset.get("only_high_conviction", False)),
+            "max_daily_drawdown_pct": 4.0,
+            "daily_start_equity": 0.0,
+            "daily_drawdown_paused": False,
+            "daily_reset_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            "target_equity_usd": 0.0,
+            "target_equity_reached": False,
+            "late_join_policy": "next_signal_only",
+            "connected_at": traders.get(c_id, {}).get("created_at", now_ts),
+            # Legacy fields for backward compatibility
+            "max_risk_pct": float(max_risk_pct) if max_risk_pct else 0.016,
             "risk_profile": "BALANCED",
-            "leverage": 6.0,
-            "max_concurrent_positions": 2,
+            "leverage": float(preset.get("max_leverage", 8.0)),
+            "max_concurrent_positions": int(preset.get("max_slots", 2)),
             "tp_mode": "2_TIER",
             "anti_bot_enabled": True,
             "target_notional_usd": 104.0,
@@ -275,8 +363,8 @@ class TraderRegistry:
 
     def update_trader_settings(self, chat_id: str, **kwargs) -> bool:
         """
-        Updates personal trading constants (risk_profile, leverage, max_concurrent_positions,
-        tp_mode, anti_bot_enabled, target_notional_usd, max_risk_pct) for a connected trader.
+        Updates personal trading constants (risk_mode, risk_profile, leverage, max_concurrent_positions,
+        tp_mode, anti_bot_enabled, target_notional_usd, max_risk_pct, etc.) for a connected trader.
         """
         c_id = str(chat_id).strip()
         traders = self.load_traders()
@@ -285,6 +373,11 @@ class TraderRegistry:
 
         trader = traders[c_id]
         allowed_keys = {
+            "risk_mode", "risk_per_trade_pct", "max_slots", "max_leverage",
+            "tp_r_target", "be_trigger_r", "trail_activation_r", "only_high_conviction",
+            "max_daily_drawdown_pct", "target_equity_usd", "target_equity_reached",
+            "daily_drawdown_paused", "daily_start_equity", "daily_reset_date",
+            "late_join_policy", "copy_enabled", "connected_at",
             "risk_profile", "leverage", "max_concurrent_positions",
             "tp_mode", "anti_bot_enabled", "target_notional_usd", "max_risk_pct"
         }
@@ -294,13 +387,131 @@ class TraderRegistry:
         trader["updated_at"] = time.time()
         return self.save_traders(traders)
 
+    def set_trader_risk_profile(self, chat_id: str, mode: str) -> bool:
+        """
+        Switches a trader's risk profile to 'conservative', 'balanced', or 'aggressive'.
+        Applies all preset rules (risk %, max slots, max leverage, tp R target, BE/trail thresholds).
+        """
+        mode_clean = str(mode).lower().strip()
+        if mode_clean not in RISK_PROFILES:
+            return False
+        preset = RISK_PROFILES[mode_clean]
+        c_id = str(chat_id).strip()
+        traders = self.load_traders()
+        if c_id not in traders:
+            return False
+
+        t = traders[c_id]
+        t["risk_mode"] = mode_clean
+        t["risk_per_trade_pct"] = float(preset["risk_per_trade_pct"])
+        t["max_slots"] = int(preset["max_slots"])
+        t["max_leverage"] = float(preset["max_leverage"])
+        t["tp_r_target"] = float(preset["tp_r_target"])
+        t["be_trigger_r"] = float(preset["be_trigger_r"])
+        t["trail_activation_r"] = float(preset["trail_activation_r"])
+        t["only_high_conviction"] = bool(preset["only_high_conviction"])
+
+        # Sync legacy fields
+        t["risk_profile"] = mode_clean.upper()
+        t["leverage"] = float(preset["max_leverage"])
+        t["max_concurrent_positions"] = int(preset["max_slots"])
+        t["updated_at"] = time.time()
+        return self.save_traders(traders)
+
+    def update_trader_risk_settings(self, chat_id: str, **kwargs) -> bool:
+        """Alias for update_trader_settings for risk and target settings."""
+        return self.update_trader_settings(chat_id, **kwargs)
+
+    def check_daily_drawdown_and_targets(self, chat_id: str, current_equity: float) -> Dict[str, Any]:
+        """
+        Evaluates daily drawdown limit and equity target for chat_id.
+        Handles UTC day rollover: resets daily_start_equity and unpauses daily drawdown.
+        Returns: {
+            "daily_drawdown_paused": bool,
+            "target_equity_reached": bool,
+            "just_triggered_dd": bool,
+            "just_reached_target": bool,
+            "drawdown_pct": float
+        }
+        """
+        c_id = str(chat_id).strip()
+        traders = self.load_traders()
+        if c_id not in traders:
+            return {
+                "daily_drawdown_paused": False,
+                "target_equity_reached": False,
+                "just_triggered_dd": False,
+                "just_reached_target": False,
+                "drawdown_pct": 0.0
+            }
+
+        t = traders[c_id]
+        today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        daily_reset_date = t.get("daily_reset_date", "")
+
+        # Rollover to new UTC day if needed
+        if daily_reset_date != today_utc:
+            t["daily_reset_date"] = today_utc
+            t["daily_start_equity"] = float(current_equity) if current_equity > 0 else 0.0
+            t["daily_drawdown_paused"] = False
+
+        daily_start = float(t.get("daily_start_equity", 0.0) or 0.0)
+        if daily_start <= 0.0 and current_equity > 0.0:
+            t["daily_start_equity"] = float(current_equity)
+            daily_start = float(current_equity)
+
+        max_dd_pct = float(t.get("max_daily_drawdown_pct", 4.0) or 4.0)
+        curr_dd_pct = 0.0
+        just_triggered_dd = False
+
+        if daily_start > 0 and current_equity < daily_start:
+            curr_dd_pct = round((daily_start - current_equity) / daily_start * 100.0, 2)
+            if curr_dd_pct >= max_dd_pct:
+                if not t.get("daily_drawdown_paused", False):
+                    t["daily_drawdown_paused"] = True
+                    just_triggered_dd = True
+
+        target_eq = float(t.get("target_equity_usd", 0.0) or 0.0)
+        just_reached_target = False
+        if target_eq > 0.0 and current_equity >= target_eq:
+            if not t.get("target_equity_reached", False):
+                t["target_equity_reached"] = True
+                just_reached_target = True
+
+        t["updated_at"] = time.time()
+        self.save_traders(traders)
+
+        return {
+            "daily_drawdown_paused": bool(t.get("daily_drawdown_paused", False)),
+            "target_equity_reached": bool(t.get("target_equity_reached", False)),
+            "just_triggered_dd": just_triggered_dd,
+            "just_reached_target": just_reached_target,
+            "drawdown_pct": curr_dd_pct
+        }
+
     def get_trader_settings(self, chat_id: str) -> Dict[str, Any]:
         """Returns personal trading settings dictionary for trader, or defaults."""
         trader = self.get_trader(chat_id) or {}
+        mode = trader.get("risk_mode", "balanced")
+        preset = RISK_PROFILES.get(mode, RISK_PROFILES["balanced"])
         return {
-            "risk_profile": trader.get("risk_profile", "BALANCED"),
-            "leverage": float(trader.get("leverage", 6.0)),
-            "max_concurrent_positions": int(trader.get("max_concurrent_positions", 2)),
+            "risk_mode": mode,
+            "risk_per_trade_pct": float(trader.get("risk_per_trade_pct", preset["risk_per_trade_pct"])),
+            "max_slots": int(trader.get("max_slots", preset["max_slots"])),
+            "max_leverage": float(trader.get("max_leverage", preset["max_leverage"])),
+            "tp_r_target": float(trader.get("tp_r_target", preset["tp_r_target"])),
+            "be_trigger_r": float(trader.get("be_trigger_r", preset["be_trigger_r"])),
+            "trail_activation_r": float(trader.get("trail_activation_r", preset["trail_activation_r"])),
+            "only_high_conviction": bool(trader.get("only_high_conviction", preset["only_high_conviction"])),
+            "max_daily_drawdown_pct": float(trader.get("max_daily_drawdown_pct", 4.0)),
+            "target_equity_usd": float(trader.get("target_equity_usd", 0.0)),
+            "target_equity_reached": bool(trader.get("target_equity_reached", False)),
+            "daily_drawdown_paused": bool(trader.get("daily_drawdown_paused", False)),
+            "late_join_policy": trader.get("late_join_policy", "next_signal_only"),
+            # Legacy fields
+            "risk_profile": trader.get("risk_profile", mode.upper()),
+            "leverage": float(trader.get("leverage", preset["max_leverage"])),
+            "max_concurrent_positions": int(trader.get("max_concurrent_positions", preset["max_slots"])),
             "tp_mode": trader.get("tp_mode", "2_TIER"),
             "anti_bot_enabled": bool(trader.get("anti_bot_enabled", True)),
             "target_notional_usd": float(trader.get("target_notional_usd", 104.0)),

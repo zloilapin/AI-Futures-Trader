@@ -2050,6 +2050,14 @@ class TradingPipeline:
                                 
                     except Exception as e:
                         print(f"❌ Ошибка проверки позиции {symbol}: {e}")
+
+                # Manage active copy-trading subscriber positions in background
+                try:
+                    if hasattr(self.services.trading_service, "dispatch_copy_trade_manage"):
+                        await self.services.trading_service.dispatch_copy_trade_manage()
+                except Exception as copy_manage_err:
+                    if hasattr(self.services.logger, "debug"):
+                        self.services.logger.debug(f"[CopyTrading] Sentinel manage check error: {copy_manage_err}")
             finally:
                 self._last_sentinel_sync_ts = time.monotonic()
 

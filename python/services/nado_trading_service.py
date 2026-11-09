@@ -1744,6 +1744,33 @@ class NadoTradingService(BaseTradingService):
                 "protection_state": protection_state,
                 "entry_price": actual_entry_price
             }
+
+            # Asynchronous multi-user copy trading dispatch (runs strictly AFTER master execution)
+            try:
+                from services.copy_trading_dispatcher import copy_trading_dispatcher
+                copy_trading_dispatcher.master_trading_service = self
+                asyncio.create_task(
+                    copy_trading_dispatcher.dispatch_copy_trade_open(
+                        symbol=symbol,
+                        direction=direction,
+                        entry_price=actual_entry_price,
+                        master_sl=sl_price,
+                        master_tp=tp_price,
+                        limit_price=limit_price,
+                        is_reduce_size=bool(getattr(self, "is_reduce_size", False) or (applied_multipliers and applied_multipliers.get("reduce_size"))),
+                        conviction=float(entry_quality or 100.0),
+                        strategy_mode=str(strategy_mode or "TREND_FOLLOWING"),
+                        macro_regime=str(macro_regime or "TRENDING"),
+                        cohort=str(cohort or "UNKNOWN"),
+                        master_open_time=time.time(),
+                        leverage=leverage,
+                        contracts=actual_base_amount,
+                        notional_usd=notional_usd
+                    )
+                )
+            except Exception as copy_dispatch_err:
+                logger.debug(f"[CopyTrading] Auto-dispatch open trigger: {copy_dispatch_err}")
+
             return True
         except Exception as e:
             # Check if order was already filled before the exception occurred
@@ -6555,3 +6582,49 @@ class NadoTradingService(BaseTradingService):
                 logger.error(f"[NadoTradingService] ⚠️ Fast Price Monitor error: {e}")
             
             await asyncio.sleep(poll_interval)
+
+    async def dispatch_copy_trade_open(
+        self,
+        symbol: str,
+        direction: str,
+        entry_price: float,
+        master_sl: float,
+        master_tp: float,
+        limit_price: Optional[float] = None,
+        is_reduce_size: bool = False,
+        conviction: float = 100.0,
+        strategy_mode: str = "TREND_FOLLOWING",
+        macro_regime: str = "TRENDING",
+        cohort: str = "UNKNOWN",
+        master_open_time: Optional[float] = None,
+        leverage: float = 6.0,
+        contracts: float = 0.0,
+        notional_usd: float = 0.0
+    ):
+        """Dispatches open position to connected copy-trading subscribers."""
+        from services.copy_trading_dispatcher import copy_trading_dispatcher
+        copy_trading_dispatcher.master_trading_service = self
+        return await copy_trading_dispatcher.dispatch_copy_trade_open(
+            symbol=symbol,
+            direction=direction,
+            entry_price=entry_price,
+            master_sl=master_sl,
+            master_tp=master_tp,
+            limit_price=limit_price,
+            is_reduce_size=is_reduce_size,
+            conviction=conviction,
+            strategy_mode=strategy_mode,
+            macro_regime=macro_regime,
+            cohort=cohort,
+            master_open_time=master_open_time,
+            leverage=leverage,
+            contracts=contracts,
+            notional_usd=notional_usd
+        )
+
+    async def dispatch_copy_trade_manage(self):
+        """Dispatches Sentinel BE and dynamic trailing stops across subscriber positions."""
+        from services.copy_trading_dispatcher import copy_trading_dispatcher
+        copy_trading_dispatcher.master_trading_service = self
+        return await copy_trading_dispatcher.dispatch_copy_trade_manage()
+

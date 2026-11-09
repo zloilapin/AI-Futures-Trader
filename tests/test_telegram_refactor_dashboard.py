@@ -170,3 +170,4 @@ async def test_wallet_watch_only_registration(mock_trading):
 
     # Clean up test trader
     trader_registry.disconnect_trader(guest_id)
+

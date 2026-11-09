@@ -275,8 +275,83 @@ class TelegramBotListener:
         return text, {"inline_keyboard": buttons}
 
     async def _get_positions_payload(self, chat_id: str, is_admin: bool) -> Tuple[str, dict]:
-        positions = getattr(self.trading_service, "active_positions", {})
-        if not positions:
+        from services.copy_trading_dispatcher import copy_trading_dispatcher
+        sub_positions = copy_trading_dispatcher.positions_store.get_user_positions(chat_id)
+
+        # 1. If subscriber has open copied positions, prioritize displaying their personal portfolio
+        if sub_positions:
+            lines = ["💼 *МОИ СКОПИРОВАННЫЕ ПОЗИЦИИ И СОПРОВОЖДЕНИЕ*\n"]
+            action_buttons = []
+            for sym, pos in sub_positions.items():
+                if not isinstance(pos, dict):
+                    continue
+                direction = str(pos.get("direction", "SHORT")).upper()
+                icon = "🟢" if direction == "LONG" else "🔴"
+                contracts = float(pos.get("contracts", 0.0) or 0.0)
+                notional = float(pos.get("notional_usd", 0.0) or pos.get("size_usd", 0.0) or 0.0)
+                entry_price = float(pos.get("entry_price", 0.0) or 0.0)
+                sl_price = float(pos.get("sl_price", 0.0) or 0.0)
+                tp_price = float(pos.get("tp_price", 0.0) or 0.0)
+                planned_risk = float(pos.get("planned_risk_usd", 0.0) or 1.0)
+                tp_r_target = float(pos.get("tp_r_target", 3.0))
+                be_trig_r = float(pos.get("be_trigger_r", 0.75))
+                trail_act_r = float(pos.get("trail_activation_r", 1.35))
+                prot_state = str(pos.get("protection_state", "NATIVE_SL_CONFIRMED"))
+                risk_mode_name = str(pos.get("risk_mode", "balanced")).capitalize()
+
+                mark_price = entry_price
+                if hasattr(self.trading_service, "market_data_service"):
+                    try:
+                        mp = self.trading_service.market_data_service.get_last_price(sym)
+                        if mp and mp > 0:
+                            mark_price = mp
+                    except Exception:
+                        pass
+
+                if direction == "LONG":
+                    pnl_usd = (mark_price - entry_price) * contracts
+                else:
+                    pnl_usd = (entry_price - mark_price) * contracts
+
+                r_mult = pnl_usd / planned_risk if planned_risk > 0 else 0.0
+                margin_used = float(pos.get("margin_used", 0.0) or (notional / float(pos.get("leverage", 8.0))) or 1.0)
+                pnl_pct = (pnl_usd / margin_used * 100) if margin_used > 0 else 0.0
+
+                if r_mult >= trail_act_r:
+                    phase_str = f"Параболический трейлинг >= {trail_act_r:.2f}R 🚀"
+                elif r_mult >= be_trig_r or prot_state in ["BREAK_EVEN", "BE_ACTIVATED", "TIME_STOP_BE"]:
+                    phase_str = f"Безубыток Free Ride {be_trig_r:.2f}R–{trail_act_r:.2f}R 🛡"
+                else:
+                    phase_str = f"Ожидание {be_trig_r:.2f}R ⏳"
+
+                is_in_profit = pnl_usd > 0
+
+                lines.append(
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"{icon} *{sym}* (`{direction}` | `{risk_mode_name}`)\n"
+                    f"• *Объем:* `${notional:,.2f}` (`{contracts:.4f}` контр.)\n"
+                    f"• *Вход:* `${entry_price:,.2f}` | *Текущая:* `${mark_price:,.2f}`\n"
+                    f"• *Плавающий PnL:* `${pnl_usd:+.2f}` ({pnl_pct:+.2f}%) | `{r_mult:+.2f} R`\n"
+                    f"• *Stop-Loss:* `${sl_price:,.2f}`\n"
+                    f"• *Take-Profit:* `${tp_price:,.2f}` (`{tp_r_target:.1f}R`)\n"
+                    f"• *Фаза Sentinel:* `{phase_str}`"
+                )
+
+                row = []
+                if is_in_profit and prot_state not in ["BREAK_EVEN", "TRAILING"]:
+                    row.append({"text": f"🛡 Мой SL в Б/У: {sym}", "callback_data": f"sub_be:{sym}"})
+                row.append({"text": f"❌ Закрыть МОЮ сделку: {sym}", "callback_data": f"sub_close_ask:{sym}"})
+                action_buttons.append(row)
+
+            action_buttons.append([
+                {"text": "🔄 Обновить", "callback_data": "dash_positions"},
+                {"text": "⬅️ В Терминал", "callback_data": "dash_main"}
+            ])
+            return "\n".join(lines), {"inline_keyboard": action_buttons}
+
+        # 2. If user is guest/subscriber without open trades, or admin
+        master_positions = getattr(self.trading_service, "active_positions", {})
+        if not master_positions:
             text = (
                 "💼 *ОТКРЫТЫЕ ПОЗИЦИИ И SL*\n\n"
                 "⚪ *Активных позиций нет*\n"
@@ -290,10 +365,11 @@ class TelegramBotListener:
             }
             return text, markup
 
+        # 3. For admin or users viewing master live terminal positions
         lines = ["💼 *ОТКРЫТЫЕ ПОЗИЦИИ И СОПРОВОЖДЕНИЕ SENTINEL*\n"]
         action_buttons = []
 
-        for sym, pos in positions.items():
+        for sym, pos in master_positions.items():
             if not isinstance(pos, dict):
                 continue
             direction = str(pos.get("direction", "SHORT")).upper()
@@ -641,8 +717,11 @@ class TelegramBotListener:
             sub = trader.get("subaccount", "default")
             copy_on = trader.get("copy_enabled", True)
             copy_str = "🟢 ВКЛЮЧЕНО" if copy_on else "⏸ ПРИОСТАНОВЛЕНО"
-            prof = trader.get("risk_profile", "BALANCED")
-            lev = trader.get("leverage", 6.0)
+            risk_mode = str(trader.get("risk_mode", "balanced")).capitalize()
+            risk_pct = float(trader.get("risk_per_trade_pct", 1.6))
+            max_slots = int(trader.get("max_slots", 2))
+            lev = float(trader.get("max_leverage", 8.0))
+            tp_target = float(trader.get("tp_r_target", 3.0))
 
             text = (
                 "🔗 *КАБИНЕТ КОШЕЛЬКА | NON-CUSTODIAL TRADER*\n\n"
@@ -650,13 +729,13 @@ class TelegramBotListener:
                 f"📂 *Суб-аккаунт Nado:* `{sub}`\n"
                 f"🔑 *Сессионный ключ:* `{trader.get('signer_address', '0x...')[:10]}...`\n"
                 f"🛡 *Безопасность:* `NON-CUSTODIAL (0 прав на вывод)`\n"
-                f"⚙️ *Профиль:* `{prof}` ({lev:.0f}x плечо)\n"
+                f"⚙️ *Профиль риска:* `{risk_mode}` ({risk_pct}% риск, {tp_target}R TP, {max_slots} слота, {lev:.0f}x)\n"
                 f"📡 *Авто-копирование:* `{copy_str}`\n\n"
-                "💡 _Сделки ведущего терминала копируются в реальном времени с защитой капитала 24/7._"
+                "💡 _Сделки ведущего терминала копируются в реальном времени строго от вашего баланса с индивидуальным R-сайзингом._"
             )
             toggle_btn_text = "⏸ Приостановить копирование" if copy_on else "▶️ Возобновить копирование"
             buttons = [
-                [{"text": toggle_btn_text, "callback_data": "wallet_toggle_copy"}, {"text": "⚙️ Настройки торговли", "callback_data": "wiz_start"}],
+                [{"text": "⚙️ Профиль риска и цели", "callback_data": "risk_menu"}, {"text": toggle_btn_text, "callback_data": "wallet_toggle_copy"}],
                 [{"text": "🔌 Отключить кошелек", "callback_data": "wallet_disconnect"}, {"text": "🔄 Обновить", "callback_data": "dash_wallet"}],
                 [{"text": "⬅️ В Терминал", "callback_data": "dash_main"}]
             ]
@@ -717,6 +796,62 @@ class TelegramBotListener:
             [{"text": "🛡️ Открыть в Trust Wallet", "url": tw_deeplink}],
             [{"text": "🔗 Открыть в Telegram WebApp", "web_app": {"url": clean_url}}],
             [{"text": "⬅️ Назад в Кошелек", "callback_data": "dash_wallet"}]
+        ]
+        return text, {"inline_keyboard": buttons}
+
+    def _get_risk_menu_payload(self, chat_id: str) -> Tuple[str, dict]:
+        from services.trader_registry import trader_registry, RISK_PROFILES
+        settings = trader_registry.get_trader_settings(chat_id)
+        mode = settings.get("risk_mode", "balanced")
+        mode_labels = {
+            "conservative": "🛡 Консервативный (0.9% | 1.8R)",
+            "balanced": "⚖️ Сбалансированный (1.6% | 3.0R)",
+            "aggressive": "🔥 Агрессивный (2.6% | 3.8R)"
+        }
+        current_mode_str = mode_labels.get(mode, f"Кастомный ({mode})")
+
+        risk_pct = float(settings.get("risk_per_trade_pct", 1.6))
+        max_slots = int(settings.get("max_slots", 2))
+        max_lev = float(settings.get("max_leverage", 8.0))
+        tp_r = float(settings.get("tp_r_target", 3.0))
+        be_r = float(settings.get("be_trigger_r", 0.75))
+        trail_r = float(settings.get("trail_activation_r", 1.35))
+        high_conv = "Да (только conviction >= 75%)" if settings.get("only_high_conviction") else "Нет"
+        daily_dd = float(settings.get("max_daily_drawdown_pct", 4.0))
+        target_eq = float(settings.get("target_equity_usd", 0.0))
+        target_str = f"${target_eq:,.2f} USDC" if target_eq > 0 else "Выключено (0.00$)"
+
+        copy_on = bool(settings.get("copy_enabled", True))
+        copy_status = "🟢 ВКЛЮЧЕНО" if copy_on else "⏸ НА ПАУЗЕ"
+        dd_paused = bool(settings.get("daily_drawdown_paused", False))
+        dd_status = "🛑 СТОП-КРАН АКТИВЕН" if dd_paused else "🟢 Норма"
+
+        text = (
+            "⚙️ *ПРОФИЛЬ РИСКА И ЦЕЛИ КОПИ-ТРЕЙДИНГА*\n\n"
+            f"👤 *Текущий режим:* `{current_mode_str}`\n"
+            f"• *Риск на сделку:* `{risk_pct:.1f}%` от депозита\n"
+            f"• *Максимум слотов:* `{max_slots}` позиций\n"
+            f"• *Потолок плеча:* `{max_lev:.0f}x`\n"
+            f"• *Цель Take-Profit:* `{tp_r:.1f} R`\n"
+            f"• *Пороги Sentinel:* Б/У на `{be_r:.2f}R` | Трейлинг от `{trail_r:.2f}R`\n"
+            f"• *Только высокая уверенность:* `{high_conv}`\n"
+            f"• *Дневной стоп-кран (Drawdown):* `{daily_dd:.1f}%` ({dd_status})\n"
+            f"• *Цель по депозиту:* `{target_str}`\n"
+            f"• *Статус копи-трейдинга:* `{copy_status}`\n\n"
+            "💡 _Выберите готовый пресет риска в 1 клик или настройте персональные цели:_"
+        )
+
+        toggle_copy_btn = "⏸ Пауза копирования" if copy_on else "▶️ Старт копирования"
+        buttons = [
+            [{"text": f"{'✅ ' if mode=='conservative' else ''}🛡 Консервативный (0.9% | 1.8R)", "callback_data": "set_risk:conservative"}],
+            [{"text": f"{'✅ ' if mode=='balanced' else ''}⚖️ Сбалансированный (1.6% | 3.0R)", "callback_data": "set_risk:balanced"}],
+            [{"text": f"{'✅ ' if mode=='aggressive' else ''}🔥 Агрессивный (2.6% | 3.8R)", "callback_data": "set_risk:aggressive"}],
+            [
+                {"text": "🎯 Задать цель баланса ($)", "callback_data": "set_target_equity"},
+                {"text": "🛑 Лимит просадки дня", "callback_data": "set_daily_dd"}
+            ],
+            [{"text": toggle_copy_btn, "callback_data": "toggle_my_copy"}],
+            [{"text": "⬅️ В Кошелек", "callback_data": "dash_wallet"}]
         ]
         return text, {"inline_keyboard": buttons}
 
@@ -1084,6 +1219,49 @@ class TelegramBotListener:
                 return
             else:
                 await self._send_reply("⚠️ Неверный формат адреса. Отправьте адрес кошелька (`0x...`, 42 символа) или напишите `отмена`.", target_chat_id=effective_chat_id)
+                return
+
+        elif active_prompt == "target_equity":
+            clean_val = raw_text.strip().replace("$", "").replace(",", ".")
+            if clean_val.lower() in ["/cancel", "отмена", "cancel"]:
+                self._waiting_input.pop(effective_chat_id, None)
+                text_r, markup_r = self._get_risk_menu_payload(effective_chat_id)
+                await self._send_reply("❌ Настройка цели отменена.\n\n" + text_r, reply_markup=markup_r, target_chat_id=effective_chat_id)
+                return
+            try:
+                val = float(clean_val)
+                if val < 0:
+                    raise ValueError()
+                from services.trader_registry import trader_registry
+                trader_registry.update_trader_risk_settings(effective_chat_id, target_equity_usd=val, target_equity_reached=False)
+                self._waiting_input.pop(effective_chat_id, None)
+                msg_ok = "✅ Цель по балансу отключена." if val == 0 else f"✅ Цель по балансу суб-аккаунта установлена: `${val:,.2f} USDC`."
+                text_r, markup_r = self._get_risk_menu_payload(effective_chat_id)
+                await self._send_reply(f"{msg_ok}\n\n" + text_r, reply_markup=markup_r, target_chat_id=effective_chat_id)
+                return
+            except Exception:
+                await self._send_reply("⚠️ Неверный формат суммы. Введите число (например, `500` или `0` для отключения) или напишите `отмена`.", target_chat_id=effective_chat_id)
+                return
+
+        elif active_prompt == "daily_drawdown":
+            clean_val = raw_text.strip().replace("%", "").replace(",", ".")
+            if clean_val.lower() in ["/cancel", "отмена", "cancel"]:
+                self._waiting_input.pop(effective_chat_id, None)
+                text_r, markup_r = self._get_risk_menu_payload(effective_chat_id)
+                await self._send_reply("❌ Настройка лимита отменена.\n\n" + text_r, reply_markup=markup_r, target_chat_id=effective_chat_id)
+                return
+            try:
+                val = float(clean_val)
+                if not (0.5 <= val <= 25.0):
+                    raise ValueError()
+                from services.trader_registry import trader_registry
+                trader_registry.update_trader_risk_settings(effective_chat_id, max_daily_drawdown_pct=val, daily_drawdown_paused=False)
+                self._waiting_input.pop(effective_chat_id, None)
+                text_r, markup_r = self._get_risk_menu_payload(effective_chat_id)
+                await self._send_reply(f"✅ Дневной лимит просадки установлен: `{val:.1f}%`.\n\n" + text_r, reply_markup=markup_r, target_chat_id=effective_chat_id)
+                return
+            except Exception:
+                await self._send_reply("⚠️ Неверный процент. Введите число от 1.0 до 15.0 (например, `4.0`) или напишите `отмена`.", target_chat_id=effective_chat_id)
                 return
 
         mapped_cmd = BUTTON_COMMAND_MAP.get(raw_text)
@@ -1893,13 +2071,21 @@ class TelegramBotListener:
         )
 
         is_wizard_callback = callback_data.startswith("wiz_")
+        is_risk_callback = (
+            callback_data == "risk_menu" or
+            callback_data.startswith("set_risk:") or
+            callback_data in ["toggle_my_copy", "set_target_equity", "set_daily_dd"] or
+            callback_data.startswith("sub_be:") or
+            callback_data.startswith("sub_close_ask:") or
+            callback_data.startswith("sub_close_confirm:")
+        )
         is_subscriber_callback = (
             callback_data.startswith("cmd_") or
             callback_data.startswith("show_") or
             callback_data in ["cmd_balance", "cmd_positions", "cmd_settings", "cmd_toggle", "cmd_disconnect", "cmd_ref", "cmd_status", "cmd_regime", "cmd_stats", "cmd_start", "cmd_connect"]
         )
 
-        if not is_admin and not is_wizard_callback and not is_subscriber_callback and not is_dash_callback:
+        if not is_admin and not is_wizard_callback and not is_subscriber_callback and not is_dash_callback and not is_risk_callback:
             print(f"⛔ [TelegramListener] Неавторизованный callback от chat_id={chat_id}")
             await tg.answer_callback_query(
                 callback_id,
@@ -2066,6 +2252,90 @@ class TelegramBotListener:
             await tg.answer_callback_query(callback_id, f"Копирование {st_name}")
             text_w, markup_w = await self._get_wallet_payload(chat_id)
             await self._edit_reply(text_w, reply_markup=markup_w, target_chat_id=chat_id, message_id=message_id)
+            return
+
+        elif callback_data == "risk_menu":
+            text_rm, markup_rm = self._get_risk_menu_payload(chat_id)
+            await self._edit_reply(text_rm, reply_markup=markup_rm, target_chat_id=chat_id, message_id=message_id)
+            return
+
+        elif callback_data.startswith("set_risk:"):
+            mode = callback_data.split(":", 1)[1]
+            from services.trader_registry import trader_registry
+            ok = trader_registry.set_trader_risk_profile(chat_id, mode)
+            if ok:
+                await tg.answer_callback_query(callback_id, f"✅ Выбран профиль: {mode.capitalize()}")
+            else:
+                await tg.answer_callback_query(callback_id, "⚠️ Не удалось переключить профиль.", show_alert=True)
+            text_rm, markup_rm = self._get_risk_menu_payload(chat_id)
+            await self._edit_reply(text_rm, reply_markup=markup_rm, target_chat_id=chat_id, message_id=message_id)
+            return
+
+        elif callback_data == "toggle_my_copy":
+            from services.trader_registry import trader_registry
+            ok, new_st = trader_registry.toggle_copy(chat_id)
+            st_text = "🟢 Копирование возобновлено!" if new_st else "⏸ Копирование приостановлено!"
+            await tg.answer_callback_query(callback_id, st_text)
+            text_rm, markup_rm = self._get_risk_menu_payload(chat_id)
+            await self._edit_reply(text_rm, reply_markup=markup_rm, target_chat_id=chat_id, message_id=message_id)
+            return
+
+        elif callback_data == "set_target_equity":
+            self._waiting_input[chat_id] = "target_equity"
+            prompt_text = (
+                "🎯 *НАСТРОЙКА ЦЕЛИ ПО ДЕПОЗИТУ ($ USDC)*\n\n"
+                "Введите желаемую сумму баланса суб-аккаунта (например, `500` или `1000`).\n"
+                "При достижении этой цели новые сделки будут поставлены на паузу для фиксации прибыли.\n\n"
+                "_Чтобы выключить цель, отправьте `0` или напишите `отмена`._"
+            )
+            prompt_markup = {"inline_keyboard": [[{"text": "🔙 Отмена", "callback_data": "risk_menu"}]]}
+            await self._edit_reply(prompt_text, reply_markup=prompt_markup, target_chat_id=chat_id, message_id=message_id)
+            return
+
+        elif callback_data == "set_daily_dd":
+            self._waiting_input[chat_id] = "daily_drawdown"
+            prompt_text = (
+                "🛑 *НАСТРОЙКА ДНЕВНОГО ЛИМИТА ПРОСАДКИ (%)*\n\n"
+                "Введите допустимый процент дневной просадки от 1.0 до 15.0 (например, `4.0` или `5.0`).\n"
+                "Если дневной убыток достигнет этого лимита, бот автоматически приостановит копирование до 00:00 UTC.\n\n"
+                "_Отправьте число или напишите `отмена`._"
+            )
+            prompt_markup = {"inline_keyboard": [[{"text": "🔙 Отмена", "callback_data": "risk_menu"}]]}
+            await self._edit_reply(prompt_text, reply_markup=prompt_markup, target_chat_id=chat_id, message_id=message_id)
+            return
+
+        elif callback_data.startswith("sub_be:"):
+            sym = callback_data.replace("sub_be:", "")
+            from services.copy_trading_dispatcher import copy_trading_dispatcher
+            ok, msg = await copy_trading_dispatcher.move_subscriber_sl_to_be(chat_id, sym)
+            await tg.answer_callback_query(callback_id, msg, show_alert=True)
+            text_p, markup_p = await self._get_positions_payload(chat_id, is_admin)
+            await self._edit_reply(text_p, reply_markup=markup_p, target_chat_id=chat_id, message_id=message_id)
+            return
+
+        elif callback_data.startswith("sub_close_ask:"):
+            sym = callback_data.replace("sub_close_ask:", "")
+            conf_text = (
+                f"⚠️ *ПОДТВЕРЖДЕНИЕ ЗАКРЫТИЯ ПОЗИЦИИ*\n\n"
+                f"Вы действительно хотите немедленно закрыть сделку *{sym}* по рыночной цене на вашем суб-аккаунте?\n\n"
+                f"_Это действие затронет только ваш баланс и не повлияет на сделки других пользователей._"
+            )
+            conf_markup = {
+                "inline_keyboard": [
+                    [{"text": f"⚠️ Да, закрыть МОЙ {sym}", "callback_data": f"sub_close_confirm:{sym}"}],
+                    [{"text": "🔙 Отмена", "callback_data": "dash_positions"}]
+                ]
+            }
+            await self._edit_reply(conf_text, reply_markup=conf_markup, target_chat_id=chat_id, message_id=message_id)
+            return
+
+        elif callback_data.startswith("sub_close_confirm:"):
+            sym = callback_data.replace("sub_close_confirm:", "")
+            from services.copy_trading_dispatcher import copy_trading_dispatcher
+            ok, msg = await copy_trading_dispatcher.close_subscriber_position(chat_id, sym, reason="MANUAL_SUBSCRIBER_CLOSE")
+            await tg.answer_callback_query(callback_id, msg, show_alert=True)
+            text_p, markup_p = await self._get_positions_payload(chat_id, is_admin)
+            await self._edit_reply(text_p, reply_markup=markup_p, target_chat_id=chat_id, message_id=message_id)
             return
 
         # Setup Wizard Callbacks (Q&A personal trading constants)
