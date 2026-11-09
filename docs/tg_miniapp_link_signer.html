@@ -387,8 +387,16 @@
           params: [{ chainId: INK_CHAIN_ID_HEX }]
         });
       } catch (switchError) {
-        // If chain is not added (error code 4902), add it
-        if (switchError.code === 4902) {
+        const errCode = switchError.code || (switchError.data && switchError.data.originalError && switchError.data.originalError.code);
+        const errMsg = String(switchError.message || '').toLowerCase();
+
+        // If user cancelled, don't spam add
+        if (errCode === 4001 || errMsg.includes('user rejected') || errMsg.includes('denied')) {
+          throw switchError;
+        }
+
+        // If chain is not added (code 4902, -32603, or mobile error wrapper), add it
+        try {
           await window.ethereum.request({
             method: 'wallet_addEthereumChain',
             params: [{
@@ -399,7 +407,8 @@
               blockExplorerUrls: ['https://explorer.inkonchain.com']
             }]
           });
-        } else {
+        } catch (addError) {
+          console.error("Failed to add network:", addError);
           throw switchError;
         }
       }

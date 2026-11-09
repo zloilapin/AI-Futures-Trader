@@ -81,7 +81,7 @@ class Settings(BaseSettings):
         description="Enable multi-trader copy trading for connected subscribers (default: False)"
     )
     TELEGRAM_MINIAPP_URL: str = Field(
-        default="https://raw.githack.com/zloilapin/AI-Futures-Trader/main/web/tg_miniapp_link_signer.html",
+        default="https://zloilapin.github.io/AI-Futures-Trader/",
         description="Public HTTPS URL for the Telegram Mini App (TMA) LinkSigner frontend"
     )
     

@@ -892,10 +892,12 @@ class TelegramBotListener:
                 # Generate new ephemeral session key for this chat_id
                 session = trader_registry.prepare_pending_session(effective_chat_id)
                 signer_addr = session["signer_address"]
-                miniapp_base = getattr(config, "TELEGRAM_MINIAPP_URL", "https://raw.githack.com/zloilapin/AI-Futures-Trader/main/web/tg_miniapp_link_signer.html")
+                miniapp_base = getattr(config, "TELEGRAM_MINIAPP_URL", "https://zloilapin.github.io/AI-Futures-Trader/")
                 miniapp_url = f"{miniapp_base}?signer={signer_addr}&subaccount=default&join={ref_code}"
+                cdn_url = f"https://raw.githack.com/zloilapin/AI-Futures-Trader/main/index.html?signer={signer_addr}&subaccount=default&join={ref_code}"
                 import urllib.parse
                 mm_deeplink = f"https://metamask.app.link/dapp/{miniapp_url.replace('https://', '')}"
+                mm_cdn_deeplink = f"https://metamask.app.link/dapp/{cdn_url.replace('https://', '')}"
                 tw_deeplink = f"https://link.trustwallet.com/open_url?coin_id=60&url={urllib.parse.quote(miniapp_url)}"
 
                 connect_markup = {
@@ -916,14 +918,16 @@ class TelegramBotListener:
                     "_Это закрепит ваш аккаунт в сезонной программе наград Nado DEX._\n\n"
                     "🛡️ *Шаг 2. Безопасное подключение (LinkSigner):*\n"
                     "• *На компьютере / Telegram Desktop:* нажмите кнопку внизу **`🔗 Открыть Nado LinkSigner App`**.\n"
-                    "• *На смартфоне:* встроенный браузер Telegram не имеет расширений Web3. Нажмите ссылку для открытия прямо в приложении:\n"
+                    "• *На смартфоне (в 1 клик):*\n"
                     f"👉 [🦊 Открыть прямо в приложении MetaMask]({mm_deeplink})\n"
+                    f"👉 [🦊 Резервная ссылка для MetaMask (CDN Зеркало)]({mm_cdn_deeplink})\n"
                     f"👉 [🛡️ Открыть прямо в Trust Wallet]({tw_deeplink})\n\n"
                     "💡 *Что означают параметры на странице:*\n"
                     "• *Сессионный ключ (Signer):* Временный торговый ключ бота. Вы даете права **только на выставление сделок**. Вывод средств жестко запрещен смарт-контрактом Nado DEX — депозит в 100% безопасности.\n"
                     "• *Суб-аккаунт («default»):* Стандартное имя вашего торгового счета на бирже Nado DEX, к которому подключается копи-трейдинг.\n\n"
-                    f"🌐 _Прямая ссылка для любого Web3-браузера:_\n"
-                    f"`{miniapp_url}`\n\n"
+                    f"🌐 _Прямые ссылки для любого Web3-браузера:_\n"
+                    f"• Основная: `{miniapp_url}`\n"
+                    f"• Зеркало CDN: `{cdn_url}`\n\n"
                     "Или подтвердите подпись вручную командой:\n"
                     "`/link_confirm <ваш_адрес> <nonce> <подпись>`"
                 )
