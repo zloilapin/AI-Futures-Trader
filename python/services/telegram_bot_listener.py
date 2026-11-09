@@ -28,7 +28,7 @@ SHOWCASE_KEYBOARD = {
     "keyboard": [
         [{"text": "▶️ Start"}, {"text": "🔗 Подключить кошелек"}],
         [{"text": "📊 /status"}, {"text": "🌐 /regime"}, {"text": "🏆 /stats"}],
-        [{"text": "⚙️ Настройки торговли"}, {"text": "🎁 Скидка 10% Nado"}],
+        [{"text": "⚙️ Настройки торговли"}, {"text": "🎁 Поинты & Аирдроп Nado"}],
         [{"text": "ℹ️ О проекте"}]
     ],
     "resize_keyboard": True,
@@ -38,7 +38,7 @@ SHOWCASE_KEYBOARD = {
 TRADER_KEYBOARD = {
     "keyboard": [
         [{"text": "▶️ Start"}, {"text": "💰 Мой баланс"}, {"text": "📂 Мои позиции"}],
-        [{"text": "⚙️ Настройки торговли"}, {"text": "🎁 Скидка 10% Nado"}],
+        [{"text": "⚙️ Настройки торговли"}, {"text": "🎁 Поинты & Аирдроп Nado"}],
         [{"text": "⏯ Вкл/Пауза копирования"}, {"text": "🔌 Отключить кошелек"}],
         [{"text": "📊 /status"}, {"text": "🏆 /stats"}]
     ],
@@ -71,6 +71,13 @@ BUTTON_COMMAND_MAP = {
     "🏆 /stats": "/stats",
     "🔗 Подключить кошелек": "/connect",
     "🔗 подключить кошелек": "/connect",
+    "🎁 Поинты & Аирдроп Nado": "/ref",
+    "🎁 поинты & аирдроп nado": "/ref",
+    "поинты": "/ref",
+    "аирдроп": "/ref",
+    "airdrop": "/ref",
+    "points": "/ref",
+    "🎁 Аирдроп Nado": "/ref",
     "🎁 Скидка 10% Nado": "/ref",
     "🎁 скидка 10% nado": "/ref",
     "🎁 Скидка 10% Nado (/ref)": "/ref",
@@ -367,7 +374,7 @@ class TelegramBotListener:
             f"👤 *Владелец:* `{owner_address}`\n"
             f"📂 *Суб-аккаунт:* `{subaccount_name}`\n"
             "🛡️ *Безопасность:* `NON-CUSTODIAL (0 прав на вывод средств)`\n"
-            f"🎁 *Реферальный статус:* `Скидка 10% на комиссии Nado DEX` (Код: `{ref_code}`)\n\n"
+            f"🎁 *Реферальный статус:* `Season 2 Points & Airdrop Nado` (Инвайт: `{ref_code}`)\n\n"
             f"💰 *Баланс на Nado DEX:* `${assets:,.2f} USDC`\n"
             f"📊 *Доступная маржа:* `${health:,.2f} USDC`\n"
             "🟢 *Авто-копирование сигналов:* `ВКЛЮЧЕНО`\n\n"
@@ -577,9 +584,9 @@ class TelegramBotListener:
                     "• *Maker Execution:* `POST_ONLY` лимитные ордера со спредовой защитой\n"
                     "• *100% Non-Custodial Security:* Архитектура `LinkSigner` (EIP-712) — сессионный ключ имеет права **только на торговлю**; вывод средств (`withdraw_collateral`) аппаратно заблокирован смарт-контрактом Nado\n"
                     "• *Protocol Telemetry:* Маркировка объема `NADO_BUILDER_ID` для ончейн-распределения комиссий\n\n"
-                    "🎁 *ПАРТНЕРСКАЯ ПРОГРАММА И БОНУСЫ:*\n"
-                    f"• Получите **скидку 10% на все торговые комиссии** Nado DEX:\n"
-                    f"👉 [Регистрация по партнерской ссылке]({ref_url}) (Код: `{ref_code}`)\n\n"
+                    "🎁 *ПАРТНЕРСКАЯ ПРОГРАММА И АИРДРОП (SEASON 2):*\n"
+                    f"• Зарегистрируйтесь на Nado DEX для начисления сезонных поинтов за торговлю и участия в ончейн-аирдропе $NADO & $INK:\n"
+                    f"👉 [Регистрация по партнерской ссылке]({ref_url}) (Инвайт: `{ref_code}`)\n\n"
                     "🔗 *ОНЧЕЙН МОНИТОРИНГ:*\n"
                     "[View Sub-Account on Ink Explorer](https://explorer.inkonchain.com/address/0x12d1293CBD98eEA18a2e5906dF5ED3BEf07fB1aa)\n\n"
                     "🧭 *Доступные команды Showcase Mode (0 LLM Tokens):*\n"
@@ -589,7 +596,7 @@ class TelegramBotListener:
                     "• `/regime` — Текущий макро-режим рынка, тренд ADX и консенсус\n"
                     "• `/stats` — Публичная торговая статистика, винрейт и R-multiple\n"
                     "• `/connect` — Подключение вашего суб-аккаунта (LinkSigner)\n"
-                    f"• `/ref` — Официальная партнерская ссылка со скидкой 10%{admin_extra}"
+                    f"• `/ref` — Программа наград Season 2 и ссылка на аирдроп{admin_extra}"
                 )
 
                 from services.trader_registry import trader_registry
@@ -840,19 +847,19 @@ class TelegramBotListener:
                 await self._send_reply(reply, reply_markup=markup, target_chat_id=effective_chat_id)
                 return
 
-            elif cmd in ["/ref", "/referral"]:
+            elif cmd in ["/ref", "/referral", "/airdrop", "/points", "поинты", "аирдроп"]:
                 from core.config import config
                 ref_url = getattr(config, "NADO_REFERRAL_URL", "https://app.nado.xyz?join=ptn3l1u")
                 ref_code = getattr(config, "NADO_REFERRAL_CODE", "ptn3l1u")
                 ref_msg = (
-                    "🎁 *ОФИЦИАЛЬНАЯ ПАРТНЕРСКАЯ ПРОГРАММА NADO DEX (INK L2)*\n\n"
-                    "Все пользователи торгового терминала получают *скидку 10%* на торговые комиссии CLOB.\n\n"
-                    "📌 *Как активировать скидку:*\n"
-                    "1. Перейдите по официальной ссылке биржи:\n"
-                    f"👉 [{ref_url}]({ref_url})\n\n"
-                    f"2. Убедитесь, что реферальный код `{ref_code}` применен.\n"
-                    "3. Подключите ваш EVM-кошелек на Nado DEX.\n\n"
-                    "💡 _Скидка 10% на комиссии закрепится за вашим кошельком навсегда._"
+                    "🎁 *ПАРТНЕРСКАЯ ПРОГРАММА NADO DEX (SEASON 2)*\n\n"
+                    "Регистрация по официальной ссылке закрепляет кошелек в программе наград Nado и Ink L2:\n\n"
+                    "📌 *Преимущества программы:*\n"
+                    "• Начисление сезонных поинтов (Season 2 Points) за весь торговый объём\n"
+                    "• Прямое участие в будущем распределении ончейн-аирдропа токенов $NADO / $INK\n"
+                    "• Доступ к рибейтам мейкера при исполнении ордеров на CLOB\n\n"
+                    f"👉 [Перейти к регистрации на Nado DEX]({ref_url})\n"
+                    f"Инвайт-код: `{ref_code}`"
                 )
                 markup = SHOWCASE_KEYBOARD if not is_admin else None
                 await self._send_reply(ref_msg, reply_markup=markup, target_chat_id=effective_chat_id)
@@ -871,11 +878,11 @@ class TelegramBotListener:
                         "ℹ️ *У вас уже подключен кошелек:*\n"
                         f"• Адрес: `{owner}`\n"
                         "• Копирование: `🟢 ВКЛЮЧЕНО`\n"
-                        f"• Скидка Nado 10%: `🟢 АКТИВНА` (Код: `{ref_code}`)\n\n"
+                        f"• Статус Nado Season 2: `🟢 АКТИВЕН` (Инвайт: `{ref_code}`)\n\n"
                         "Используйте:\n"
                         "• `/my_balance` — проверить баланс\n"
                         "• `/my_positions` — посмотреть позиции\n"
-                        "• `/ref` — партнерская ссылка со скидкой 10%\n"
+                        "• `/ref` — партнерская ссылка Season 2\n"
                         "• `/toggle` — пауза копирования\n"
                         "• `/disconnect` — отключить кошелек"
                     )
@@ -894,7 +901,7 @@ class TelegramBotListener:
                 connect_markup = {
                     "keyboard": [
                         [{"text": "🔗 Открыть Nado LinkSigner App", "web_app": {"url": miniapp_url}}],
-                        [{"text": "🎁 Скидка 10% Nado"}, {"text": "📊 /status"}],
+                        [{"text": "🎁 Поинты & Аирдроп Nado"}, {"text": "📊 /status"}],
                         [{"text": "ℹ️ О проекте (/start)"}]
                     ],
                     "resize_keyboard": True
@@ -903,10 +910,10 @@ class TelegramBotListener:
                 connect_text = (
                     "🔐 *Не-кастодиальное подключение к AI-Futures-Trader*\n"
                     "_Торговля на Nado DEX CLOB (Ink L2 Mainnet)_\n\n"
-                    "🎁 *Шаг 1. Активация скидки 10% на комиссии (Nado Referral):*\n"
+                    "🎁 *Шаг 1. Регистрация в Season 2 Nado DEX (Поинты и аирдроп):*\n"
                     "Перед подключением перейдите по официальной партнерской ссылке:\n"
-                    f"👉 [{ref_url}]({ref_url}) (Код: `{ref_code}`)\n"
-                    "_Это закрепит постоянную скидку 10% на торговые комиссии Nado DEX за вашим кошельком._\n\n"
+                    f"👉 [{ref_url}]({ref_url}) (Инвайт: `{ref_code}`)\n"
+                    "_Это закрепит ваш аккаунт в сезонной программе наград Nado DEX._\n\n"
                     "🛡️ *Шаг 2. Безопасное подключение (LinkSigner):*\n"
                     "• *На компьютере / Telegram Desktop:* нажмите кнопку внизу **`🔗 Открыть Nado LinkSigner App`**.\n"
                     "• *На смартфоне:* встроенный браузер Telegram не имеет расширений Web3. Нажмите ссылку для открытия прямо в приложении:\n"
@@ -1081,7 +1088,7 @@ class TelegramBotListener:
                     markup = {
                         "inline_keyboard": [
                             [{"text": "🔗 Подключить кошелек", "callback_data": "cmd_connect"}],
-                            [{"text": "🎁 Скидка 10% Nado DEX", "callback_data": "cmd_ref"}]
+                            [{"text": "🎁 Поинты & Аирдроп Nado", "callback_data": "cmd_ref"}]
                         ]
                     }
                     await self._send_reply(reply, reply_markup=markup, target_chat_id=effective_chat_id)
@@ -1518,7 +1525,7 @@ class TelegramBotListener:
                 {"command": "regime", "description": "🌐 Текущий макро-режим и консенсус AI"},
                 {"command": "stats", "description": "🏆 Статистика винрейта и R-multiple"},
                 {"command": "connect", "description": "🔗 Подключить суб-аккаунт (LinkSigner)"},
-                {"command": "ref", "description": "🎁 Скидка 10% на комиссии Nado DEX"},
+                {"command": "ref", "description": "🎁 Поинты Season 2 и аирдроп Nado DEX"},
                 {"command": "my_balance", "description": "💰 Баланс и маржа на Nado DEX"},
                 {"command": "my_positions", "description": "📂 Мои открытые позиции"},
                 {"command": "toggle", "description": "⏯ Вкл/Пауза копи-трейдинга"},
@@ -1541,7 +1548,7 @@ class TelegramBotListener:
             "• CEO Consensus: DeepSeek-V3 & Llama 3.3 70B\n"
             "• Sentinel: 24/7 on-chain SL/TP защита капитала\n\n"
             "🛡️ 100% Non-Custodial: сессионный ключ LinkSigner без прав на вывод средств.\n"
-            "🎁 Скидка 10% на комиссии Nado DEX (Код: ptn3l1u).\n\n"
+            "🎁 Начисление поинтов Season 2 и участие в аирдропе Nado (Инвайт: ptn3l1u).\n\n"
             "Нажмите START для запуска!"
         )
         try:
@@ -1551,7 +1558,7 @@ class TelegramBotListener:
         except Exception as e:
             print(f"⚠️ [TelegramListener] Ошибка синхронизации setMyDescription: {e}")
 
-        short_desc = "AI-терминал Nado DEX (Ink L2). Gemini 2.5 Flash + DeepSeek V3 + Llama 3.3. Скидка 10% на комиссии (Код: ptn3l1u)."
+        short_desc = "AI-терминал Nado DEX (Ink L2). Gemini 2.5 Flash + DeepSeek V3 + Llama 3.3. Награды Season 2 и аирдроп (Код: ptn3l1u)."
         try:
             async with session.post(f"{base_url}/setMyShortDescription", json={"short_description": short_desc}) as resp:
                 if resp.status == 200:

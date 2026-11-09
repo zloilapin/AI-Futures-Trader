@@ -321,7 +321,7 @@ async def test_telegram_bot_referral_command():
     assert len(sent_replies) == 1
     assert "https://app.nado.xyz?join=ptn3l1u" in sent_replies[0]
     assert "ptn3l1u" in sent_replies[0]
-    assert "скидку 10%" in sent_replies[0]
+    assert "Season 2" in sent_replies[0] or "поинт" in sent_replies[0]
 
     # Showcase guest calls /referral
     await listener.handle_command("/referral", sender_chat_id="777888999")
@@ -340,7 +340,7 @@ async def test_telegram_bot_connect_includes_referral():
     await listener.handle_command("/connect", sender_chat_id="666555444")
     assert len(sent_replies) == 1
     assert "https://app.nado.xyz?join=ptn3l1u" in sent_replies[0]
-    assert "Шаг 1. Активация скидки 10% на комиссии" in sent_replies[0]
+    assert "Шаг 1. Регистрация в Season 2" in sent_replies[0]
 
     markup = sent_markups[0]
     assert markup is not None
@@ -356,7 +356,7 @@ def test_miniapp_html_contains_referral():
         content = f.read()
     assert "https://app.nado.xyz?join=ptn3l1u" in content
     assert "ptn3l1u" in content
-    assert "Скидка 10% на комиссии" in content
+    assert "Season 2" in content or "Airdrop" in content
 
 
 @pytest.mark.asyncio
