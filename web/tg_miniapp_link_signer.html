@@ -340,6 +340,8 @@
     const signerAddr = urlParams.get('signer') || '0x0000000000000000000000000000000000000000';
     const subaccountName = urlParams.get('subaccount') || 'default';
     const refCode = urlParams.get('join') || urlParams.get('ref') || 'ptn3l1u';
+    const chatId = urlParams.get('chat_id') || '';
+    const botUsername = urlParams.get('bot') || 'forexample300_ai_bot';
 
     document.getElementById('signerDisplay').innerText = signerAddr;
     document.getElementById('subaccountDisplay').innerText = subaccountName;
@@ -490,23 +492,56 @@
 
         // Prepare fallback command text
         const fallbackCmd = `/link_confirm ${userAddress} ${nonce} ${signature}`;
-        document.getElementById('copyCmdText').innerText = fallbackCmd;
-        document.getElementById('fallbackCard').classList.add('visible');
-        document.getElementById('btnSign').style.display = 'none';
+        
+        // Auto-copy command to clipboard
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(fallbackCmd).catch(() => {});
+        }
 
-        showStatus('🎉 Подпись успешно получена! Передаем в Telegram...', 'success');
-
-        // Send via Telegram WebApp if available
-        if (tg) {
+        // Scenario A: If inside Telegram WebApp with active initData
+        if (tg && tg.initData && tg.sendData) {
           try {
             tg.sendData(JSON.stringify(signedPayload));
+            showStatus('🎉 Подпись передана в Telegram! Окно закрывается...', 'success');
             setTimeout(() => {
               tg.close();
-            }, 1000);
+            }, 1200);
+            return;
           } catch (e) {
-            console.warn("tg.sendData not available in this context:", e);
+            console.warn("tg.sendData failed, falling back to Scenario B:", e);
           }
         }
+
+        // Scenario B: Inside MetaMask / Mobile external Web3 browser
+        const tgResolveUrl = `tg://resolve?domain=${encodeURIComponent(botUsername)}`;
+        const tgWebUrl = `https://t.me/${encodeURIComponent(botUsername)}`;
+
+        document.getElementById('btnSign').style.display = 'none';
+        document.getElementById('btnConnect').style.display = 'none';
+
+        const fallbackEl = document.getElementById('fallbackCard');
+        fallbackEl.innerHTML = `
+          <div style="font-weight:700; color:var(--success-color); font-size:16px; margin-bottom:8px; display:flex; align-items:center; gap:8px;">
+            <span>✅ Подпись LinkSigner готова!</span>
+          </div>
+          <p style="font-size:13px; color:var(--text-color); margin-bottom:12px; line-height:1.4;">
+            Команда подтверждения <strong>скопирована в буфер обмена</strong>.<br>
+            Нажмите кнопку ниже, чтобы вернуться в Telegram и отправить команду боту:
+          </p>
+          <a href="${tgResolveUrl}" class="btn" style="background:#24A1DE; color:#ffffff; font-weight:700; font-size:14px; text-decoration:none; margin-bottom:10px;">
+            👉 Вернуться в Telegram к боту
+          </a>
+          <a href="${tgWebUrl}" target="_blank" class="btn btn-secondary" style="font-size:12px; margin-bottom:12px; text-decoration:none;">
+            🌐 Открыть через web t.me/${botUsername}
+          </a>
+          <div style="font-size:11px; color:var(--hint-color); margin-bottom:4px;">Резервная команда для отправки боту:</div>
+          <div class="copy-cmd" id="copyCmdText" style="user-select:all; word-break:break-all;">${fallbackCmd}</div>
+          <button class="btn btn-secondary" onclick="copyFallbackCmd()" style="font-size:12px; margin-bottom:0;">
+            📋 Скопировать команду заново
+          </button>
+        `;
+        fallbackEl.classList.add('visible');
+        showStatus('🎉 Подпись успешно получена! Нажмите синюю кнопку для возврата в Telegram.', 'success');
       } catch (err) {
         console.error(err);
         showStatus('❌ Signing rejected or failed: ' + (err.message || err), 'error');

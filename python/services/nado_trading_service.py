@@ -67,6 +67,7 @@ class NadoTradingService(BaseTradingService):
         self.is_connected = False
         self._nado_time_offset = 0  # Store time offset transparently on the service instance
         self.active_positions = self._load_positions()
+        self.entries_paused: bool = False
         self.pending_reconciliations = self._load_pending_reconciliations()
         self.processed_fills_registry: Dict[str, dict] = {}
         self.processed_fill_digests: Set[str] = self._load_processed_fills()
@@ -554,6 +555,11 @@ class NadoTradingService(BaseTradingService):
         if not self.is_connected:
             logger.error(f"[NadoTradingService] Cannot open {direction} on {symbol} - SDK not connected.")
             self.last_execution_status = "SDK_DISCONNECTED"
+            return False
+
+        if getattr(self, "entries_paused", False):
+            logger.warning(f"[NadoTradingService] ⏸️ Refusing to open new position on {symbol}: entries are paused via Telegram Terminal.")
+            self.last_execution_status = "ENTRIES_PAUSED"
             return False
 
         # P1-4: Reset per-attempt execution status and details

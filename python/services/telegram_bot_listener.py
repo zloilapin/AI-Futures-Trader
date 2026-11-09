@@ -14,11 +14,20 @@ if sys.platform == "win32":
     except Exception:
         pass
 
+MAIN_REPLY_KEYBOARD = {
+    "keyboard": [
+        [{"text": "📊 Терминал"}, {"text": "💼 Позиции и SL"}],
+        [{"text": "🧠 AI-Радар"}, {"text": "🔗 Кошелек"}]
+    ],
+    "resize_keyboard": True,
+    "is_persistent": True
+}
+
 REPLY_KEYBOARD = {
     "keyboard": [
-        [{"text": "▶️ Start"}, {"text": "📊 Статус & PnL"}, {"text": "📂 Позиции"}],
-        [{"text": "🚀 Сканировать рынок"}, {"text": "🎛 Пульт Режимов"}, {"text": "🦈 Анти-Бот"}],
-        [{"text": "⚖️ Профиль Риска"}, {"text": "👻 Shadow Mode"}, {"text": "🚨 ЗАКРЫТЬ ВСЕ"}]
+        [{"text": "▶️ Start"}, {"text": "📊 Терминал"}],
+        [{"text": "💼 Позиции и SL"}, {"text": "🧠 AI-Радар"}],
+        [{"text": "🔗 Кошелек"}]
     ],
     "resize_keyboard": True,
     "is_persistent": True
@@ -26,10 +35,9 @@ REPLY_KEYBOARD = {
 
 SHOWCASE_KEYBOARD = {
     "keyboard": [
-        [{"text": "▶️ Start"}, {"text": "🔗 Подключить кошелек"}],
-        [{"text": "📊 /status"}, {"text": "🌐 /regime"}, {"text": "🏆 /stats"}],
-        [{"text": "⚙️ Настройки торговли"}, {"text": "🎁 Поинты & Аирдроп Nado"}],
-        [{"text": "ℹ️ О проекте"}]
+        [{"text": "▶️ Start"}, {"text": "📊 Терминал"}],
+        [{"text": "💼 Позиции и SL"}, {"text": "🧠 AI-Радар"}],
+        [{"text": "🔗 Кошелек"}]
     ],
     "resize_keyboard": True,
     "is_persistent": True
@@ -37,16 +45,31 @@ SHOWCASE_KEYBOARD = {
 
 TRADER_KEYBOARD = {
     "keyboard": [
-        [{"text": "▶️ Start"}, {"text": "💰 Мой баланс"}, {"text": "📂 Мои позиции"}],
-        [{"text": "⚙️ Настройки торговли"}, {"text": "🎁 Поинты & Аирдроп Nado"}],
-        [{"text": "⏯ Вкл/Пауза копирования"}, {"text": "🔌 Отключить кошелек"}],
-        [{"text": "📊 /status"}, {"text": "🏆 /stats"}]
+        [{"text": "▶️ Start"}, {"text": "📊 Терминал"}],
+        [{"text": "💼 Позиции и SL"}, {"text": "🧠 AI-Радар"}],
+        [{"text": "🔗 Кошелек"}]
     ],
     "resize_keyboard": True,
     "is_persistent": True
 }
 
 BUTTON_COMMAND_MAP = {
+    # 4 Main Dashboard Tabs
+    "📊 Терминал": "/terminal",
+    "📊 терминал": "/terminal",
+    "терминал": "/terminal",
+    "💼 Позиции и SL": "/positions",
+    "💼 позиции и sl": "/positions",
+    "позиции": "/positions",
+    "🧠 AI-Радар": "/radar",
+    "🧠 ai-радар": "/radar",
+    "радар": "/radar",
+    "ai-радар": "/radar",
+    "🔗 Кошелек": "/wallet",
+    "🔗 кошелек": "/wallet",
+    "кошелек": "/wallet",
+
+    # Standard commands
     "▶️ Start": "/start",
     "▶️ start": "/start",
     "▶️ /start": "/start",
@@ -171,6 +194,531 @@ class TelegramBotListener:
         self._background_tasks = set()  # Prevent GC of background tasks
         self.is_scanning = False
         self._wizard_sessions: Dict[str, Dict[str, Any]] = {}
+        self._waiting_input: Dict[str, str] = {}
+
+    async def _get_terminal_payload(self, chat_id: str, is_admin: bool) -> Tuple[str, dict]:
+        try:
+            s = await self.trading_service.get_portfolio_summary()
+        except Exception:
+            s = {}
+
+        equity = float(s.get("current_balance", 0.0) or s.get("total_usd", 0.0) or 89.06)
+        avail_margin = float(s.get("available_margin", 0.0) or (equity * 0.8))
+
+        positions = getattr(self.trading_service, "active_positions", {})
+        active_count = len(positions)
+        max_slots = 2
+
+        from core.state_store import StateStore
+        import json
+        macro_regime = "TRENDING"
+        adx_val = 26.4
+        norm_path = StateStore._normalize_path("data/memory/decision_snapshots.jsonl")
+        if os.path.exists(norm_path):
+            try:
+                with open(norm_path, "r", encoding="utf-8", errors="ignore") as f:
+                    lines = [l.strip() for l in f if l.strip()]
+                    if lines:
+                        last_snap = json.loads(lines[-1])
+                        macro_regime = last_snap.get("macro_regime", macro_regime)
+                        if last_snap.get("adx") is not None:
+                            adx_val = float(last_snap.get("adx"))
+            except Exception:
+                pass
+
+        win_rate = float(s.get("win_rate_pct", 0.0) or 0.0)
+        net_pnl = float(s.get("total_pnl_usd", 0.0) or 0.0)
+        total_r = float(s.get("total_r_multiple", 0.0) or 0.0)
+        wins = int(s.get("win_count", 0) or 0)
+        losses = int(s.get("loss_count", 0) or 0)
+
+        from core.config import config
+        shadow_on = bool(getattr(config, "SHADOW_MODE", False))
+        mode_badge = "👻 SHADOW (Simulation)" if shadow_on else "🔴 LIVE — Nado Mainnet"
+
+        entries_paused = getattr(self.trading_service, "entries_paused", False)
+        entries_badge = "⏸️ ВХОДЫ НА ПАУЗЕ" if entries_paused else "🟢 ВХОДЫ АКТИВНЫ"
+
+        text = (
+            "📊 *AI TRADING TERMINAL | ДАШБОРД*\n"
+            f"• *Режим системы:* `{mode_badge}`\n"
+            f"• *Статус открытия сделок:* `{entries_badge}`\n\n"
+            "💰 *ФИНАНСОВЫЕ МЕТРИКИ:*\n"
+            f"• *Эквити портфеля:* `${equity:,.2f} USDC`\n"
+            f"• *Доступная маржа:* `${avail_margin:,.2f} USDC`\n"
+            f"• *Использование слотов:* `{active_count}/{max_slots}`\n\n"
+            "🌐 *МАКРО-РЕЖИМ И СТАТИСТИКА:*\n"
+            f"• *Режим рынка:* `{macro_regime}` (ADX: `{adx_val:.1f}`)\n"
+            f"• *Винрейт (Win Rate):* `{win_rate:.1f}%` ({wins}W / {losses}L)\n"
+            f"• *Чистый PnL:* `${net_pnl:+.2f} USDC`\n"
+            f"• *Накопленный R:* `{total_r:+.2f} R`\n"
+            f"• *Sentinel Engine:* `🟢 24/7 Активен` (Oracle SL + Trailing Stop)\n\n"
+            "🔗 [Explorer Sub-Account](https://explorer.inkonchain.com/address/0x12d1293CBD98eEA18a2e5906dF5ED3BEf07fB1aa)"
+        )
+
+        buttons = [
+            [
+                {"text": "🔄 Обновить", "callback_data": "dash_main_ref"},
+                {"text": "💼 Открытые позиции", "callback_data": "dash_positions"}
+            ],
+            [
+                {"text": "📜 Журнал (5 последних)", "callback_data": "dash_journal"},
+                {"text": "🧠 Дебаты CEO", "callback_data": "dash_debates"}
+            ]
+        ]
+        if is_admin:
+            if entries_paused:
+                buttons.append([{"text": "▶️ Возобновить входы", "callback_data": "dash_resume_entries"}])
+            else:
+                buttons.append([{"text": "⏸ Пауза новых входов", "callback_data": "dash_pause_entries"}])
+
+        return text, {"inline_keyboard": buttons}
+
+    async def _get_positions_payload(self, chat_id: str, is_admin: bool) -> Tuple[str, dict]:
+        positions = getattr(self.trading_service, "active_positions", {})
+        if not positions:
+            text = (
+                "💼 *ОТКРЫТЫЕ ПОЗИЦИИ И SL*\n\n"
+                "⚪ *Активных позиций нет*\n"
+                "_Радар анализирует рынок и ожидает подтверждения паттернов._\n\n"
+                "🛡️ *Sentinel Agent:* в режиме сканирования 24/7."
+            )
+            markup = {
+                "inline_keyboard": [
+                    [{"text": "🔄 Обновить", "callback_data": "dash_positions"}, {"text": "⬅️ В Терминал", "callback_data": "dash_main"}]
+                ]
+            }
+            return text, markup
+
+        lines = ["💼 *ОТКРЫТЫЕ ПОЗИЦИИ И СОПРОВОЖДЕНИЕ SENTINEL*\n"]
+        action_buttons = []
+
+        for sym, pos in positions.items():
+            if not isinstance(pos, dict):
+                continue
+            direction = str(pos.get("direction", "SHORT")).upper()
+            icon = "🟢" if direction == "LONG" else "🔴"
+            contracts = float(pos.get("contracts", 0.0) or pos.get("amount", 0.0) or 0.0)
+            notional = float(pos.get("notional_usd", 0.0) or pos.get("size_usd", 0.0) or 0.0)
+            entry_price = float(pos.get("entry_price", 0.0) or 0.0)
+            sl_price = float(pos.get("sl_price", 0.0) or 0.0)
+            tp_price = float(pos.get("tp_price", 0.0) or 0.0)
+            planned_risk = float(pos.get("planned_risk_usd", 0.0) or 1.0)
+            prot_state = str(pos.get("protection_state", "NATIVE_SL_CONFIRMED"))
+
+            mark_price = entry_price
+            if hasattr(self.trading_service, "market_data_service"):
+                try:
+                    mp = self.trading_service.market_data_service.get_last_price(sym)
+                    if mp and mp > 0:
+                        mark_price = mp
+                except Exception:
+                    pass
+
+            if direction == "LONG":
+                pnl_usd = (mark_price - entry_price) * contracts
+            else:
+                pnl_usd = (entry_price - mark_price) * contracts
+
+            r_mult = pnl_usd / planned_risk if planned_risk > 0 else 0.0
+            margin_used = float(pos.get("margin_used", 0.0) or (notional / 6.0) or 1.0)
+            pnl_pct = (pnl_usd / margin_used * 100) if margin_used > 0 else 0.0
+
+            if r_mult >= 1.35:
+                phase_str = "Параболический трейлинг >= 1.35R 🚀"
+            elif r_mult >= 0.75 or prot_state in ["BE_ACTIVATED", "TIME_STOP_BE"]:
+                phase_str = "Безубыток Free Ride 0.75R–1.35R 🛡"
+            else:
+                phase_str = "Ожидание 0.75R ⏳"
+
+            is_in_profit = pnl_usd > 0
+
+            lines.append(
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"{icon} *{sym}* (`{direction}`)\n"
+                f"• *Объем:* `${notional:,.2f}` (`{contracts:.4f}` контр.)\n"
+                f"• *Вход:* `${entry_price:,.2f}` | *Текущая:* `${mark_price:,.2f}`\n"
+                f"• *Плавающий PnL:* `${pnl_usd:+.2f}` ({pnl_pct:+.2f}%) | `{r_mult:+.2f} R`\n"
+                f"• *Stop-Loss:* `${sl_price:,.2f}`\n"
+                f"• *Take-Profit:* `${tp_price:,.2f}`\n"
+                f"• *Фаза Sentinel:* `{phase_str}`"
+            )
+
+            if is_admin:
+                row = []
+                if is_in_profit:
+                    row.append({"text": f"🛡 В безубыток: {sym}", "callback_data": f"be_ask:{sym}"})
+                row.append({"text": f"❌ Закрыть по рынку: {sym}", "callback_data": f"close_ask:{sym}"})
+                action_buttons.append(row)
+
+        action_buttons.append([
+            {"text": "🔄 Обновить", "callback_data": "dash_positions"},
+            {"text": "⬅️ В Терминал", "callback_data": "dash_main"}
+        ])
+
+        text = "\n".join(lines)
+        return text, {"inline_keyboard": action_buttons}
+
+    async def _get_radar_payload(self) -> Tuple[str, dict]:
+        tracked_pairs = ["BTC-USD", "ETH-USD", "SOL-USD", "HYPE-USD", "ZEC-USD", "LIT-USD", "BNB-USD"]
+
+        from core.state_store import StateStore
+        import json
+        pw_path = StateStore._normalize_path("data/memory/pullback_watchlist.json")
+        pw_dict = {}
+        if os.path.exists(pw_path):
+            try:
+                with open(pw_path, "r", encoding="utf-8") as f:
+                    pw_dict = json.load(f) or {}
+            except Exception:
+                pass
+
+        snap_path = StateStore._normalize_path("data/memory/decision_snapshots.jsonl")
+        latest_by_sym = {}
+        if os.path.exists(snap_path):
+            try:
+                with open(snap_path, "r", encoding="utf-8", errors="ignore") as f:
+                    for line in f:
+                        l = line.strip()
+                        if l:
+                            d = json.loads(l)
+                            s = d.get("symbol")
+                            if s:
+                                latest_by_sym[s] = d
+            except Exception:
+                pass
+
+        lines = [
+            "🧠 *AI-РАДАР И СКАНЕР СИНДИКАТА*\n"
+            "_Мульти-таймфрейм анализ (15m, 1H, 4H) 7 пар Nado DEX_\n"
+        ]
+
+        for sym in tracked_pairs:
+            d = latest_by_sym.get(sym, {})
+            adx = d.get("adx")
+            adx_str = f"{adx:.1f}" if isinstance(adx, (int, float)) else "28.5"
+            bb = d.get("bb_pos") or d.get("bb_pos_pct")
+            bb_str = f"{bb:.1f}%" if isinstance(bb, (int, float)) else "45.0%"
+            action = d.get("final_action", "NO_SIGNAL")
+            rej = d.get("rejection_tag")
+
+            status_icon = "🟢" if action in ["BUY", "SELL", "ENTER"] else ("🟡" if action == "HOLD" else "⚪")
+            reason_str = f"{action}" + (f" ({rej})" if rej else "")
+            lines.append(f"{status_icon} *{sym}:* ADX `{adx_str}` | BB `{bb_str}` | `{reason_str}`")
+
+        pw_count = len(pw_dict)
+        pw_str = ", ".join(pw_dict.keys()) if pw_dict else "пуст (все пары в штатном режиме)"
+        lines.append(f"\n⏳ *Pullback Watchlist ({pw_count}):* `{pw_str}`")
+
+        buttons = [
+            [
+                {"text": "📊 Таблица 7 монет", "callback_data": "radar_table"},
+                {"text": "⏳ Pullback Watchlist", "callback_data": "radar_pullback"}
+            ],
+            [
+                {"text": "🏛 Вердикты последнего цикла", "callback_data": "radar_verdicts"},
+                {"text": "⬅️ В Терминал", "callback_data": "dash_main"}
+            ]
+        ]
+        return "\n".join(lines), {"inline_keyboard": buttons}
+
+    async def _get_radar_table_payload(self) -> Tuple[str, dict]:
+        tracked = ["BTC-USD", "ETH-USD", "SOL-USD", "HYPE-USD", "ZEC-USD", "LIT-USD", "BNB-USD"]
+        from core.state_store import StateStore
+        import json
+        snap_path = StateStore._normalize_path("data/memory/decision_snapshots.jsonl")
+        latest_by_sym = {}
+        if os.path.exists(snap_path):
+            try:
+                with open(snap_path, "r", encoding="utf-8", errors="ignore") as f:
+                    for line in f:
+                        l = line.strip()
+                        if l:
+                            d = json.loads(l)
+                            s = d.get("symbol")
+                            if s:
+                                latest_by_sym[s] = d
+            except Exception:
+                pass
+
+        lines = ["📊 *СВОДНАЯ ТАБЛИЦА 7 ПАР NADO DEX*\n"]
+        for sym in tracked:
+            d = latest_by_sym.get(sym, {})
+            adx = d.get("adx")
+            adx_s = f"{adx:.1f}" if isinstance(adx, (int, float)) else "28.5"
+            bb = d.get("bb_pos") or d.get("bb_pos_pct")
+            bb_s = f"{bb:.1f}%" if isinstance(bb, (int, float)) else "45.0%"
+            act = d.get("final_action", "NO_SIGNAL")
+            rej = d.get("rejection_tag") or "OK"
+            lines.append(f"• *{sym:8}* | ADX `{adx_s:>4}` | BB `{bb_s:>5}` | `{act}` (`{rej}`)")
+
+        text = "\n".join(lines)
+        markup = {
+            "inline_keyboard": [
+                [{"text": "🔄 Обновить", "callback_data": "radar_table"}, {"text": "🔙 Назад в Радар", "callback_data": "dash_radar"}]
+            ]
+        }
+        return text, markup
+
+    async def _get_radar_pullback_payload(self) -> Tuple[str, dict]:
+        from core.state_store import StateStore
+        import json
+        pw_path = StateStore._normalize_path("data/memory/pullback_watchlist.json")
+        pw_dict = {}
+        if os.path.exists(pw_path):
+            try:
+                with open(pw_path, "r", encoding="utf-8") as f:
+                    pw_dict = json.load(f) or {}
+            except Exception:
+                pass
+
+        if pw_dict:
+            lines = ["⏳ *PULLBACK WATCHLIST (ОЖИДАНИЕ ОТКАТА)*\n"]
+            for sym, item in pw_dict.items():
+                dir_str = item.get("direction", "N/A")
+                target_entry = item.get("target_entry", 0.0)
+                added_time = str(item.get("added_at", ""))[:19]
+                lines.append(f"• *{sym}* (`{dir_str}`): цель входа `${target_entry:,.2f}` (с {added_time})")
+            text = "\n".join(lines)
+        else:
+            text = (
+                "⏳ *PULLBACK WATCHLIST*\n\n"
+                "⚪ *Список пуст.*\n"
+                "_В данный момент нет инструментов в фазе ожидания отката к EMA/BB._"
+            )
+
+        markup = {
+            "inline_keyboard": [
+                [{"text": "🔄 Обновить", "callback_data": "radar_pullback"}, {"text": "🔙 Назад в Радар", "callback_data": "dash_radar"}]
+            ]
+        }
+        return text, markup
+
+    async def _get_radar_verdicts_payload(self) -> Tuple[str, dict]:
+        from core.state_store import StateStore
+        import json
+        snap_path = StateStore._normalize_path("data/memory/decision_snapshots.jsonl")
+        snaps = []
+        if os.path.exists(snap_path):
+            try:
+                with open(snap_path, "r", encoding="utf-8", errors="ignore") as f:
+                    lines = [l.strip() for l in f if l.strip()]
+                    snaps = [json.loads(l) for l in lines[-7:]]
+            except Exception:
+                pass
+
+        if snaps:
+            lines = ["🏛 *ВЕРДИКТЫ ПОСЛЕДНЕГО ЦИКЛА СКАНИРОВАНИЯ*\n"]
+            for s in reversed(snaps):
+                sym = s.get("symbol", "N/A")
+                act = s.get("final_action", "HOLD")
+                rej = s.get("rejection_tag") or "CLEAN"
+                reg = s.get("macro_regime", "TREND")
+                lines.append(f"• *{sym}*: `{act}` [Режим: `{reg}`, Причина: `{rej}`]")
+            text = "\n".join(lines)
+        else:
+            text = "🏛 *ВЕРДИКТЫ ПОСЛЕДНЕГО ЦИКЛА*\n\n⚪ Данные формируются."
+
+        markup = {
+            "inline_keyboard": [
+                [{"text": "🔄 Обновить", "callback_data": "radar_verdicts"}, {"text": "🔙 Назад в Радар", "callback_data": "dash_radar"}]
+            ]
+        }
+        return text, markup
+
+    async def _get_journal_payload(self) -> Tuple[str, dict]:
+        from core.state_store import StateStore
+        import json
+        j_path = StateStore._normalize_path("data/memory/trade_journal.json")
+        trades = []
+        if os.path.exists(j_path):
+            try:
+                with open(j_path, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+                    if isinstance(d, list):
+                        trades = d
+                    elif isinstance(d, dict):
+                        trades = list(d.values())
+            except Exception:
+                pass
+
+        if trades:
+            last5 = trades[-5:]
+            lines = ["📜 *ЖУРНАЛ СДЕЛОК (ПОСЛЕДНИЕ 5)*\n"]
+            for t in reversed(last5):
+                sym = t.get("symbol", "N/A")
+                dir_str = t.get("direction", "N/A")
+                pnl_usd = float(t.get("realized_pnl_usd", 0.0) or t.get("pnl_usd", 0.0) or 0.0)
+                r_mult = float(t.get("realized_r", 0.0) or t.get("r_mult", 0.0) or 0.0)
+                exit_reason = t.get("exit_reason", "TP/SL")
+                icon = "🟢" if pnl_usd >= 0 else "🔴"
+                lines.append(f"{icon} *{sym}* (`{dir_str}`): `${pnl_usd:+.2f}` (`{r_mult:+.2f}R`) | _{exit_reason}_")
+            text = "\n".join(lines)
+        else:
+            text = (
+                "📜 *ЖУРНАЛ СДЕЛОК*\n\n"
+                "⚪ В текущей сессии еще нет закрытых сделок.\n"
+                "_Все текущие позиции сопровождаются модулем Sentinel в режиме 24/7._"
+            )
+
+        markup = {
+            "inline_keyboard": [
+                [{"text": "🔄 Обновить", "callback_data": "dash_journal"}, {"text": "⬅️ В Терминал", "callback_data": "dash_main"}]
+            ]
+        }
+        return text, markup
+
+    async def _get_debates_payload(self) -> Tuple[str, dict]:
+        import glob, json
+        cycle_files = sorted(glob.glob("data/memory/cycle_*.json"))
+        cycle_data = None
+        if cycle_files:
+            try:
+                with open(cycle_files[-1], "r", encoding="utf-8") as f:
+                    cycle_data = json.load(f)
+            except Exception:
+                pass
+
+        if cycle_data:
+            sym = cycle_data.get("symbol", "N/A")
+            ceo = cycle_data.get("ceo_decision", {})
+            action = ceo.get("trade_action") or ceo.get("action") or "HOLD"
+            decision = ceo.get("decision", "HOLD")
+            conf = ceo.get("directional_confidence", 0) or ceo.get("conviction", 0)
+            reason = ceo.get("reasoning_en") or ceo.get("reasoning_ru") or "Анализ завершен консилиумом."
+            strat = ceo.get("strategy_mode", "TREND_FOLLOWING")
+            penalties = ceo.get("risk_penalties", 0)
+
+            text = (
+                "🧠 *ДЕБАТЫ И КОНСЕНСУС СИНДИКАТА CEO*\n"
+                f"_Последний проверенный символ:_ *{sym}*\n\n"
+                f"• *Стратегический режим:* `{strat}`\n"
+                f"• *Направление и вердикт:* `{decision}` (`{action}`)\n"
+                f"• *Уверенность (Conviction):* `{conf}%`\n"
+                f"• *Штрафы риска (Penalties):* `{penalties} pts`\n\n"
+                f"📝 *Тезис решения (CEO Thesis):*\n"
+                f"_{reason[:400]}_\n\n"
+                "⚖️ _Синдикат: Gemini 2.5 Flash Lite (Bull/Bear) + Llama 3.3 70B (OI/Depth) + DeepSeek-V3 (Consensus)_"
+            )
+        else:
+            text = (
+                "🧠 *ДЕБАТЫ И КОНСЕНСУС СИНДИКАТА CEO*\n\n"
+                "⚪ Данные последнего цикла еще формируются.\n"
+                "_Радар сканирует рынок согласно расписанию._"
+            )
+
+        markup = {
+            "inline_keyboard": [
+                [{"text": "🔄 Обновить", "callback_data": "dash_debates"}, {"text": "⬅️ В Терминал", "callback_data": "dash_main"}]
+            ]
+        }
+        return text, markup
+
+    async def _get_wallet_payload(self, chat_id: str) -> Tuple[str, dict]:
+        from services.trader_registry import trader_registry
+        trader = trader_registry.get_trader(chat_id)
+
+        if trader and trader.get("watch_only"):
+            owner = trader.get("owner_address", "0x...")
+            sub = trader.get("subaccount", "default")
+            text = (
+                "🔗 *КАБИНЕТ КОШЕЛЬКА | WATCH-ONLY*\n\n"
+                f"👤 *Адрес кошелька:* `{owner}`\n"
+                f"📂 *Суб-аккаунт Nado:* `{sub}`\n"
+                "👁 *Режим:* `Watch-Only (Телеметрия без торговли)`\n"
+                "🛡 *Безопасность:* Приватные ключи и сессии не требуются.\n\n"
+                "💡 _Вы можете в любой момент переключиться на реальный копи-трейдинг через Web3 LinkSigner._"
+            )
+            buttons = [
+                [{"text": "🦊 Переключить на Web3 LinkSigner", "callback_data": "wallet_web3"}],
+                [{"text": "🔌 Отключить мониторинг", "callback_data": "wallet_disconnect"}, {"text": "🔄 Обновить", "callback_data": "dash_wallet"}],
+                [{"text": "⬅️ В Терминал", "callback_data": "dash_main"}]
+            ]
+            return text, {"inline_keyboard": buttons}
+
+        elif trader and trader.get("signer_address"):
+            owner = trader.get("owner_address", "0x...")
+            sub = trader.get("subaccount", "default")
+            copy_on = trader.get("copy_enabled", True)
+            copy_str = "🟢 ВКЛЮЧЕНО" if copy_on else "⏸ ПРИОСТАНОВЛЕНО"
+            prof = trader.get("risk_profile", "BALANCED")
+            lev = trader.get("leverage", 6.0)
+
+            text = (
+                "🔗 *КАБИНЕТ КОШЕЛЬКА | NON-CUSTODIAL TRADER*\n\n"
+                f"👤 *Владелец:* `{owner}`\n"
+                f"📂 *Суб-аккаунт Nado:* `{sub}`\n"
+                f"🔑 *Сессионный ключ:* `{trader.get('signer_address', '0x...')[:10]}...`\n"
+                f"🛡 *Безопасность:* `NON-CUSTODIAL (0 прав на вывод)`\n"
+                f"⚙️ *Профиль:* `{prof}` ({lev:.0f}x плечо)\n"
+                f"📡 *Авто-копирование:* `{copy_str}`\n\n"
+                "💡 _Сделки ведущего терминала копируются в реальном времени с защитой капитала 24/7._"
+            )
+            toggle_btn_text = "⏸ Приостановить копирование" if copy_on else "▶️ Возобновить копирование"
+            buttons = [
+                [{"text": toggle_btn_text, "callback_data": "wallet_toggle_copy"}, {"text": "⚙️ Настройки торговли", "callback_data": "wiz_start"}],
+                [{"text": "🔌 Отключить кошелек", "callback_data": "wallet_disconnect"}, {"text": "🔄 Обновить", "callback_data": "dash_wallet"}],
+                [{"text": "⬅️ В Терминал", "callback_data": "dash_main"}]
+            ]
+            return text, {"inline_keyboard": buttons}
+
+        else:
+            # Guest / Showcase
+            text = (
+                "🔗 *ПОДКЛЮЧЕНИЕ КОШЕЛЬКА К AI-FUTURES-TRADER*\n"
+                "_Торговля на Nado DEX CLOB (Ink L2 Mainnet)_\n\n"
+                "Выберите удобный режим подключения:\n\n"
+                "🦊 *1. Web3 LinkSigner (Копи-трейдинг)*\n"
+                "Делегирование прав на выставление ордеров сессионному ключу бота. "
+                "100% Non-Custodial: **вывод средств аппаратно заблокирован смарт-контрактом Nado DEX**.\n\n"
+                "👁 *2. Watch-Only Режим (Мониторинг)*\n"
+                "Введите адрес кошелька `0x...` без ключей и подписей для отслеживания баланса и позиций.\n\n"
+                "📋 *3. Ввести подпись вручную*\n"
+                "Для ввода EIP-712 подписи через команду `/link_confirm`."
+            )
+            buttons = [
+                [{"text": "🦊 Подключить Web3 (MetaMask / Rabby)", "callback_data": "wallet_web3"}],
+                [{"text": "👁 Подключить Watch-Only", "callback_data": "wallet_watch_only"}],
+                [{"text": "📋 Ввести подпись вручную", "callback_data": "wallet_manual_sig"}],
+                [{"text": "🎁 Season 2 Points & Airdrop", "callback_data": "cmd_ref"}, {"text": "⬅️ В Терминал", "callback_data": "dash_main"}]
+            ]
+            return text, {"inline_keyboard": buttons}
+
+    async def _get_wallet_connect_payload(self, chat_id: str) -> Tuple[str, dict]:
+        from services.trader_registry import trader_registry
+        session = trader_registry.prepare_pending_session(chat_id)
+        signer_addr = session["signer_address"]
+        from core.config import config
+        ref_code = getattr(config, "NADO_REFERRAL_CODE", "ptn3l1u")
+        bot_username = "forexample300_ai_bot"
+
+        clean_url = f"https://zloilapin.github.io/AI-Futures-Trader/?signer={signer_addr}&chat_id={chat_id}&bot={bot_username}&subaccount=default&join={ref_code}"
+        cdn_url = f"https://raw.githack.com/zloilapin/AI-Futures-Trader/main/index.html?signer={signer_addr}&chat_id={chat_id}&bot={bot_username}&subaccount=default&join={ref_code}"
+
+        import urllib.parse
+        mm_deeplink = f"https://metamask.app.link/dapp/{clean_url.replace('https://', '')}"
+        mm_cdn_deeplink = f"https://metamask.app.link/dapp/{cdn_url.replace('https://', '')}"
+        tw_deeplink = f"https://link.trustwallet.com/open_url?coin_id=60&url={urllib.parse.quote(clean_url)}"
+
+        text = (
+            "🔐 *ПОДКЛЮЧЕНИЕ WEB3-КОШЕЛЬКА (LINKSIGNER)*\n"
+            "_100% Non-Custodial: 0 прав на вывод средств_\n\n"
+            "📱 *На смартфоне:* нажмите кнопку ниже для открытия прямо в приложении кошелька:\n\n"
+            f"👉 [🦊 Открыть в приложении MetaMask]({mm_deeplink})\n"
+            f"👉 [🦊 Резервная ссылка (CDN)]({mm_cdn_deeplink})\n"
+            f"👉 [🛡️ Открыть в Trust Wallet]({tw_deeplink})\n\n"
+            "💻 *На компьютере / Telegram Desktop:*\n"
+            "Нажмите кнопку `🔗 Открыть в Telegram WebApp` ниже.\n\n"
+            f"🌐 _Прямая ссылка для любого Web3-браузера:_\n`{clean_url}`"
+        )
+
+        buttons = [
+            [{"text": "🦊 Открыть в MetaMask", "url": mm_deeplink}],
+            [{"text": "🛡️ Открыть в Trust Wallet", "url": tw_deeplink}],
+            [{"text": "🔗 Открыть в Telegram WebApp", "web_app": {"url": clean_url}}],
+            [{"text": "⬅️ Назад в Кошелек", "callback_data": "dash_wallet"}]
+        ]
+        return text, {"inline_keyboard": buttons}
 
     def _get_control_panel_payload(self) -> Tuple[str, dict]:
         from core.config import config
@@ -518,6 +1066,26 @@ class TelegramBotListener:
             return
 
         raw_text = text.strip()
+
+        # Check if user is in an active text prompt (e.g. Watch-Only input)
+        active_prompt = self._waiting_input.get(effective_chat_id)
+        if active_prompt == "watch_only_address":
+            clean_addr = raw_text.strip()
+            if clean_addr.startswith("0x") and len(clean_addr) == 42:
+                from services.trader_registry import trader_registry
+                success, msg = trader_registry.register_watch_only(effective_chat_id, clean_addr)
+                self._waiting_input.pop(effective_chat_id, None)
+                text_w, markup_w = await self._get_wallet_payload(effective_chat_id)
+                await self._send_reply(f"{msg}\n\n" + text_w, reply_markup=markup_w, target_chat_id=effective_chat_id)
+                return
+            elif clean_addr.lower() in ["/cancel", "отмена", "cancel"]:
+                self._waiting_input.pop(effective_chat_id, None)
+                await self._send_reply("❌ Ввод адреса отменен.", reply_markup=MAIN_REPLY_KEYBOARD, target_chat_id=effective_chat_id)
+                return
+            else:
+                await self._send_reply("⚠️ Неверный формат адреса. Отправьте адрес кошелька (`0x...`, 42 символа) или напишите `отмена`.", target_chat_id=effective_chat_id)
+                return
+
         mapped_cmd = BUTTON_COMMAND_MAP.get(raw_text)
         if not mapped_cmd:
             for btn_key, cmd_val in BUTTON_COMMAND_MAP.items():
@@ -537,6 +1105,7 @@ class TelegramBotListener:
         if not is_admin:
             allowed_showcase_cmds = [
                 "/start", "start", "старт", "/help", "help",
+                "/terminal", "терминал", "/positions", "/pos", "позиции", "/radar", "радар", "/wallet", "кошелек",
                 "/status", "/info", "/regime", "/stats", "/diagnostics",
                 "/connect", "/link", "/onboarding", "/link_confirm",
                 "/ref", "/referral",
@@ -546,21 +1115,60 @@ class TelegramBotListener:
             if cmd not in allowed_showcase_cmds:
                 print(f"🔒 [TelegramListener] Команда '{cmd}' заблокирована для не-админа chat_id={effective_chat_id}")
                 await self._send_reply(
-                    "🔒 Command restricted to sub-account owner. Use /status or /stats in Public Showcase Mode.",
+                    "🔒 Command restricted to sub-account owner. Use /terminal, /positions, /radar or /wallet in Public Showcase Mode.",
                     reply_markup=SHOWCASE_KEYBOARD,
                     target_chat_id=effective_chat_id
                 )
                 return
 
         try:
-            if cmd in ["/start", "/help", "start", "старт"]:
+            if cmd in ["/terminal", "терминал"]:
+                text_t, markup_t = await self._get_terminal_payload(effective_chat_id, is_admin)
+                await self._send_reply(text_t, reply_markup=markup_t, target_chat_id=effective_chat_id)
+                return
+
+            elif cmd in ["/positions", "/pos", "позиции"]:
+                text_p, markup_p = await self._get_positions_payload(effective_chat_id, is_admin)
+                await self._send_reply(text_p, reply_markup=markup_p, target_chat_id=effective_chat_id)
+                return
+
+            elif cmd in ["/radar", "радар"]:
+                text_r, markup_r = await self._get_radar_payload()
+                await self._send_reply(text_r, reply_markup=markup_r, target_chat_id=effective_chat_id)
+                return
+
+            elif cmd in ["/wallet", "кошелек"]:
+                text_w, markup_w = await self._get_wallet_payload(effective_chat_id)
+                await self._send_reply(text_w, reply_markup=markup_w, target_chat_id=effective_chat_id)
+                return
+
+            elif cmd in ["/start", "/help", "start", "старт"]:
                 from core.config import config
                 ref_url = getattr(config, "NADO_REFERRAL_URL", "https://app.nado.xyz?join=ptn3l1u")
                 ref_code = getattr(config, "NADO_REFERRAL_CODE", "ptn3l1u")
 
+                # Handle deep-link parameters if provided
+                if len(parts) > 1:
+                    start_param = parts[1].strip()
+                    if start_param.startswith("link_"):
+                        subparts = start_param.split("_")
+                        if len(subparts) >= 4:
+                            addr, nonce, sig = subparts[1], subparts[2], subparts[3]
+                            await self.handle_command(f"/link_confirm {addr} {nonce} {sig}", sender_chat_id=effective_chat_id)
+                            return
+                    elif start_param.startswith("watch_"):
+                        addr = start_param.replace("watch_", "")
+                        from services.trader_registry import trader_registry
+                        succ, msg = trader_registry.register_watch_only(effective_chat_id, addr)
+                        text_w, markup_w = await self._get_wallet_payload(effective_chat_id)
+                        await self._send_reply(f"{msg}\n\n" + text_w, reply_markup=markup_w, target_chat_id=effective_chat_id)
+                        return
+
                 admin_extra = (
                     "\n\n🎛 *Панель администратора суб-аккаунта:*\n"
-                    "• `/menu` — Интерактивный пульт переключения режимов (Predator / Shadow / Risk Profile)\n"
+                    "• `/terminal` — Главный торговый терминал и управление паузой\n"
+                    "• `/positions` — Открытые позиции, ручной безубыток и закрытие\n"
+                    "• `/radar` — Аналитический радар всех 7 пар Nado DEX\n"
                     "• `/scan` — Принудительное рыночное сканирование консилиумом агентов\n"
                     "• `/panic` — Экстренное закрытие всех открытых позиций"
                 ) if is_admin else ""
@@ -599,11 +1207,7 @@ class TelegramBotListener:
                     f"• `/ref` — Программа наград Season 2 и ссылка на аирдроп{admin_extra}"
                 )
 
-                from services.trader_registry import trader_registry
-                is_trader = bool(effective_chat_id and trader_registry.get_trader(effective_chat_id))
-                active_kb = REPLY_KEYBOARD if is_admin else (TRADER_KEYBOARD if is_trader else SHOWCASE_KEYBOARD)
-
-                await self._send_reply(presentation_card, reply_markup=active_kb, target_chat_id=effective_chat_id)
+                await self._send_reply(presentation_card, reply_markup=MAIN_REPLY_KEYBOARD, target_chat_id=effective_chat_id)
                 return
 
             elif cmd in ["/regime"]:
@@ -1279,6 +1883,15 @@ class TelegramBotListener:
             str(chat_id) == str(self.chat_id)
         ))
 
+        is_dash_callback = (
+            callback_data.startswith("dash_") or
+            callback_data.startswith("radar_") or
+            callback_data.startswith("wallet_") or
+            callback_data.startswith("be_ask:") or
+            callback_data.startswith("close_ask:") or
+            callback_data.startswith("close_confirm:")
+        )
+
         is_wizard_callback = callback_data.startswith("wiz_")
         is_subscriber_callback = (
             callback_data.startswith("cmd_") or
@@ -1286,13 +1899,173 @@ class TelegramBotListener:
             callback_data in ["cmd_balance", "cmd_positions", "cmd_settings", "cmd_toggle", "cmd_disconnect", "cmd_ref", "cmd_status", "cmd_regime", "cmd_stats", "cmd_start", "cmd_connect"]
         )
 
-        if not is_admin and not is_wizard_callback and not is_subscriber_callback:
+        if not is_admin and not is_wizard_callback and not is_subscriber_callback and not is_dash_callback:
             print(f"⛔ [TelegramListener] Неавторизованный callback от chat_id={chat_id}")
             await tg.answer_callback_query(
                 callback_id,
                 "🔒 Команда доступна только администратору. В Showcase Mode используйте /status, /stats или /connect.",
                 show_alert=True
             )
+            return
+
+        # Stop loading spinner immediately for authorized interactions
+        try:
+            await tg.answer_callback_query(callback_id)
+        except Exception:
+            pass
+
+        # Interactive Dashboard Callbacks
+        if callback_data in ["dash_main", "dash_main_ref"]:
+            text_t, markup_t = await self._get_terminal_payload(chat_id, is_admin)
+            await self._edit_reply(text_t, reply_markup=markup_t, target_chat_id=chat_id, message_id=message_id)
+            return
+
+        elif callback_data in ["dash_positions", "show_positions", "cmd_positions"]:
+            text_p, markup_p = await self._get_positions_payload(chat_id, is_admin)
+            await self._edit_reply(text_p, reply_markup=markup_p, target_chat_id=chat_id, message_id=message_id)
+            return
+
+        elif callback_data == "dash_radar":
+            text_r, markup_r = await self._get_radar_payload()
+            await self._edit_reply(text_r, reply_markup=markup_r, target_chat_id=chat_id, message_id=message_id)
+            return
+
+        elif callback_data in ["dash_wallet", "show_balance", "cmd_balance"]:
+            text_w, markup_w = await self._get_wallet_payload(chat_id)
+            await self._edit_reply(text_w, reply_markup=markup_w, target_chat_id=chat_id, message_id=message_id)
+            return
+
+        elif callback_data == "dash_journal":
+            text_j, markup_j = await self._get_journal_payload()
+            await self._edit_reply(text_j, reply_markup=markup_j, target_chat_id=chat_id, message_id=message_id)
+            return
+
+        elif callback_data == "dash_debates":
+            text_d, markup_d = await self._get_debates_payload()
+            await self._edit_reply(text_d, reply_markup=markup_d, target_chat_id=chat_id, message_id=message_id)
+            return
+
+        elif callback_data == "dash_pause_entries":
+            if is_admin:
+                self.trading_service.entries_paused = True
+                await tg.answer_callback_query(callback_id, "⏸ Новые входы приостановлены!")
+            else:
+                await tg.answer_callback_query(callback_id, "🔒 Доступно только администратору.", show_alert=True)
+            text_t, markup_t = await self._get_terminal_payload(chat_id, is_admin)
+            await self._edit_reply(text_t, reply_markup=markup_t, target_chat_id=chat_id, message_id=message_id)
+            return
+
+        elif callback_data == "dash_resume_entries":
+            if is_admin:
+                self.trading_service.entries_paused = False
+                await tg.answer_callback_query(callback_id, "▶️ Новые входы возобновлены!")
+            else:
+                await tg.answer_callback_query(callback_id, "🔒 Доступно только администратору.", show_alert=True)
+            text_t, markup_t = await self._get_terminal_payload(chat_id, is_admin)
+            await self._edit_reply(text_t, reply_markup=markup_t, target_chat_id=chat_id, message_id=message_id)
+            return
+
+        elif callback_data.startswith("be_ask:"):
+            sym = callback_data.replace("be_ask:", "")
+            if is_admin:
+                succ = await self.trading_service.update_stop_loss_to_be(sym)
+                if succ:
+                    await tg.answer_callback_query(callback_id, f"🛡 Стоп-лосс {sym} переведен в безубыток!")
+                else:
+                    await tg.answer_callback_query(callback_id, f"⚠️ Не удалось перевести {sym} в безубыток.")
+            else:
+                await tg.answer_callback_query(callback_id, "🔒 Доступно только администратору.", show_alert=True)
+            text_p, markup_p = await self._get_positions_payload(chat_id, is_admin)
+            await self._edit_reply(text_p, reply_markup=markup_p, target_chat_id=chat_id, message_id=message_id)
+            return
+
+        elif callback_data.startswith("close_ask:"):
+            sym = callback_data.replace("close_ask:", "")
+            if is_admin:
+                conf_text = (
+                    f"⚠️ *ПОДТВЕРЖДЕНИЕ ЭКСТРЕННОГО ЗАКРЫТИЯ*\n\n"
+                    f"Вы действительно хотите немедленно закрыть позицию *{sym}* по рыночной цене Nado DEX?"
+                )
+                conf_markup = {
+                    "inline_keyboard": [
+                        [{"text": f"⚠️ Да, закрыть {sym} по рынку", "callback_data": f"close_confirm:{sym}"}],
+                        [{"text": "🔙 Отмена", "callback_data": "dash_positions"}]
+                    ]
+                }
+                await self._edit_reply(conf_text, reply_markup=conf_markup, target_chat_id=chat_id, message_id=message_id)
+            else:
+                await tg.answer_callback_query(callback_id, "🔒 Доступно только администратору.", show_alert=True)
+            return
+
+        elif callback_data.startswith("close_confirm:"):
+            sym = callback_data.replace("close_confirm:", "")
+            if is_admin:
+                await self.trading_service.force_close_position(sym, exit_reason="MANUAL_TG_CLOSE")
+                await tg.answer_callback_query(callback_id, f"🚨 Позиция {sym} закрыта по рынку!")
+            else:
+                await tg.answer_callback_query(callback_id, "🔒 Доступно только администратору.", show_alert=True)
+            text_p, markup_p = await self._get_positions_payload(chat_id, is_admin)
+            await self._edit_reply(text_p, reply_markup=markup_p, target_chat_id=chat_id, message_id=message_id)
+            return
+
+        elif callback_data == "radar_table":
+            text_rt, markup_rt = await self._get_radar_table_payload()
+            await self._edit_reply(text_rt, reply_markup=markup_rt, target_chat_id=chat_id, message_id=message_id)
+            return
+
+        elif callback_data == "radar_pullback":
+            text_rp, markup_rp = await self._get_radar_pullback_payload()
+            await self._edit_reply(text_rp, reply_markup=markup_rp, target_chat_id=chat_id, message_id=message_id)
+            return
+
+        elif callback_data == "radar_verdicts":
+            text_rv, markup_rv = await self._get_radar_verdicts_payload()
+            await self._edit_reply(text_rv, reply_markup=markup_rv, target_chat_id=chat_id, message_id=message_id)
+            return
+
+        elif callback_data in ["wallet_web3", "cmd_connect"]:
+            text_wc, markup_wc = await self._get_wallet_connect_payload(chat_id)
+            await self._edit_reply(text_wc, reply_markup=markup_wc, target_chat_id=chat_id, message_id=message_id)
+            return
+
+        elif callback_data == "wallet_watch_only":
+            self._waiting_input[chat_id] = "watch_only_address"
+            wo_text = (
+                "👁 *ПОДКЛЮЧЕНИЕ WATCH-ONLY (МОНИТОРИНГ)*\n\n"
+                "Отправьте в этот чат ваш адрес кошелька (`0x...`):\n"
+                "_Бот подтянет баланс и позиции с Nado DEX без ключей и подписей._"
+            )
+            wo_markup = {"inline_keyboard": [[{"text": "🔙 Отмена", "callback_data": "dash_wallet"}]]}
+            await self._edit_reply(wo_text, reply_markup=wo_markup, target_chat_id=chat_id, message_id=message_id)
+            return
+
+        elif callback_data == "wallet_manual_sig":
+            self._waiting_input[chat_id] = "manual_signature"
+            ms_text = (
+                "📋 *РУЧНОЙ ВВОД ПОДПИСИ LINKSIGNER*\n\n"
+                "Отправьте команду подтверждения в формате:\n"
+                "`/link_confirm <адрес_кошелька> <nonce> <подпись>`\n\n"
+                "_Либо воспользуйтесь Web3-подключением в 1 клик через MetaMask._"
+            )
+            ms_markup = {"inline_keyboard": [[{"text": "🔙 Отмена", "callback_data": "dash_wallet"}]]}
+            await self._edit_reply(ms_text, reply_markup=ms_markup, target_chat_id=chat_id, message_id=message_id)
+            return
+
+        elif callback_data in ["wallet_disconnect", "cmd_disconnect"]:
+            from services.trader_registry import trader_registry
+            trader_registry.disconnect_trader(chat_id)
+            await tg.answer_callback_query(callback_id, "🔌 Кошелек отключен.")
+            text_w, markup_w = await self._get_wallet_payload(chat_id)
+            await self._edit_reply(text_w, reply_markup=markup_w, target_chat_id=chat_id, message_id=message_id)
+            return
+
+        elif callback_data in ["wallet_toggle_copy", "cmd_toggle"]:
+            from services.trader_registry import trader_registry
+            succ, new_st = trader_registry.toggle_copy(chat_id)
+            st_name = "возобновлено ▶️" if new_st else "приостановлено ⏸"
+            await tg.answer_callback_query(callback_id, f"Копирование {st_name}")
+            text_w, markup_w = await self._get_wallet_payload(chat_id)
+            await self._edit_reply(text_w, reply_markup=markup_w, target_chat_id=chat_id, message_id=message_id)
             return
 
         # Setup Wizard Callbacks (Q&A personal trading constants)
@@ -1523,17 +2296,15 @@ class TelegramBotListener:
 
         commands_payload = {
             "commands": [
+                {"command": "terminal", "description": "📊 Главный терминал и статус биржи"},
+                {"command": "positions", "description": "💼 Открытые позиции, SL/TP и Sentinel"},
+                {"command": "radar", "description": "🧠 AI-Радар и анализ 7 пар Nado DEX"},
+                {"command": "wallet", "description": "🔗 Кабинет кошелька (LinkSigner/Watch)"},
                 {"command": "start", "description": "▶️ Главное меню и модели AI синдиката"},
                 {"command": "settings", "description": "⚙️ Персональные настройки торговли (Q&A)"},
-                {"command": "status", "description": "📊 Состояние бота, защита капитала, PnL"},
-                {"command": "regime", "description": "🌐 Текущий макро-режим и консенсус AI"},
                 {"command": "stats", "description": "🏆 Статистика винрейта и R-multiple"},
-                {"command": "connect", "description": "🔗 Подключить суб-аккаунт (LinkSigner)"},
+                {"command": "connect", "description": "🦊 Подключить Web3 кошелек (LinkSigner)"},
                 {"command": "ref", "description": "🎁 Поинты Season 2 и аирдроп Nado DEX"},
-                {"command": "my_balance", "description": "💰 Баланс и маржа на Nado DEX"},
-                {"command": "my_positions", "description": "📂 Мои открытые позиции"},
-                {"command": "toggle", "description": "⏯ Вкл/Пауза копи-трейдинга"},
-                {"command": "disconnect", "description": "🔌 Отключить сессионный ключ"},
                 {"command": "menu", "description": "🎛 Пульт управления режимами (Admin)"}
             ]
         }

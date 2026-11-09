@@ -229,6 +229,45 @@ class TraderRegistry:
             return True, f"✅ Кошелек {clean_owner[:6]}...{clean_owner[-4:]} успешно подключен!"
         return False, "❌ Ошибка при сохранении профиля трейдера в хранилище."
 
+    def register_watch_only(
+        self,
+        chat_id: str,
+        owner_address: str,
+        subaccount_name: str = "default"
+    ) -> Tuple[bool, str]:
+        """Registers a trader in Watch-Only mode without session keys."""
+        c_id = str(chat_id).strip()
+        clean_owner = str(owner_address).strip().lower()
+        if not clean_owner.startswith("0x") or len(clean_owner) != 42:
+            return False, "❌ Неверный формат адреса. Адрес кошелька должен начинаться с 0x и содержать 42 символа."
+
+        traders = self.load_traders()
+        now_ts = time.time()
+        trader_entry = {
+            "chat_id": c_id,
+            "owner_address": clean_owner,
+            "subaccount": subaccount_name or "default",
+            "signer_address": None,
+            "signer_private_key": None,
+            "signature": None,
+            "nonce": 0,
+            "copy_enabled": False,
+            "watch_only": True,
+            "risk_profile": "WATCH_ONLY",
+            "leverage": 1.0,
+            "max_concurrent_positions": 0,
+            "tp_mode": "MONITOR",
+            "anti_bot_enabled": True,
+            "target_notional_usd": 0.0,
+            "created_at": traders.get(c_id, {}).get("created_at", now_ts),
+            "updated_at": now_ts
+        }
+        traders[c_id] = trader_entry
+        if self.save_traders(traders):
+            self._pending_sessions.pop(c_id, None)
+            return True, f"✅ Кошелек {clean_owner[:6]}...{clean_owner[-4:]} подключен в режиме Watch-Only!"
+        return False, "❌ Ошибка при сохранении профиля Watch-Only в хранилище."
+
     def get_trader(self, chat_id: str) -> Optional[Dict[str, Any]]:
         """Retrieves registered trader by chat_id."""
         traders = self.load_traders()
@@ -297,9 +336,12 @@ class TraderRegistry:
         return False
 
     def get_active_subscribers(self) -> List[Dict[str, Any]]:
-        """Returns all registered traders who have copy_enabled == True."""
+        """Returns all registered traders who have copy_enabled == True and are NOT watch_only."""
         traders = self.load_traders()
-        return [t for t in traders.values() if t.get("copy_enabled", True)]
+        return [
+            t for t in traders.values() 
+            if t.get("copy_enabled", True) and not t.get("watch_only", False) and t.get("signer_private_key")
+        ]
 
     def get_all_traders(self) -> List[Dict[str, Any]]:
         """Returns all registered traders."""
