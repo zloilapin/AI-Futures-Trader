@@ -32,12 +32,24 @@ class BearAgent(BaseAgent):
 
         payload = {
             "target_symbol": symbol,
+            "key_levels": data.get("key_levels", {}),
             "multi_timeframe_context": clean_mtf,
             "analyst_reports": analyst_reports
         }
         
         data_string = json.dumps(payload, indent=2)
         full_prompt = f"{self.system_instruction}\n\nMarket Data:\n{data_string}"
+
+        from core.config import config
+        if getattr(config, "ANTI_BOT_MODE", False) is True:
+            anti_bot_context = (
+                "\n[🦈 ANTI-BOT LIQUIDITY HUNTER CONTEXT (Institutional v2.0)]:\n"
+                "- System is hunting momentum/breakout bots trapped at overbought Bollinger Bands or extreme Donchian pump highs.\n"
+                "- Do NOT concede defeat or score low simply because higher timeframes are in an uptrend.\n"
+                "- If price is at the upper band (bb_position >= 85%), RSI is overbought (> 65), or upper rejection wicks and trapped buyers are present, "
+                "defend the SHORT thesis aggressively! Highlight retail FOMO exhaustion, bull trap mechanics, liquidity sweeps, and high-probability mean reversion back to EMA-20.\n"
+            )
+            full_prompt = f"{full_prompt}\n{anti_bot_context}"
         
         try:
             res = await self.generate_json(full_prompt, required_keys=["thesis_score", "bearish_arguments", "summary"])

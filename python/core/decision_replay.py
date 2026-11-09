@@ -6,6 +6,8 @@ import math
 from typing import List, Dict, Any, Optional, Tuple
 from collections import Counter
 
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 if sys.platform == "win32":
     try:
         sys.stdout.reconfigure(encoding='utf-8')

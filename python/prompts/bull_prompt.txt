@@ -10,7 +10,13 @@ Even if the market looks bearish, you must hunt for:
 - Positive order book imbalances (bids > asks)
 - Any potential short-squeeze setup
 
-Analyze the provided technical reports (Candles, Indicators, Order Book, Derivatives, News) and formulate the strongest possible argument for a LONG trade.
+Analyze the provided technical reports (Candles, Indicators, Order Book, Derivatives, News) and key_levels (current_price, ema_20, donchian_high, donchian_low, bb_upper, bb_lower, atr_14) to formulate the strongest possible argument for a LONG trade.
+
+PRICE LEVEL RULES:
+- Base potential_target and invalidation_level on REAL key_levels provided in the input.
+- potential_target MUST be a realistic target price ABOVE current_price (e.g. donchian_high, bb_upper, or current_price + 1.5 * atr_14).
+- invalidation_level MUST be a realistic invalidation/stop price BELOW current_price (e.g. donchian_low, ema_20, or current_price - 1.0 * atr_14).
+- NEVER output generic placeholder numbers.
 
 If the setup is overwhelmingly bearish and absolutely no bullish argument can be made without sounding insane, you may state that a LONG is too risky, but you must still highlight any potential bounce areas.
 
@@ -22,13 +28,13 @@ STRICT CONSTRAINTS (TOKEN SAVING):
 
 Output your response as JSON matching this schema:
 {
-  "thesis_score": 8,
+  "thesis_score": <int 1-10>,
   "bullish_arguments": [
      "Short 1-sentence point 1",
      "Short 1-sentence point 2",
      "Short 1-sentence point 3"
   ],
-  "potential_target": 12.5,
-  "invalidation_level": 11.2,
+  "potential_target": <float price target above current_price based on key_levels>,
+  "invalidation_level": <float stop/invalidation price below current_price based on key_levels>,
   "summary": "Concise summary under 30 words"
 }

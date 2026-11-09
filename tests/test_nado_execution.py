@@ -34,6 +34,7 @@ def get_mock_service():
     service._save_pending_reconciliations = MagicMock()
     service._save_processed_fills = MagicMock()
     service._save_state = MagicMock()
+    service._record_closed_trade_journal = MagicMock()
     service.client = MagicMock()
     return service
 
@@ -489,6 +490,7 @@ async def test_reconcile_partial_tp_remainder_calculates_stop_loss_pnl():
         "size_usd": 2000.0,
         "contracts": 1.0,
         "product_id": 4,
+        "planned_risk_usd": 1.0,
         "accumulated_realized_pnl": 50.0  # +$50 from TP1
     }
     # Initialize plan: 2 tiers (0.5 contracts each)
@@ -1288,6 +1290,45 @@ async def test_reconcile_pending_concurrency_lock_serializes():
     total_resolved = len(res1) + len(res2)
     assert total_resolved == 1
     assert "BTC-USD" not in service.pending_reconciliations
+
+
+@pytest.mark.asyncio
+async def test_check_and_update_positions_reconciles_missing_timestamp_fills():
+    """Verifies that check_and_update_positions reconciles exact on-chain fills even
+    when Nado Indexer historical orders have timestamp=None."""
+    service = get_mock_service()
+    service.active_positions["SOL-USD"] = {
+        "direction": "LONG",
+        "entry_price": 100.0,
+        "size_usd": 100.0,
+        "contracts": 1.0,
+        "sl_price": 95.0,
+        "tp_price": 110.0,
+        "product_id": 4,
+        "sl_digest": "0xsl123",
+        "tp_digest": "0xtp123",
+        "sender": service.default_subaccount_id
+    }
+    service.get_active_positions = AsyncMock(return_value=[])
+
+    mock_fill = MagicMock()
+    mock_fill.base_filled = -1.0 * 1e18  # Sold 1.0 SOL
+    mock_fill.quote_filled = 97.5 * 1e18  # $97.50 quote -> exit price $97.50
+    mock_fill.fee_x18 = 0.05 * 1e18
+    mock_fill.timestamp = None
+    mock_fill.digest = "0xreal_sl_fill"
+
+    mock_hist = MagicMock()
+    mock_hist.orders = [mock_fill]
+    service.client.market.get_subaccount_historical_orders = MagicMock(return_value=mock_hist)
+
+    reports = await service.check_and_update_positions("SOL-USD", 95.0)
+    assert len(reports) == 1
+    rep = reports[0]
+    assert rep["exit_price"] == pytest.approx(97.50)
+    assert rep["pnl_usd"] == pytest.approx(-2.55)
+    assert "(EXACT)" in rep["triggered_by"]
+    assert "SOL-USD" not in service.active_positions
 
 
 

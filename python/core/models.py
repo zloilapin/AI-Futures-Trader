@@ -68,6 +68,8 @@ class FinalTradeDecision:
     reasoning_ru: str = ""
     raw_ceo_verdict: Mapping[str, Any] = field(default_factory=dict)
     conviction_for_risk: Optional[float] = None
+    volume_explosion_override: bool = False
+    action_size_mult_override: Optional[float] = None
 
     def __post_init__(self):
         # Deep defensive conversion of raw_ceo_verdict to guarantee nested immutability
@@ -112,6 +114,8 @@ class FinalTradeDecision:
             "directional_confidence": self.directional_confidence,
             "entry_quality": self.entry_quality,
             "conviction_for_risk": self.conviction_for_risk,
+            "volume_explosion_override": self.volume_explosion_override,
+            "action_size_mult_override": self.action_size_mult_override,
             "reasoning_en": self.reasoning_en,
             "reasoning_ru": self.reasoning_ru,
         })

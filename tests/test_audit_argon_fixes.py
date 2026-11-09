@@ -36,6 +36,7 @@ async def test_reconcile_closing_fills_open_digest_boundary():
     """Bug #2: Verifies that reconciliation stops immediately upon hitting open_digest in reverse-chronological order."""
     service = NadoTradingService.__new__(NadoTradingService)
     service.client = MagicMock()
+    service.client.market.place_price_trigger_order = MagicMock(side_effect=Exception("Order notional does not meet minimum size 2094"))
     service.product_map = {"SOL": 1}
     service.processed_fill_digests = set()
     service._normalize_indexer_amount = lambda v: float(v) / 1e18 if abs(float(v)) > 1e10 else float(v)
@@ -96,6 +97,7 @@ async def test_open_position_sets_execution_status_on_error():
     service.wallet = MagicMock()
     service.wallet.get_address = MagicMock(return_value="0x1111111111111111111111111111111111111111")
     service.client = MagicMock()
+    service.client.market.place_price_trigger_order = MagicMock(side_effect=Exception("Order notional does not meet minimum size 2094"))
     service._get_market_parameters = MagicMock(return_value={
         "size_increment_x18": int(0.01 * 10**18),
         "price_increment_x18": int(0.01 * 10**18),
@@ -151,6 +153,7 @@ async def test_update_stop_loss_falls_back_to_software_on_min_size():
     service.product_map = {"XRP": 10, "XRP-USD": 10}
     service.default_subaccount_id = "0xsub"
     service.client = MagicMock()
+    service.client.market.place_price_trigger_order = MagicMock(side_effect=Exception("Order notional does not meet minimum size 2094"))
     service._get_market_parameters = MagicMock(return_value={
         "price_increment_x18": int(0.0001 * 10**18),
         "size_increment_x18": int(5.0 * 10**18),
@@ -179,10 +182,10 @@ async def test_update_stop_loss_falls_back_to_software_on_min_size():
         new_protection_state="BREAK_EVEN"
     )
 
-    assert res is True
+    # Security audit c398c61: placement failure retains the existing active on-chain SL to prevent capital loss
+    assert res is False
     pos = service.active_positions["XRP-USD"]
-    assert pos["sl_price"] == 1.3495
-    assert pos["sl_protection_mode"] == "SOFTWARE_ONLY"
-    assert pos["protection_state"] == "SOFTWARE_BREAK_EVEN"
-    assert pos["sl_digest"] is None
-    service._cancel_trigger_digests.assert_awaited_once_with(10, ["0xold_sl_digest"], sender=None)
+    assert pos["sl_protection_mode"] == "EXCHANGE_PROTECTED"
+    assert pos["protection_state"] == "EXCHANGE_PROTECTED_OLD_SL"
+    assert pos["sl_digest"] == "0xold_sl_digest"
+    service._cancel_trigger_digests.assert_not_called()

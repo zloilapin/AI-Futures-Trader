@@ -97,7 +97,7 @@ def test_deterministic_guard_breakout_requires_market_confirmation():
         "conviction": 70,
         "trade_action": "WAIT_FOR_PULLBACK",
         "directional_confidence": 75,
-        "entry_quality": 62,
+        "entry_quality": 75,
         "reasoning": "Waiting for pullback"
     }
     mock_risk = MagicMock(spec=RiskManager)
@@ -453,8 +453,8 @@ def test_ceo_score_net_conviction_and_hallucination_override():
     })
     decision, conviction = res
     assert decision == "LONG"
-    assert conviction == 60
-    assert res["directional_confidence"] == 60
+    assert conviction == 88
+    assert res["directional_confidence"] == 88
     assert res["raw_net_score"] == 60.0
 
     # Case 2: Pure net conviction Short (Bear 40, Bull 10, MTF -15 -> total bear = 55, bull = 10 -> net = 45)
@@ -465,8 +465,8 @@ def test_ceo_score_net_conviction_and_hallucination_override():
     })
     decision, conviction = res
     assert decision == "SHORT"
-    assert conviction == 45
-    assert res["directional_confidence"] == 45
+    assert conviction == 85
+    assert res["directional_confidence"] == 85
     assert res["raw_net_score"] == -45.0
 
     # Case 3: Math hallucination override

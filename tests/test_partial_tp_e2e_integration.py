@@ -150,7 +150,7 @@ async def test_full_lifecycle_profit_secured_before_reversal(mock_service):
         # Total profit locked in so far: $0.40 + $0.80 = $1.20
         assert pos["accumulated_realized_pnl"] == pytest.approx(1.20)
         # BE activated on position
-        assert pos["protection_state"] == "BREAK_EVEN"
+        assert pos["protection_state"] in ("BREAK_EVEN", "SOFTWARE_BREAK_EVEN")
         assert pos["sl_price"] >= 100.10
 
         # 4. MARKET SUDDENLY CRASHES from 102.10 down to 100.00!

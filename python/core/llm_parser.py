@@ -133,6 +133,16 @@ class LLMStructuredOutputParser:
         elif not isinstance(parsed, dict):
             raise ValueError(f"LLM returned non-dict: {type(parsed).__name__}")
             
+        # Defense-in-depth: Sanitize echoed enum schemas (e.g. if model literally outputs "LONG | SHORT | HOLD")
+        for k in ["decision", "trade_action", "winning_argument", "signal"]:
+            if k in parsed and isinstance(parsed[k], str) and ("|" in parsed[k] or "/" in parsed[k]):
+                if k in ["decision", "trade_action"]:
+                    parsed[k] = "HOLD"
+                elif k == "signal":
+                    parsed[k] = "NEUTRAL"
+                elif k == "winning_argument":
+                    parsed[k] = "Neither"
+
         # Валидация схемы (обязательные ключи)
         if required_keys:
             missing_keys = [k for k in required_keys if k not in parsed]

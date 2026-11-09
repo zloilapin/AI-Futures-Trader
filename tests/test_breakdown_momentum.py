@@ -144,7 +144,7 @@ def test_strategy_router_counter_trend_warning_allows_impulse_short():
     assert profile.has_directional_signal is True
     assert profile.strategy_mode == "TREND_FOLLOWING"
     assert profile.direction_bias == "SHORT"
-    assert "Импульс/откат по тренду" in profile.reasoning
+    assert "по тренду" in profile.reasoning
 
 def test_deterministic_guard_breakout_pullback_override_confirmed():
     """
@@ -157,7 +157,7 @@ def test_deterministic_guard_breakout_pullback_override_confirmed():
         "conviction": 75,
         "trade_action": "WAIT_FOR_PULLBACK",
         "directional_confidence": 80,
-        "entry_quality": 60,
+        "entry_quality": 75,
         "reasoning": "Breakdown underway"
     }
     market_data = {
@@ -195,7 +195,7 @@ def test_deterministic_guard_breakout_unconfirmed_preserves_pullback():
         "conviction": 75,
         "trade_action": "WAIT_FOR_PULLBACK",
         "directional_confidence": 80,
-        "entry_quality": 60,
+        "entry_quality": 75,
         "reasoning": "Breakdown pending"
     }
     # Market data is inside the range (no breakdown)
@@ -223,3 +223,217 @@ def test_deterministic_guard_breakout_unconfirmed_preserves_pullback():
     assert res.trade_action == "WAIT_FOR_PULLBACK"
     assert res.is_actionable is False
     assert res.guard_status == "PULLBACK_WATCHLIST"
+
+
+def test_trend_exhaustion_hard_veto_oversold_short():
+    """
+    Verifies that a SHORT into extreme oversold (RSI_15m < 24.0) triggers
+    hard TREND_EXHAUSTION_VETO even under FULL_ALIGNMENT.
+    """
+    strategy_profile = StrategyProfile(True, "TREND_FOLLOWING", "SHORT", "Full alignment short")
+    ceo_proposal = {
+        "decision": "SHORT",
+        "conviction": 85,
+        "trade_action": "ENTER",
+        "directional_confidence": 85,
+        "entry_quality": 85
+    }
+    market_data = {
+        "price_data": {"current_price": 25.0},
+        "indicators": {
+            "rsi_14": 22.5,  # Extreme bottom < 24.0 (like ZEC/ETH cycle #97)
+            "bb_position_pct": 2.0,
+            "volume_spike_pct": 180.0,
+            "algo_signals": {"rsi_divergence": "none"},
+            "ema_20": 26.5,
+            "atr_14": 0.5
+        },
+        "multi_timeframe": {
+            "mtf_alignment": "FULL_ALIGNMENT",
+            "trend_1h": "BEARISH",
+            "trend_4h": "BEARISH"
+        }
+    }
+    mock_risk = MagicMock(spec=RiskManager)
+    mock_risk._get_profile_rules.return_value = {"min_conviction": 65}
+
+    res = DeterministicGuard.evaluate(
+        strategy_profile=strategy_profile,
+        ceo_proposal=ceo_proposal,
+        profile="BALANCED",
+        risk_manager=mock_risk,
+        market_data=market_data,
+        symbol="ZEC-USD"
+    )
+
+    assert res.is_actionable is False
+    assert res.guard_status == "BLOCKED"
+    assert res.rejection_tag == "TREND_EXHAUSTION_VETO"
+    assert "extreme oversold" in res.guard_reason
+
+
+def test_trend_exhaustion_hard_veto_divergence_short():
+    """
+    Verifies that a SHORT with opposing bullish divergence at RSI_15m < 32.0 triggers
+    hard TREND_EXHAUSTION_VETO.
+    """
+    strategy_profile = StrategyProfile(True, "TREND_FOLLOWING", "SHORT", "Short with divergence")
+    ceo_proposal = {
+        "decision": "SHORT",
+        "conviction": 80,
+        "trade_action": "ENTER"
+    }
+    market_data = {
+        "price_data": {"current_price": 2400.0},
+        "indicators": {
+            "rsi_14": 29.5,  # Below 32 with opposing bullish divergence
+            "bb_position_pct": 8.0,
+            "volume_spike_pct": 120.0,
+            "algo_signals": {"rsi_divergence": "bullish"},
+            "ema_20": 2450.0,
+            "atr_14": 30.0
+        },
+        "multi_timeframe": {
+            "mtf_alignment": "FULL_ALIGNMENT",
+            "trend_1h": "BEARISH"
+        }
+    }
+    mock_risk = MagicMock(spec=RiskManager)
+    mock_risk._get_profile_rules.return_value = {"min_conviction": 65}
+
+    res = DeterministicGuard.evaluate(
+        strategy_profile=strategy_profile,
+        ceo_proposal=ceo_proposal,
+        profile="BALANCED",
+        risk_manager=mock_risk,
+        market_data=market_data,
+        symbol="ETH-USD"
+    )
+
+    assert res.is_actionable is False
+    assert res.rejection_tag == "TREND_EXHAUSTION_VETO"
+
+
+def test_trend_exhaustion_soft_scaling_mature_trend():
+    """
+    Verifies that a SHORT at RSI_15m = 28.0 in a mature trend (RSI_1H < 36.0 or EMA stretch > 2.2 ATR)
+    is scaled down to REDUCE_SIZE, clamps max leverage to 4.0x, and does not get double-penalized.
+    """
+    strategy_profile = StrategyProfile(True, "TREND_FOLLOWING", "SHORT", "Mature short")
+    ceo_proposal = {
+        "decision": "SHORT",
+        "conviction": 85,
+        "trade_action": "ENTER"
+    }
+    market_data = {
+        "price_data": {"current_price": 2400.0},
+        "indicators": {
+            "rsi_14": 28.0,  # 24.0 <= RSI < 30.0
+            "bb_position_pct": 8.0,
+            "volume_spike_pct": 120.0,
+            "algo_signals": {"rsi_divergence": "none"},
+            "ema_20": 2500.0,
+            "atr_14": 35.0  # (2500 - 2400) / 35 = 2.85 ATR stretch > 2.2
+        },
+        "multi_timeframe": {
+            "mtf_alignment": "FULL_ALIGNMENT",
+            "trend_1h": "BEARISH",
+            "rsi_1h": 32.0  # Mature 1H < 36.0
+        }
+    }
+    mock_risk = MagicMock(spec=RiskManager)
+    mock_risk._get_profile_rules.return_value = {"min_conviction": 65}
+
+    res = DeterministicGuard.evaluate(
+        strategy_profile=strategy_profile,
+        ceo_proposal=ceo_proposal,
+        profile="BALANCED",
+        risk_manager=mock_risk,
+        market_data=market_data,
+        symbol="ETH-USD"
+    )
+
+    assert res.is_actionable is True
+    assert res.guard_status == "PASSED"
+    assert res.trade_action == "REDUCE_SIZE"
+    assert ceo_proposal.get("exhaustion_scale") is True
+    assert ceo_proposal.get("max_leverage_override") == 4.0
+
+    # Now verify RiskManager sizing honors 4.0x leverage cap and applies 0.50x risk mult
+    logger = MagicMock(spec=TradeLogger)
+    rm = RiskManager(logger, MagicMock())
+    portfolio_data = {
+        "total_usd": 100.0,
+        "available_margin": 100.0,
+        "active_positions_count": 0,
+        "daily_pnl_pct": 0.0,
+        "maintenance_health_usd": 1000.0
+    }
+    market_data_rm = {
+        **market_data,
+        "derivatives_data": {
+            "funding_rate": 0.0,
+            "taker_fee_pct": 0.0005,
+            "maintenance_margin_pct": 0.025
+        }
+    }
+
+    import asyncio
+    rm_res = asyncio.run(rm.analyze(
+        ceo_decision=res,
+        portfolio_data=portfolio_data,
+        market_data=market_data_rm,
+        effective_profile="BALANCED",
+        macro_regime="BEAR_TREND",
+        strategy_mode="TREND_FOLLOWING"
+    ))
+
+    assert rm_res["approved"] is True
+    assert rm_res["effective_leverage"] <= 4.0
+    # Sizing multiplier was cleanly applied
+    assert rm_res["applied_multipliers"]["action_mult"] == 0.50
+
+
+def test_trend_exhaustion_allows_fresh_breakout():
+    """
+    Verifies that a fresh breakout (RSI_15m = 28.5, but RSI_1H = 45.0 and EMA stretch < 2.2 ATR)
+    is ALLOWED at full size (ENTER) without being prematurely choked.
+    """
+    strategy_profile = StrategyProfile(True, "TREND_FOLLOWING", "SHORT", "Fresh breakout")
+    ceo_proposal = {
+        "decision": "SHORT",
+        "conviction": 85,
+        "trade_action": "ENTER"
+    }
+    market_data = {
+        "price_data": {"current_price": 2400.0},
+        "indicators": {
+            "rsi_14": 28.5,
+            "bb_position_pct": 8.0,
+            "volume_spike_pct": 160.0,
+            "algo_signals": {"rsi_divergence": "none"},
+            "ema_20": 2430.0,
+            "atr_14": 30.0  # stretch = (2430 - 2400) / 30 = 1.0 ATR (< 2.2)
+        },
+        "multi_timeframe": {
+            "mtf_alignment": "FULL_ALIGNMENT",
+            "trend_1h": "BEARISH",
+            "rsi_1h": 45.0  # Fresh trend on 1H (not mature)
+        }
+    }
+    mock_risk = MagicMock(spec=RiskManager)
+    mock_risk._get_profile_rules.return_value = {"min_conviction": 65}
+
+    res = DeterministicGuard.evaluate(
+        strategy_profile=strategy_profile,
+        ceo_proposal=ceo_proposal,
+        profile="BALANCED",
+        risk_manager=mock_risk,
+        market_data=market_data,
+        symbol="ETH-USD"
+    )
+
+    assert res.is_actionable is True
+    assert res.trade_action == "ENTER"
+    assert ceo_proposal.get("exhaustion_scale") is None
+

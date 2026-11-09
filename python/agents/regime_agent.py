@@ -14,6 +14,11 @@ class RegimeAgent(BaseAgent):
     """
     def __init__(self, logger: TradeLogger, llm_client: LLMClient):
         super().__init__("Regime_Agent", logger, llm_client)
+        self.last_regime: str = "UNKNOWN"
+        self.last_range_score: float = 0.0
+        self.consecutive_trend_count: int = 0
+        self.last_trend_ts: float = 0.0
+        self.last_eval_ts: float = 0.0
 
     @staticmethod
     def _safe_finite_float(val: Any, default: Optional[float] = None) -> Optional[float]:
@@ -184,16 +189,24 @@ class RegimeAgent(BaseAgent):
         trend_score: float,
         range_score: float,
         vol_score: float,
-        btc_atr: float
+        btc_atr: float,
+        previous_regime: Optional[str] = None,
+        consecutive_trend_count: int = 0
     ) -> tuple[str, str]:
         """
         Pure deterministic decision function mapping composite scores to regime and recommended profile.
+        Includes hysteresis: transitioning out of RANGE_CHOPPY requires confirmation (consecutive_trend_count >= 1)
+        before granting full TRENDING / AGGRESSIVE. The initial breakout cycle routes through TRANSITION / BALANCED.
         Returns: (regime, recommended_profile)
         """
         # High ATR / Extreme volatility must take precedence to protect capital
         if vol_score >= 65.0 or btc_atr >= 1.5:
             return "HIGH_VOLATILITY", "CONSERVATIVE"
         elif trend_score >= 60.0 and trend_score > (range_score + 15.0):
+            # Hysteresis check: If emerging from RANGE_CHOPPY on a single candle spike,
+            # require at least 1 confirmation cycle before escalating to AGGRESSIVE.
+            if previous_regime in ["RANGE_CHOPPY", "TRANSITION"] and consecutive_trend_count < 1:
+                return "TRANSITION", "BALANCED"
             return "TRENDING", "AGGRESSIVE"
         elif range_score >= 55.0 and range_score > (trend_score + 15.0):
             return "RANGE_CHOPPY", "BALANCED"
@@ -379,8 +392,50 @@ class RegimeAgent(BaseAgent):
         
         btc_atr = float(btc_summary.get("atr_pct", 0.0) or 0.0)
         
-        # Regime determination based on dominant score
-        regime, profile = self.classify_regime_from_scores(trend_score, range_score, vol_score, btc_atr)
+        # Regime determination based on dominant score with hysteresis tracking.
+        # FastRadar can wake up a new cycle in 2-3 minutes on the exact same 15m candle.
+        # Require at least 600s (10 min) before treating a subsequent trend score as a new confirming cycle.
+        import time
+        now_ts = time.time()
+        elapsed_since_eval = (now_ts - self.last_eval_ts) if self.last_eval_ts > 0 else 0.0
+        elapsed_since_trend = (now_ts - self.last_trend_ts) if self.last_trend_ts > 0 else 0.0
+
+        effective_trend_count = self.consecutive_trend_count
+        if self.last_trend_ts > 0 and elapsed_since_trend < 600.0 and self.consecutive_trend_count <= 1:
+            effective_trend_count = 0
+
+        regime, profile = self.classify_regime_from_scores(
+            trend_score, range_score, vol_score, btc_atr,
+            previous_regime=self.last_regime,
+            consecutive_trend_count=effective_trend_count
+        )
+
+        if regime == "TRENDING":
+            self.consecutive_trend_count += 1
+            if self.last_trend_ts == 0.0 or elapsed_since_trend >= 600.0:
+                self.last_trend_ts = now_ts
+        elif regime == "TRANSITION" and (self.last_regime in ["RANGE_CHOPPY", "TRANSITION"] or self.last_range_score >= 55.0) and trend_score >= 60.0 and trend_score > (range_score + 15.0):
+            # Dampened by hysteresis on first breakout candle or rapid wake-up on same candle
+            is_initial_breakout = (self.last_trend_ts == 0.0)
+            self.consecutive_trend_count = 1
+            if is_initial_breakout:
+                self.last_trend_ts = now_ts
+                elapsed_str = f"Breakout Start ({elapsed_since_eval:.0f}s since prev cycle)" if elapsed_since_eval > 0 else "Breakout Start (0s)"
+            else:
+                elapsed_str = f"{elapsed_since_trend:.0f}s (same 15m candle)"
+
+            self.logger.info(
+                f"[{self.name}] ⏳ Regime Hysteresis Damper: Breakout cycle from {self.last_regime} "
+                f"(TREND: {trend_score:.1f} vs RANGE: {range_score:.1f}, Elapsed: {elapsed_str}). "
+                f"Routing through TRANSITION (BALANCED) to prevent whipsaw trap."
+            )
+        else:
+            self.consecutive_trend_count = 0
+            self.last_trend_ts = 0.0
+
+        self.last_regime = regime
+        self.last_range_score = range_score
+        self.last_eval_ts = now_ts
 
         reasoning = (
             f"Multi-Factor Regime Scores -> TREND: {trend_score:.1f} | "
@@ -392,7 +447,10 @@ class RegimeAgent(BaseAgent):
             "regime": regime,
             "recommended_profile": profile,
             "data_valid": True,
-            "reasoning_en": reasoning
+            "reasoning_en": reasoning,
+            "range_score": float(range_score),
+            "trend_score": float(trend_score),
+            "vol_score": float(vol_score)
         }
 
         self.logger.info(f"[{self.name}] {reasoning} Profile: {profile}")

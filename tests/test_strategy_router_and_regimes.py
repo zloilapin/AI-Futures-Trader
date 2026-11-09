@@ -66,7 +66,9 @@ def test_breakout_not_intercepted_by_volatility_momentum():
     assert profile.direction_bias == "LONG"
     assert "BREAKOUT LONG" in profile.reasoning
 
-def test_high_volatility_macro_blocks_mean_reversion():
+def test_high_volatility_macro_blocks_mean_reversion(monkeypatch):
+    from core.config import config
+    monkeypatch.setattr(config, "ALLOW_FORBIDDEN_STRATEGIES", True)
     """
     P0-2 Fix Verification:
     In HIGH_VOLATILITY macro regime, MEAN_REVERSION is suicidal and MUST be blocked,
@@ -150,7 +152,9 @@ def test_full_alignment_zero_analysts_allows_trend():
     assert profile.direction_bias == "LONG"
     assert "нет сопротивления аналитиков" in profile.reasoning
 
-def test_volatility_momentum_routing_scalping():
+def test_volatility_momentum_routing_scalping(monkeypatch):
+    from core.config import config
+    monkeypatch.setattr(config, "ALLOW_FORBIDDEN_STRATEGIES", True)
     """
     Verification of Volatility Momentum scalping trigger
     (volume >= 100%, realistic bb_width >= 0.8% or atr_pct >= 0.25%, Order Book confirmed).
@@ -187,7 +191,9 @@ def test_volatility_momentum_routing_scalping():
     assert profile.strategy_mode == "VOLATILITY_MOMENTUM"
     assert profile.direction_bias == "LONG"
 
-def test_volatility_momentum_triggers_on_stable_oi():
+def test_volatility_momentum_triggers_on_stable_oi(monkeypatch):
+    from core.config import config
+    monkeypatch.setattr(config, "ALLOW_FORBIDDEN_STRATEGIES", True)
     """
     Verification that VOLATILITY_MOMENTUM activates when OI is stable (not falling).
     """
@@ -638,7 +644,7 @@ async def test_pipeline_syncs_ceo_verdict_for_volatility_momentum_pullback(mock_
     ceo_verdict = {
         "decision": "LONG",
         "conviction": 70,
-        "entry_quality": 70,
+        "entry_quality": 75,
         "directional_confidence": 75,
         "trade_action": "WAIT_FOR_PULLBACK",
         "symbol": "BTC-USD"
@@ -744,7 +750,7 @@ async def test_full_pipeline_cycle_volatility_momentum_pullback_to_risk_executio
         "symbol": "BTC-USD",
         "decision": "LONG",
         "conviction": 70,
-        "entry_quality": 60,
+        "entry_quality": 75,
         "directional_confidence": 75,
         "trade_action": "WAIT_FOR_PULLBACK",
         "reasoning_en": "Fast momentum breakout, but waiting for slight pullback"
@@ -753,6 +759,8 @@ async def test_full_pipeline_cycle_volatility_momentum_pullback_to_risk_executio
 
     # Patch sleep so the test completes instantaneously
     monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+    from core.config import config
+    monkeypatch.setattr(config, "ALLOW_FORBIDDEN_STRATEGIES", True)
 
     # EXECUTE FULL REAL PIPELINE CYCLE
     await pipeline.run_cycle(1, force_scan=True)
@@ -897,7 +905,7 @@ def test_deterministic_guard_produces_canonical_final_trade_decision(mock_logger
         "decision": "LONG",
         "conviction": 70,
         "trade_action": "WAIT_FOR_PULLBACK",
-        "entry_quality": 65,
+        "entry_quality": 75,
         "directional_confidence": 75
     }
     market_data_b = {
@@ -1037,6 +1045,8 @@ async def test_pipeline_contract_immutable_decision_throughout_execution(mock_lo
     }
     agents.ceo.analyze = AsyncMock(return_value=ceo_verdict)
     monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+    from core.config import config
+    monkeypatch.setattr(config, "ALLOW_FORBIDDEN_STRATEGIES", True)
 
     await pipeline.run_cycle(1, force_scan=True)
 
@@ -1337,7 +1347,9 @@ def test_none_or_missing_indicators_and_btc_telemetry_safe_handling():
     assert profile.has_directional_signal is False
 
 
-def test_mixed_chop_mean_reversion_macro_trend_directional_veto():
+def test_mixed_chop_mean_reversion_macro_trend_directional_veto(monkeypatch):
+    from core.config import config
+    monkeypatch.setattr(config, "ALLOW_FORBIDDEN_STRATEGIES", True)
     """
     Stage 3 Audit Verification:
     In MIXED_CHOP:
@@ -1405,5 +1417,406 @@ def test_mixed_chop_mean_reversion_macro_trend_directional_veto():
     assert profile_long_range_macro.direction_bias == "LONG"
 
 
+def test_pullback_retest_priority_pass():
+    """
+    Verifies that when market_data has is_pullback_retest=True,
+    StrategyRouter grants immediate priority pass without pre-CEO block.
+    """
+    market_data_retest = {
+        "is_pullback_retest": True,
+        "multi_timeframe": {"mtf_alignment": "COUNTER_TREND_WARNING", "trend_1h": "BEARISH"},
+        "indicators": {"bb_position_pct": 58.0, "volume_spike_pct": 10.0},
+        "price_data": {"current_price": 78.50}
+    }
+    # Even with minimal analyst reports (e.g. 1 bear)
+    reports = [{"agent_name": "Trend_Agent", "signal": "BEARISH"}]
+
+    profile = StrategyRouter.evaluate(
+        "HYPE-USD", market_data_retest, reports, {}, detected_regime="TRENDING_BEAR"
+    )
+    assert profile.has_directional_signal is True
+    assert profile.strategy_mode == "TREND_FOLLOWING"
+    assert profile.direction_bias == "SHORT"
+    assert "PULLBACK_RETEST SHORT" in profile.reasoning
 
 
+def test_counter_trend_warning_bollinger_pullbacks():
+    """
+    Verifies that in COUNTER_TREND_WARNING:
+    1. Short pullback is allowed when 1H is BEARISH, tech_bears >= 1, and bb_position_pct >= 55.0
+    2. Long pullback is allowed when 1H is BULLISH, tech_bulls >= 1, and bb_position_pct <= 45.0
+    3. Counter-trend without favorable BB position and insufficient analysts is rejected.
+    """
+    # 1. HYPE-USD bounce to upper BB during 1H BEARISH trend (low volume pullback)
+    market_data_short_pb = {
+        "multi_timeframe": {"mtf_alignment": "COUNTER_TREND_WARNING", "trend_1h": "BEARISH"},
+        "indicators": {"bb_position_pct": 58.0, "volume_spike_pct": 15.0},  # Low volume healthy pullback
+        "price_data": {"current_price": 78.50}
+    }
+    reports_bear = [{"agent_name": "Trend_Agent", "signal": "BEARISH"}]
+    profile_short = StrategyRouter.evaluate(
+        "HYPE-USD", market_data_short_pb, reports_bear, {}, detected_regime="TRENDING_BEAR"
+    )
+    assert profile_short.has_directional_signal is True
+    assert profile_short.strategy_mode == "TREND_FOLLOWING"
+    assert profile_short.direction_bias == "SHORT"
+    assert "Откат/импульс по тренду (SHORT)" in profile_short.reasoning
+    assert "BB=58.0%" in profile_short.reasoning
+
+    # 2. Bullish dip to lower BB during 1H BULLISH trend
+    market_data_long_pb = {
+        "multi_timeframe": {"mtf_alignment": "COUNTER_TREND_WARNING", "trend_1h": "BULLISH"},
+        "indicators": {"bb_position_pct": 42.0, "volume_spike_pct": 10.0},
+        "price_data": {"current_price": 2600.0}
+    }
+    reports_bull = [{"agent_name": "Trend_Agent", "signal": "BULLISH"}]
+    profile_long = StrategyRouter.evaluate(
+        "ETH-USD", market_data_long_pb, reports_bull, {}, detected_regime="TRENDING_BULL"
+    )
+    assert profile_long.has_directional_signal is True
+    assert profile_long.strategy_mode == "TREND_FOLLOWING"
+    assert profile_long.direction_bias == "LONG"
+    assert "Откат по тренду (LONG)" in profile_long.reasoning
+    assert "BB=42.0%" in profile_long.reasoning
+
+    # 3. Rejected when BB position is unfavorable (e.g. shorting at lower BB 30% in COUNTER_TREND_WARNING with only 1 bear)
+    market_data_bad_bb = {
+        "multi_timeframe": {"mtf_alignment": "COUNTER_TREND_WARNING", "trend_1h": "BEARISH"},
+        "indicators": {"bb_position_pct": 30.0, "volume_spike_pct": 15.0},
+        "price_data": {"current_price": 75.0}
+    }
+    profile_rejected = StrategyRouter.evaluate(
+        "HYPE-USD", market_data_bad_bb, reports_bear, {}, detected_regime="TRENDING_BEAR"
+    )
+    assert profile_rejected.has_directional_signal is False
+    assert "Попытка торговли против макро-тренда" in profile_rejected.reasoning
+
+
+def test_transition_regime_requires_two_analysts():
+    """
+    Verifies that in TRANSITION:
+    - 1 technical bear is rejected upfront (saving tokens, as seen in ZEC/BNB).
+    - 2 technical bears are admitted with clear consensus.
+    """
+    market_data_transition = {
+        "multi_timeframe": {"mtf_alignment": "TRANSITION", "trend_1h": "BEARISH"},
+        "indicators": {"bb_position_pct": 50.0, "volume_spike_pct": 20.0},
+        "price_data": {"current_price": 45.0}
+    }
+    # 1. Only 1 bear -> REJECTED
+    reports_1 = [{"agent_name": "Trend_Agent", "signal": "BEARISH"}]
+    profile_1 = StrategyRouter.evaluate(
+        "ZEC-USD", market_data_transition, reports_1, {}, detected_regime="TRANSITION"
+    )
+    assert profile_1.has_directional_signal is False
+    assert "требуется минимум 2 аналитика" in profile_1.reasoning
+
+    # 2. 2 bears -> ADMITTED
+    reports_2 = [
+        {"agent_name": "Trend_Agent", "signal": "BEARISH"},
+        {"agent_name": "Candle_Agent", "signal": "BEARISH"}
+    ]
+    profile_2 = StrategyRouter.evaluate(
+        "ZEC-USD", market_data_transition, reports_2, {}, detected_regime="TRANSITION"
+    )
+    assert profile_2.has_directional_signal is True
+    assert profile_2.direction_bias == "SHORT"
+    assert "Ранний разворот в шорт" in profile_2.reasoning
+
+
+def test_ceo_pullback_retest_penalty_capped():
+    """
+    Verifies that in CEOAgent, when is_pullback_retest=True:
+    - Overblown price extension / total penalty (e.g. -25) is capped at -10.
+    - Trade action does not get locked into WAIT_FOR_PULLBACK.
+    """
+    from agents.ceo_agent import CEOAgent
+    from unittest.mock import MagicMock
+    ceo = CEOAgent(logger=MagicMock(), primary_llm=None, escalation_llm=None)
+
+    market_context = {
+        "is_pullback_retest": True,
+        "price_data": {"current_price": 78.19},
+        "multi_timeframe": {
+            "trend_15m": "BEARISH",
+            "trend_1h": "BEARISH",
+            "trend_4h": "BEARISH",
+            "mtf_alignment": "FULL_ALIGNMENT"
+        },
+        "indicators": {
+            "ema_20": 78.42,
+            "atr_pct": 1.5,
+            "rsi_14": 35.0,
+            "bb_position_pct": 20.0
+        }
+    }
+    breakdown = {
+        "bull_argument": 10.0,
+        "bear_argument": 45.0,
+        "mtf_trend": -30.0,
+        "risk_penalties": {
+            "price_extension": -15,
+            "market_structure": -10,
+            "total": -25
+        }
+    }
+    score_res = ceo._validate_and_compute_score("SHORT", breakdown, market_context=market_context)
+    assert score_res["decision"] == "SHORT"
+    assert score_res["directional_confidence"] >= 75
+    # Total penalty must be capped at -10, not -25!
+    assert score_res["risk_penalties"] >= -10
+    assert score_res["entry_quality"] >= 65
+    assert score_res["trade_action"] in ["ENTER", "REDUCE_SIZE"]
+
+
+
+
+
+
+
+
+def test_strategy_router_strictly_rejects_breakout_in_transition():
+    """
+    Verifies that StrategyRouter strictly rejects BREAKOUT when macro regime
+    or MTF alignment is in TRANSITION, preventing false liquidity raid traps.
+    """
+    market_data = {
+        "multi_timeframe": {
+            "mtf_alignment": "TRANSITION",
+            "trend_1h": "BULLISH"
+        },
+        "indicators": {
+            "volume_spike_pct": 210.0,
+            "bb_width_pct": 3.0,
+            "donchian_high": 100.0,
+            "donchian_low": 90.0,
+            "last_closed_candle_close": 102.0,
+            "adx_14": 28.0
+        },
+        "price_data": {"current_price": 103.0},
+        "derivatives_data": {"open_interest_trend": "rising"}
+    }
+    valid_reports = [
+        {"agent_name": "Price_Action_Agent", "signal": "BULLISH"},
+        {"agent_name": "Order_Book_Agent", "signal": "BULLISH"}
+    ]
+    profile = StrategyRouter.evaluate(
+        "ETH-USD", market_data, valid_reports, macro_cache={},
+        detected_regime="TRANSITION", profile="BALANCED"
+    )
+    assert profile.has_directional_signal is False
+    assert profile.strategy_mode == "BREAKOUT"
+    assert "TRANSITION" in profile.reasoning
+
+
+def test_strategy_router_strictly_rejects_trend_following_low_adx():
+    """
+    Verifies that StrategyRouter strictly rejects TREND_FOLLOWING in FULL_ALIGNMENT
+    when ADX < 20.0 (dead chop / no momentum, preventing BTC/ETH chop losses).
+    """
+    market_data = {
+        "multi_timeframe": {
+            "mtf_alignment": "FULL_ALIGNMENT",
+            "trend_1h": "BULLISH"
+        },
+        "indicators": {
+            "volume_spike_pct": 50.0,
+            "bb_position_pct": 50.0,
+            "bb_width_pct": 2.0,
+            "donchian_high": 110.0,
+            "donchian_low": 90.0,
+            "last_closed_candle_close": 101.0,
+            "adx_14": 15.4  # Flat dead chop!
+        },
+        "price_data": {"current_price": 101.0},
+        "derivatives_data": {"open_interest_trend": "rising"}
+    }
+    valid_reports = [
+        {"agent_name": "Price_Action_Agent", "signal": "BULLISH"},
+        {"agent_name": "Order_Book_Agent", "signal": "BULLISH"}
+    ]
+    profile = StrategyRouter.evaluate(
+        "BTC-USD", market_data, valid_reports, macro_cache={},
+        detected_regime="TRENDING_BULL", profile="BALANCED"
+    )
+    assert profile.has_directional_signal is False
+    assert profile.strategy_mode == "TREND_FOLLOWING"
+    assert "ADX=15.4 <" in profile.reasoning
+
+
+def test_trend_exhaustion_guard_blocks_late_long_at_channel_high():
+    """
+    Verifies that StrategyRouter vetoes TREND_FOLLOWING LONG when
+    price is at channel highs (bb_pos > 85.0%) with bearish RSI divergence.
+    """
+    market_data = {
+        "multi_timeframe": {
+            "mtf_alignment": "FULL_ALIGNMENT",
+            "trend_1h": "BULLISH"
+        },
+        "indicators": {
+            "volume_spike_pct": 50.0,
+            "bb_position_pct": 89.5,  # Extreme top of channel
+            "bb_width_pct": 3.0,
+            "donchian_high": 110.0,
+            "donchian_low": 90.0,
+            "last_closed_candle_close": 108.0,
+            "adx_14": 28.0,
+            "algo_signals": {
+                "rsi_divergence": "bearish"  # Bearish divergence!
+            }
+        },
+        "price_data": {"current_price": 109.0},
+        "derivatives_data": {"open_interest_trend": "rising"}
+    }
+    valid_reports = [
+        {"agent_name": "Price_Action_Agent", "signal": "BULLISH"},
+        {"agent_name": "Order_Book_Agent", "signal": "BULLISH"}
+    ]
+    profile = StrategyRouter.evaluate(
+        "SOL-USD", market_data, valid_reports, macro_cache={},
+        detected_regime="TRENDING_BULL", profile="BALANCED"
+    )
+    assert profile.has_directional_signal is False
+    assert profile.strategy_mode == "TREND_EXHAUSTION_VETO"
+    assert "Trend Exhaustion Guard" in profile.reasoning
+    assert "Бычий импульс истощен" in profile.reasoning
+
+
+def test_trend_exhaustion_guard_blocks_late_short_at_channel_low():
+    """
+    Verifies that StrategyRouter vetoes TREND_FOLLOWING SHORT when
+    price is at channel lows (bb_pos < 15.0%) with bullish RSI divergence.
+    """
+    market_data = {
+        "multi_timeframe": {
+            "mtf_alignment": "FULL_ALIGNMENT",
+            "trend_1h": "BEARISH"
+        },
+        "indicators": {
+            "volume_spike_pct": 50.0,
+            "bb_position_pct": 11.2,  # Extreme low of channel
+            "bb_width_pct": 3.0,
+            "donchian_high": 110.0,
+            "donchian_low": 90.0,
+            "last_closed_candle_close": 91.0,
+            "adx_14": 26.5,
+            "algo_signals": {
+                "rsi_divergence": "bullish"  # Bullish divergence!
+            }
+        },
+        "price_data": {"current_price": 90.5},
+        "derivatives_data": {"open_interest_trend": "rising"}
+    }
+    valid_reports = [
+        {"agent_name": "Price_Action_Agent", "signal": "BEARISH"},
+        {"agent_name": "Order_Book_Agent", "signal": "BEARISH"}
+    ]
+    profile = StrategyRouter.evaluate(
+        "SOL-USD", market_data, valid_reports, macro_cache={},
+        detected_regime="TRENDING_BEAR", profile="BALANCED"
+    )
+    assert profile.has_directional_signal is False
+    assert profile.strategy_mode == "TREND_EXHAUSTION_VETO"
+    assert "Trend Exhaustion Guard" in profile.reasoning
+    assert "Медвежий импульс истощен" in profile.reasoning
+
+
+def test_trend_exhaustion_guard_blocks_breakout_on_exhaustion():
+    """
+    Verifies that BREAKOUT LONG is vetoed when price breaches Donchian high
+    but RSI shows bearish divergence (classic false breakout / liquidity raid).
+    """
+    market_data = {
+        "multi_timeframe": {
+            "mtf_alignment": "FULL_ALIGNMENT",
+            "trend_1h": "BULLISH"
+        },
+        "indicators": {
+            "volume_spike_pct": 220.0,
+            "bb_position_pct": 92.0,
+            "donchian_high": 100.0,
+            "donchian_low": 90.0,
+            "last_closed_candle_close": 101.0,
+            "adx_14": 30.0,
+            "algo_signals": {
+                "rsi_divergence": "bearish"
+            }
+        },
+        "price_data": {"current_price": 101.5},
+        "derivatives_data": {"open_interest_trend": "rising"}
+    }
+    valid_reports = [
+        {"agent_name": "Price_Action_Agent", "signal": "BULLISH"},
+        {"agent_name": "Order_Book_Agent", "signal": "BULLISH"}
+    ]
+    profile = StrategyRouter.evaluate(
+        "BTC-USD", market_data, valid_reports, macro_cache={},
+        detected_regime="TRENDING_BULL", profile="BALANCED"
+    )
+    assert profile.has_directional_signal is False
+    assert profile.strategy_mode == "TREND_EXHAUSTION_VETO"
+    assert "Пробой LONG отклонен из-за дивергенции" in profile.reasoning
+
+
+def test_trend_exhaustion_guard_triggers_predator_counter_trend_short():
+    """
+    Verifies that when ANTI_BOT_MODE is active, trend_exhaustion_long acts as a
+    valid trigger for Predator to prepare a sniper SHORT from channel ceiling.
+    """
+    from core.config import config
+    old_mode = config.ANTI_BOT_MODE
+    try:
+        config.ANTI_BOT_MODE = True
+        market_data = {
+            "multi_timeframe": {
+                "mtf_alignment": "MIXED_CHOP",
+                "trend_1h": "NEUTRAL",
+                "trend_4h": "NEUTRAL"
+            },
+            "indicators": {
+                "volume_spike_pct": 120.0,
+                "bb_position_pct": 89.0,
+                "bb_upper": 110.0,
+                "bb_lower": 95.0,
+                "donchian_high": 108.0,
+                "donchian_low": 96.0,
+                "rsi_14": 65.0,
+                "adx_14": 22.0,
+                "algo_signals": {
+                    "rsi_divergence": "bearish"
+                }
+            },
+            "price_data": {"current_price": 108.5},
+            "derivatives_data": {"open_interest_trend": "rising"}
+        }
+        valid_reports = [
+            {"agent_name": "Price_Action_Agent", "signal": "BULLISH"},
+            {"agent_name": "Order_Book_Agent", "signal": "BULLISH"}
+        ]
+        profile = StrategyRouter.evaluate(
+            "ETH-USD", market_data, valid_reports, macro_cache={},
+            detected_regime="RANGE_CHOPPY", profile="BALANCED"
+        )
+        assert profile.has_directional_signal is True
+        assert profile.strategy_mode == "MEAN_REVERSION"
+        assert profile.direction_bias == "SHORT"
+        assert "ANTI-BOT SHORT" in profile.reasoning
+    finally:
+        config.ANTI_BOT_MODE = old_mode
+
+
+def test_deterministic_guard_trend_exhaustion_at_bb_extreme():
+    """
+    Verifies that DeterministicGuard.evaluate_trend_exhaustion strictly vetoes
+    LONG when bb_pos >= 85.0% and has_opposing_divergence is True.
+    """
+    res = DeterministicGuard.evaluate_trend_exhaustion(
+        direction="LONG",
+        rsi_15m=69.0,
+        rsi_1h=60.0,
+        has_opposing_divergence=True,
+        bb_pos=88.5
+    )
+    assert res["action"] == "VETO"
+    assert "TREND_EXHAUSTION_VETO" in res["reason"]

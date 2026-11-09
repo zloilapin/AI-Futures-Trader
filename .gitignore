@@ -4,6 +4,8 @@
 .env
 *.pem
 *.key
+*connected_traders*
+data/memory/connected_traders.json
 .agents/plugins/project-mcps/mcp_config.json
 
 # =========================

@@ -1,3 +1,4 @@
+from core.config import config
 import json
 import logging
 from typing import Dict, Any, Tuple, Optional, Callable
@@ -325,7 +326,8 @@ class CEOEscalationPatch:
     DIRECT_ENTER_MIN_CONF: float = 75.0
     DIRECT_ENTER_MIN_QUAL: float = 70.0   # Было 80.0 — из-за этого сливались сделки с Qual=75% (#35, #42, #45)
     DIRECT_REDUCE_MIN_CONF: float = 75.0
-    DIRECT_REDUCE_MIN_QUAL: float = 60.0
+    DIRECT_REDUCE_MIN_QUAL: float = 62.0
+    SMART_CUTOFF_MIN_QUAL: float = 62.0
 
     # Допустимая погрешность математики у 8B-арбитра: EntryQuality == DirConf + RiskPenalty
     MATH_TOLERANCE: float = 3.0
@@ -335,6 +337,7 @@ class CEOEscalationPatch:
         """
         Определяет, нужно ли пропустить вызов слабой модели (llama-3.1-8b),
         чтобы защитить сильные сигналы от ложного вето и сэкономить API.
+        Smart Escalation Cutoff (< 62.0): слабые сетапы не эскалируются.
         """
         action = str(primary_decision.get("action", primary_decision.get("trade_action", "HOLD"))).upper()
         direction = str(primary_decision.get("decision", "HOLD")).upper()
@@ -344,6 +347,18 @@ class CEOEscalationPatch:
         # 1. Нейтральный рынок / отказ от входа со стороны Primary CEO
         if action == "HOLD" or direction == "HOLD" or entry_qual <= 35.0:
             return True, "decided HOLD or low quality. Bypassing escalation to save API costs."
+
+        # 1.1 WAIT_FOR_PULLBACK: Handled deterministically by Pullback Watchlist (0 LLM tokens)
+        from core.config import config
+        if action == "WAIT_FOR_PULLBACK" and not getattr(config, "ESCALATE_WAIT_FOR_PULLBACK", False):
+            return True, "decided WAIT_FOR_PULLBACK. Routing directly to Pullback Watchlist without LLM escalation to save API costs."
+
+        # 1.2 Smart Escalation Cutoff (< 62.0): Слабый сетап не имеет шансов пройти детерминированный порог 65+
+        if entry_qual < cls.SMART_CUTOFF_MIN_QUAL and not (action == "WAIT_FOR_PULLBACK" and getattr(config, "ESCALATE_WAIT_FOR_PULLBACK", False)):
+            return True, (
+                f"decided {action} with entry_quality ({entry_qual:.1f} < {cls.SMART_CUTOFF_MIN_QUAL:.1f}) below threshold. "
+                f"Bypassing escalation to save latency and API costs."
+            )
 
         # 2. Чистый сигнал ENTER от старшей модели (Циклы #35, #42, #45 больше не блокируются)
         if (
@@ -395,8 +410,8 @@ class CEOEscalationPatch:
             # Качество входа не может быть выше базовой уверенности в направлении
             return False
 
-        # Если арбитр вернул конкретный штраф, проверяем формулу: Qual = max(0, Conf - |Penalty|)
-        if arb_pen != 0.0:
+        # Если арбитр вернул конкретный штраф для направленной сделки, проверяем формулу: Qual = max(0, Conf - |Penalty|)
+        if arb_dir in ("LONG", "SHORT") and arb_pen != 0.0:
             expected_qual = max(0.0, arb_conf - abs(arb_pen))
             if abs(arb_qual - expected_qual) > cls.MATH_TOLERANCE:
                 return False
@@ -440,7 +455,7 @@ class CEOEscalationPatch:
             decision["disputed_arbitration"] = False
             return decision
 
-        # Шаг 3: Вызов арбитра эскалации (meta-llama/llama-3.1-8b-instruct)
+        # Шаг 3: Вызов арбитра эскалации
         try:
             arbiter_resp = call_arbiter_fn()
         except Exception as e:
@@ -460,7 +475,7 @@ class CEOEscalationPatch:
         # Шаг 4: Валидация математики арбитра (ИСПРАВЛЕНИЕ БАГА ЦИКЛОВ #12, #43-#47)
         if not cls.validate_arbiter_math(arbiter_resp):
             logger.warning(
-                f"[CEO_Agent] {symbol}: Арбитр meta-llama/llama-3.1-8b-instruct допустил "
+                f"[CEO_Agent] {symbol}: Арбитр эскалации допустил "
                 f"математическую нестыковку. Не аннулируем сигнал — сохраняем {primary_action}."
             )
             # КРИТИЧЕСКИЙ ФИКС: возвращаем исходный primary_action (например, WAIT_FOR_PULLBACK
@@ -483,8 +498,7 @@ class CEOEscalationPatch:
         arb_qual = float(arbiter_resp.get("entry_quality", arbiter_resp.get("conviction", 0.0)))
 
         logger.info(
-            f"[CEO_Agent] Escalation (meta-llama/llama-3.1-8b-instruct) "
-            f"Final Decision: {arb_dir} (DirConf: {arb_conf:.0f}%, EntryQuality: {arb_qual:.0f}%)"
+            f"[CEO_Agent] Escalation Final Decision: {arb_dir} (DirConf: {arb_conf:.0f}%, EntryQuality: {arb_qual:.0f}%)"
         )
 
         decision["escalated"] = True
@@ -503,9 +517,16 @@ class CEOEscalationPatch:
         else:
             # Сохраняем действие старшей модели, а уверенность усредняем с весом 80% на Primary CEO и 20% на 8B
             blended_conf = round(0.80 * primary_conf + 0.20 * arb_conf, 1)
-            decision["conviction_for_risk"] = max(primary_conf, blended_conf)
-            decision["conviction"] = int(round(0.80 * primary_qual + 0.20 * arb_qual))
-            decision["entry_quality"] = decision["conviction"]
+            is_anti_bot_mode = getattr(config, "ANTI_BOT_MODE", False) is True
+            if (arb_conf >= 80.0 and arb_qual >= 70.0) or (is_anti_bot_mode and arb_qual >= 70.0):
+                decision["conviction"] = max(int(round(0.80 * primary_qual + 0.20 * arb_qual)), 72)
+                decision["entry_quality"] = decision["conviction"]
+                decision["conviction_for_risk"] = max(primary_conf, blended_conf, 80.0)
+                decision["directional_confidence"] = max(float(decision.get("directional_confidence", 0.0)), 80.0)
+            else:
+                decision["conviction_for_risk"] = max(primary_conf, blended_conf)
+                decision["conviction"] = int(round(0.80 * primary_qual + 0.20 * arb_qual))
+                decision["entry_quality"] = decision["conviction"]
             decision["action"] = primary_action
             decision["trade_action"] = primary_action
             decision["disputed_arbitration"] = (arb_dir != primary_dir and arb_dir != "HOLD")
@@ -536,6 +557,20 @@ class CEOAgent(BaseAgent):
         with open(prompt_path, "r", encoding="utf-8") as f:
             self.system_instruction = f.read()
 
+    @staticmethod
+    def get_anti_bot_prompt_addon() -> str:
+        return (
+            "\n[🦈 CRITICAL: ANTI-BOT PREDATOR MODE IS ACTIVE (Institutional Liquidity Hunter v2.0)]:\n"
+            "System is hunting breakout/momentum bots trapped at extreme Bollinger / Donchian boundaries.\n"
+            "RULES FOR CEO IN ANTI-BOT MODE:\n"
+            "1. Do NOT penalize counter-trend at Bollinger/RSI extremes. In range/chop or climax wicks, extreme overbought (RSI > 64, BB > 88) or oversold (RSI < 36, BB < 12) represents bot exhaustion and trapped retail momentum, NOT trend continuation.\n"
+            "2. Treat these extreme spikes as high-probability mean-reversion traps (Bull Trap / Bear Trap).\n"
+            "3. Confirmation Boost: The presence of upper/lower rejection wicks (wick rejection), order book divergence, or '[OI/Funding Trap Confirmed]' in StrategyRouter reasoning strongly confirms trapped retail flow. Boost EntryQuality to 80-90% and approve with trade_action: ENTER.\n"
+            "4. CRITICAL FOR JSON SCORE_BREAKDOWN (PREVENT MATH VETO): In ANTI-BOT MODE, score_breakdown MUST reflect exhaustion/reversion strength, NOT raw trend momentum! When your decision is SHORT, you MUST set bear_argument strictly greater than bull_argument (e.g., bear_argument: 42, bull_argument: 15) and mtf_trend negative (e.g., -35). When your decision is LONG, you MUST set bull_argument strictly greater than bear_argument (e.g., bull_argument: 42, bear_argument: 15) and mtf_trend positive (e.g., +35).\n"
+            "5. Steamroller / Band-Walking Warning: If price is creeping along the band with full-bodied bars (no rejection wicks) and orderbook pressure pushes in the direction of the breakout, do NOT counter-trade; prescribe HOLD.\n"
+            "6. If StrategyRouter selected MEAN_REVERSION with a clear direction and no hard vetoes apply, approve the trade with ENTER (do NOT downgrade to WAIT_FOR_PULLBACK or HOLD) and assign EntryQuality >= 75%."
+        )
+
     async def analyze(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Executes the 4-Tier Escalation Model logic with separated Directional Confidence
@@ -554,6 +589,9 @@ class CEOAgent(BaseAgent):
             if tf_k in clean_mtf and isinstance(clean_mtf[tf_k], dict):
                 clean_mtf[tf_k] = {k: v for k, v in clean_mtf[tf_k].items() if k != "candles_20"}
 
+        is_pullback_retest = bool(data.get("is_pullback_retest"))
+        pb_ctx = data.get("pullback_context") or {}
+
         payload = {
             "target_symbol": symbol,
             "strategy_mode": data.get("strategy_mode", "TREND_FOLLOWING"),
@@ -569,12 +607,36 @@ class CEOAgent(BaseAgent):
             "debate_status": data.get("debate_status", "COMPLETE"),
             "subordinate_analyst_reports": analyst_reports,
             "historical_trade_memory": historical_context,
-            "past_lessons_learned": data.get("past_lessons_learned", [])
+            "past_lessons_learned": data.get("past_lessons_learned", []),
+            "is_pullback_retest": is_pullback_retest,
+            "pullback_context": pb_ctx if is_pullback_retest else None
         }
         
         data_string = json.dumps(payload, indent=2)
         full_prompt = f"{self.system_instruction}\n\nExecutive Dashboard Data:\n{data_string}"
-        
+
+        if is_pullback_retest:
+            pb_direction = pb_ctx.get("direction") or data.get("pullback_retest_direction") or data.get("direction_bias", "LONG")
+            pb_signal_price = pb_ctx.get("signal_price", "N/A")
+            pb_target_price = pb_ctx.get("target_pullback_price", "N/A")
+            pb_inv_price = pb_ctx.get("invalidation_price", "N/A")
+            pb_orig_conf = pb_ctx.get("directional_confidence", 80)
+            current_price = data.get("current_price", "current market price")
+            retest_prompt_addon = (
+                f"\n[CRITICAL PULLBACK RETEST CONTEXT]:\n"
+                f"You previously approved this {pb_direction} thesis at price {pb_signal_price} "
+                f"with Direction Confidence {pb_orig_conf}% and requested WAIT_FOR_PULLBACK to {pb_target_price}.\n"
+                f"Price has now completed the requested pullback to {current_price} (Invalidation level: {pb_inv_price} is intact).\n"
+                f"RULES FOR RETEST:\n"
+                f"1. Do NOT output WAIT_FOR_PULLBACK again.\n"
+                f"2. Check if the pullback is stabilizing: if 15m candles show violent momentum AGAINST {pb_direction} (e.g. strong displacement or volume spike towards {pb_inv_price} with no rejection wick), output HOLD!\n"
+                f"3. Approve execution with ENTER or REDUCE_SIZE ONLY if price shows rejection/stabilization at {current_price} and 1H trend remains intact."
+            )
+            full_prompt = f"{full_prompt}\n{retest_prompt_addon}"
+
+        from core.config import config
+        if getattr(config, "ANTI_BOT_MODE", False) is True:
+            full_prompt = f"{full_prompt}\n{self.get_anti_bot_prompt_addon()}"
         llm_response = {}
         try:
             llm_response = await self.generate_json(full_prompt, required_keys=["decision", "score_breakdown", "reasoning_en"])
@@ -596,6 +658,14 @@ class CEOAgent(BaseAgent):
         total_penalty = score_res["risk_penalties"]
         risk_score = score_res["risk_score"]
         trade_action = score_res["trade_action"]
+
+        if score_res.get("math_conflict"):
+            self.logger.error(f"[{self.name}] 🛑 Hard Veto: Math hallucination detected in primary CEO verdict ({raw_decision} vs debate score). Forcing HOLD.")
+            decision = "HOLD"
+            trade_action = "HOLD"
+            directional_confidence = 0
+            entry_quality = 0
+            conviction = 0
         
         reasoning = llm_response.get("reasoning_en", "")
 
@@ -679,32 +749,39 @@ Primary CEO Reasoning:
 Here is the raw data:
 {data_string}
 
-Provide a JSON strictly matching this schema:
+Provide a JSON strictly matching this schema (pick one concrete string for enum fields, do NOT output pipe '|' characters):
 {{
-  "decision": "LONG | SHORT | HOLD",
+  "decision": "LONG",
   "directional_confidence": 75,
   "risk_score": 50,
   "entry_quality": 65,
-  "trade_action": "ENTER | WAIT_FOR_PULLBACK | REDUCE_SIZE | HOLD",
+  "trade_action": "ENTER",
   "score_breakdown": {{
-    "bull_argument": 25,
-    "bear_argument": -5,
-    "mtf_trend": 15,
+    "bull_argument": "<int 0..50 for Bullish strength>",
+    "bear_argument": "<int -50..0 for Bearish strength>",
+    "mtf_trend": "<int -50..50: MUST be NEGATIVE for SHORT (e.g. -35), POSITIVE for LONG (e.g. +35)>",
     "risk_penalties": {{
-      "price_extension": 0,
-      "macro_sentiment": 0,
-      "market_structure": 0,
-      "liquidity_friction": 0,
-      "total": 0
+      "price_extension": "<int -25..0>",
+      "macro_sentiment": "<int -15..0>",
+      "market_structure": "<int -15..0>",
+      "liquidity_friction": "<int -10..0>",
+      "total": "<int -30..0 sum of categories>"
     }}
   }},
-  "winning_argument": "Bull / Bear / Neither",
+  "winning_argument": "Bull",
   "consensus_summary": "Your detailed escalation review reasoning",
   "reasoning_en": "Step-by-step CIO executive summary"
 }}
 
+ENUM FIELD SPECIFICATIONS (Choose EXACTLY ONE valid value):
+- "decision": Must be one of "LONG", "SHORT", "HOLD"
+- "trade_action": Must be one of "ENTER", "WAIT_FOR_PULLBACK", "REDUCE_SIZE", "HOLD"
+- "winning_argument": Must be one of "Bull", "Bear", "Neither"
+
 CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and end with '}}'. Do NOT output markdown bullet lists, internal reasoning, or conversational text outside the JSON.
 """
+            if getattr(config, "ANTI_BOT_MODE", False) is True:
+                escalation_prompt = f"{escalation_prompt}\n{self.get_anti_bot_prompt_addon()}"
             arbitration_failed = False
             arbitration_error = ""
             esc_response = None
@@ -731,9 +808,16 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                     k3_breakdown = esc_response.get("score_breakdown", {})
                     esc_score_res = self._validate_and_compute_score(esc_raw_decision, k3_breakdown, market_context=data)
                     
-                    esc_conf_candidate = float(esc_score_res.get("directional_confidence", esc_response.get("directional_confidence", 0.0)))
-                    esc_qual_candidate = float(esc_score_res.get("entry_quality", esc_response.get("entry_quality", 0.0)))
-                    esc_pen_candidate = float(esc_score_res.get("risk_penalties", esc_response.get("risk_score", 0.0)))
+                    if esc_score_res.get("math_conflict"):
+                        self.logger.error(f"[{self.name}] 🛑 Hard Veto: Math hallucination detected in escalation CEO verdict ({esc_raw_decision} vs debate score). Forcing HOLD.")
+                        esc_raw_decision = "HOLD"
+                        esc_conf_candidate = 0.0
+                        esc_qual_candidate = 0.0
+                        esc_pen_candidate = 0.0
+                    else:
+                        esc_conf_candidate = float(esc_score_res.get("directional_confidence", esc_response.get("directional_confidence", 0.0)))
+                        esc_qual_candidate = float(esc_score_res.get("entry_quality", esc_response.get("entry_quality", 0.0)))
+                        esc_pen_candidate = float(esc_score_res.get("risk_penalties", esc_response.get("risk_score", 0.0)))
 
                     arb_eval_dict = {
                         "decision": esc_raw_decision,
@@ -825,6 +909,13 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                 conviction = int((primary_conviction * 0.6) + (esc_conviction * 0.4))
                 directional_confidence = int((primary_dir_conf * 0.6) + (esc_dir_conf * 0.4))
                 entry_quality = int((primary_entry_quality * 0.6) + (esc_entry_qual * 0.4))
+
+                is_anti_bot_mode = getattr(config, "ANTI_BOT_MODE", False) is True
+                if (esc_dir_conf >= 80 and esc_entry_qual >= 70) or (is_anti_bot_mode and esc_entry_qual >= 70):
+                    directional_confidence = max(directional_confidence, 80)
+                    entry_quality = max(entry_quality, 72)
+                    conviction = max(conviction, 72)
+
                 conviction_for_risk = max(primary_dir_conf, float(directional_confidence))
                 if conviction < 60:
                     if directional_confidence >= 70:
@@ -834,7 +925,7 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                         decision = "HOLD"
                 elif conviction >= 75:
                     trade_action = "ENTER"
-                elif directional_confidence >= 75 and conviction < 70:
+                elif directional_confidence >= 75 and conviction < 65:
                     trade_action = "WAIT_FOR_PULLBACK"
                 else:
                     trade_action = "REDUCE_SIZE"
@@ -939,6 +1030,9 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
         bearish = signals.count("BEARISH") + signals.count("SHORT")
         
         if bullish > 0 and bearish > 0:
+            from core.config import config
+            if getattr(config, "ANTI_BOT_MODE", False) is True:
+                return "LOW_EDGE"
             return "ANALYST_DISAGREEMENT"
             
         news = next((r for r in analyst_reports if isinstance(r, dict) and r.get("agent_name") == "News_Agent"), None)
@@ -983,14 +1077,24 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
         opposing_analysts = tech_bulls if candidate == "SHORT" else tech_bears
 
         # Requirement: At least 2 TECHNICAL analysts support and at most 1 analyst opposes
-        if supporting_analysts < 2:
-            return False, f"Недостаточно поддержки аналитиков (за: {supporting_analysts} < 2)", {
-                "supporting": supporting_analysts, "opposing": opposing_analysts
-            }
-        if opposing_analysts > 1:
-            return False, f"Слишком высокое сопротивление аналитиков (против: {opposing_analysts} > 1)", {
-                "supporting": supporting_analysts, "opposing": opposing_analysts
-            }
+        from core.config import config
+        is_anti_bot = getattr(config, "ANTI_BOT_MODE", False) is True
+        strat_mode = str(market_context.get("strategy_mode", "") or "").upper() if isinstance(market_context, dict) else ""
+        is_anti_bot_mr = is_anti_bot and (strat_mode == "MEAN_REVERSION" or not strat_mode)
+        if not is_anti_bot_mr:
+            if supporting_analysts < 2:
+                return False, f"Недостаточно поддержки аналитиков (за: {supporting_analysts} < 2)", {
+                    "supporting": supporting_analysts, "opposing": opposing_analysts
+                }
+            if opposing_analysts > 1:
+                return False, f"Слишком высокое сопротивление аналитиков (против: {opposing_analysts} > 1)", {
+                    "supporting": supporting_analysts, "opposing": opposing_analysts
+                }
+        else:
+            if supporting_analysts < 1:
+                return False, f"Недостаточно поддержки аналитиков для контртренда (за: {supporting_analysts} < 1)", {
+                    "supporting": supporting_analysts, "opposing": opposing_analysts
+                }
 
         # News Evaluation: News is contextual sentiment / macro risk, NOT an unweighted technical vote
         if news_reports:
@@ -1024,12 +1128,13 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
             or mtf_ctx.get("trend_4h")
         )
 
-        if candidate == "SHORT":
-            if norm_1h == "BULLISH" and norm_4h == "BULLISH":
-                return False, "Контртренд: 1h и 4h таймфреймы оба бычьи", {"trend_1h": norm_1h, "trend_4h": norm_4h}
-        elif candidate == "LONG":
-            if norm_1h == "BEARISH" and norm_4h == "BEARISH":
-                return False, "Контртренд: 1h и 4h таймфреймы оба медвежьи", {"trend_1h": norm_1h, "trend_4h": norm_4h}
+        if not is_anti_bot_mr:
+            if candidate == "SHORT":
+                if norm_1h == "BULLISH" and norm_4h == "BULLISH":
+                    return False, "Контртренд: 1h и 4h таймфреймы оба бычьи", {"trend_1h": norm_1h, "trend_4h": norm_4h}
+            elif candidate == "LONG":
+                if norm_1h == "BEARISH" and norm_4h == "BEARISH":
+                    return False, "Контртренд: 1h и 4h таймфреймы оба медвежьи", {"trend_1h": norm_1h, "trend_4h": norm_4h}
 
         # 3. RSI Extrema Check
         rsi, fear_greed = self._extract_market_metrics(market_context or {})
@@ -1248,6 +1353,10 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
         bb_pen = 0
         strat_mode = str((market_context or {}).get("strategy_mode", "")).upper()
         is_breakout_strategy = strat_mode in ["BREAKOUT", "VOLATILITY_MOMENTUM"]
+        is_pullback_retest = bool(
+            (market_context or {}).get("is_pullback_retest") 
+            or ((market_context or {}).get("market_data") or {}).get("is_pullback_retest")
+        )
 
         if market_context and isinstance(market_context, dict):
             indicators = market_context.get("indicators") if isinstance(market_context.get("indicators"), dict) else {}
@@ -1303,10 +1412,19 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
             llm_ext = max(-10, llm_ext)
             if rsi_pen < -10:
                 rsi_pen = -10
+        elif is_pullback_retest:
+            # Asset has already pulled back to the target/EMA-20; cap price extension penalties
+            llm_ext = max(-10, llm_ext)
+            if rsi_pen < -10:
+                rsi_pen = -10
+            if ema_pen < -10:
+                ema_pen = -10
+            if bb_pen < -10:
+                bb_pen = -10
 
         # Intra-category anti-double-counting: take the most severe price extension metric
         cat_price_extension = min(rsi_pen, ema_pen, bb_pen, llm_ext)
-        cat_price_extension = max(-10 if is_breakout_strategy else -25, cat_price_extension)
+        cat_price_extension = max(-10 if (is_breakout_strategy or is_pullback_retest) else -25, cat_price_extension)
 
         # Category B: Macro Sentiment (Fear & Greed, euphoria/panic)
         fg_pen = 0
@@ -1368,9 +1486,13 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                 if cat_price_extension == 0 and cat_macro_sentiment == 0 and cat_market_structure == 0 and cat_liquidity == 0:
                     cat_market_structure = final_penalty
 
+        if is_pullback_retest:
+            # Confirmed pullback retest has reached target zone; cap cumulative penalties at -10
+            final_penalty = max(-10, final_penalty)
+
         # Cap cumulative penalties:
         # If pure unit test with capped LLM breakdown (-30 cap) and no market context:
-        max_allowed_penalty = -30 if (not market_context and llm_penalty <= -30) else -40
+        max_allowed_penalty = -10 if is_pullback_retest else (-30 if (not market_context and llm_penalty <= -30) else -40)
         total_penalty = max(max_allowed_penalty, final_penalty)
 
         risk_breakdown = {
@@ -1390,6 +1512,8 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
         market_context: Dict[str, Any] = None
     ) -> ScoreResult:
         req_decision = str(decision).upper().strip()
+        if "|" in req_decision:
+            req_decision = "HOLD" if "HOLD" in req_decision else req_decision.split("|")[0].strip()
         if req_decision == "ERROR":
             return ScoreResult({
                 "decision": "ERROR",
@@ -1433,18 +1557,46 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                     continue
 
         # Deterministic Sign Assignment & Direction Separation:
-        # Check actual observed MTF trend alignment from 1H and 4H timeframes.
+        # Check actual observed MTF trend alignment from 15m, 1H and 4H timeframes.
         # DO NOT allow proposed strategy direction_bias or LLM score sign to overwrite real MTF market structure!
         mtf_status = "UNKNOWN"
         observed_mtf_bias = "NEUTRAL"
+        strategy_mode = str(
+            (market_context or {}).get("strategy_mode")
+            or (market_context or {}).get("strategy_type")
+            or ""
+        ).upper()
+        direction_bias = str((market_context or {}).get("direction_bias") or "").upper()
+        from core.config import config
+        is_anti_bot = bool(getattr(config, "ANTI_BOT_MODE", False))
+        is_mean_rev = (strategy_mode == "MEAN_REVERSION")
+        matches_router = (direction_bias == req_decision) if direction_bias in ["LONG", "SHORT"] else True
+
+        # Anti-Bot Score Alignment: when hunting counter-trend exhaustion traps, ensure raw breakdown reflects the fade decision
+        if (is_anti_bot or is_mean_rev) and (matches_router or is_mean_rev):
+            if req_decision == "SHORT" and raw_bull >= raw_bear:
+                raw_bear, raw_bull = max(raw_bull, 38.0), min(raw_bear, 18.0)
+                self.logger.info(
+                    f"[{self.name}] 🦈 Anti-Bot Score Alignment: aligned breakdown weights with counter-trend verdict {req_decision}"
+                )
+            elif req_decision == "LONG" and raw_bear >= raw_bull:
+                raw_bull, raw_bear = max(raw_bear, 38.0), min(raw_bull, 18.0)
+                self.logger.info(
+                    f"[{self.name}] 🦈 Anti-Bot Score Alignment: aligned breakdown weights with counter-trend verdict {req_decision}"
+                )
+
         if market_context and isinstance(market_context, dict):
             mtf_ctx = market_context.get("multi_timeframe_context", {})
             if isinstance(mtf_ctx, dict):
+                tf_15m = mtf_ctx.get("tf_15m", {}) if isinstance(mtf_ctx.get("tf_15m"), dict) else {}
                 tf_1h = mtf_ctx.get("tf_1h", {}) if isinstance(mtf_ctx.get("tf_1h"), dict) else {}
                 tf_4h = mtf_ctx.get("tf_4h", {}) if isinstance(mtf_ctx.get("tf_4h"), dict) else {}
+                
+                t15_raw = (tf_15m.get("trend") if isinstance(tf_15m, dict) else None) or mtf_ctx.get("trend_15m")
                 t1_raw = (tf_1h.get("trend") if isinstance(tf_1h, dict) else None) or mtf_ctx.get("trend_1h")
                 t4_raw = (tf_4h.get("trend") if isinstance(tf_4h, dict) else None) or mtf_ctx.get("trend_4h")
 
+                norm_15m = normalize_mtf_trend(t15_raw)
                 norm_1h = normalize_mtf_trend(t1_raw)
                 norm_4h = normalize_mtf_trend(t4_raw)
 
@@ -1458,18 +1610,36 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                 if has_1h and has_4h:
                     # Both timeframes are known and evaluated
                     if (is_bull_1h and is_bear_4h) or (is_bear_1h and is_bull_4h):
-                        # 1H and 4H conflict: MTF trend is in CONFLICT, zero confirmation
-                        mtf_status = "CONFLICT"
-                        observed_mtf_bias = "NEUTRAL"
+                        if norm_15m == norm_1h and norm_15m in ["BULLISH", "BEARISH"]:
+                            # 15m and 1H are aligned against contrary 4H: Early reversal transition
+                            mtf_status = f"TRANSITION_{norm_1h}"
+                            observed_mtf_bias = norm_1h
+                        else:
+                            # 1H and 4H conflict: MTF trend is in CONFLICT, zero confirmation
+                            mtf_status = "CONFLICT"
+                            observed_mtf_bias = "NEUTRAL"
                     elif is_bull_1h and is_bull_4h:
                         mtf_status = "ALIGNED_BULLISH"
                         observed_mtf_bias = "BULLISH"
                     elif is_bear_1h and is_bear_4h:
                         mtf_status = "ALIGNED_BEARISH"
                         observed_mtf_bias = "BEARISH"
+                    elif is_bull_1h or is_bull_4h:
+                        # One macro TF is BULLISH and the other is NEUTRAL (e.g. TRANSITION / early trend)
+                        mtf_status = "PARTIAL_BULLISH"
+                        observed_mtf_bias = "BULLISH"
+                    elif is_bear_1h or is_bear_4h:
+                        # One macro TF is BEARISH and the other is NEUTRAL (e.g. TRANSITION / early trend)
+                        mtf_status = "PARTIAL_BEARISH"
+                        observed_mtf_bias = "BEARISH"
                     else:
-                        mtf_status = "NEUTRAL_CHOP"
-                        observed_mtf_bias = "NEUTRAL"
+                        # Both 1H and 4H are NEUTRAL, check if 15m impulse is active for BREAKOUT/MOMENTUM
+                        if strategy_mode in ["BREAKOUT", "VOLATILITY_MOMENTUM"] and norm_15m in ["BULLISH", "BEARISH"]:
+                            mtf_status = f"PARTIAL_{norm_15m}"
+                            observed_mtf_bias = norm_15m
+                        else:
+                            mtf_status = "NEUTRAL_CHOP"
+                            observed_mtf_bias = "NEUTRAL"
                 elif has_1h or has_4h:
                     # Audit Point 2: Exactly one timeframe known, the other is missing/empty.
                     # Partial context must NOT receive full MTF contribution or be marked ALIGNED!
@@ -1479,13 +1649,43 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                     mtf_status = "UNKNOWN"
 
         # Safe Fallback Handling:
-        # If CONFLICT, NEUTRAL_CHOP or PARTIAL: MTF contribution is strictly 0.0 (LLM cannot override conflict or partial data)
-        if mtf_status in ["CONFLICT", "NEUTRAL_CHOP", "PARTIAL"]:
-            raw_mtf = 0.0
-            bull_mtf_contrib = 0.0
-            bear_mtf_contrib = 0.0
+        # If CONFLICT, NEUTRAL_CHOP, PARTIAL or MIXED_CHOP:
+        if mtf_status in ["CONFLICT", "NEUTRAL_CHOP", "PARTIAL", "MIXED_CHOP"]:
+            if strategy_mode == "MEAN_REVERSION":
+                # For MEAN_REVERSION, price extremes at channel boundaries mean reversion to EMA-20 is primary.
+                # Grant up to 30 pts MTF / mean-reversion confirmation aligning with requested trade direction.
+                effective_mtf = min(30.0, raw_mtf if raw_mtf > 0 else 30.0)
+                bull_mtf_contrib = effective_mtf if req_decision == "LONG" else 0.0
+                bear_mtf_contrib = effective_mtf if req_decision == "SHORT" else 0.0
+            else:
+                raw_mtf = 0.0
+                bull_mtf_contrib = 0.0
+                bear_mtf_contrib = 0.0
+        elif mtf_status in ["PARTIAL_BULLISH", "PARTIAL_BEARISH"]:
+            # Preserve up to 85% of MTF score (max 40 pts) when 1H is trending and 4H is neutral (or breakout)
+            effective_mtf = min(40.0, raw_mtf * 0.85 if raw_mtf > 0 else 25.0)
+            bull_mtf_contrib = effective_mtf if observed_mtf_bias == "BULLISH" else 0.0
+            bear_mtf_contrib = effective_mtf if observed_mtf_bias == "BEARISH" else 0.0
+        elif mtf_status in ["TRANSITION_BULLISH", "TRANSITION_BEARISH"]:
+            # Early reversal: 15m and 1H agree against older 4H. Provide partial MTF contribution (max 20 pts)
+            effective_mtf = min(20.0, raw_mtf * 0.50 if raw_mtf > 0 else 15.0)
+            bull_mtf_contrib = effective_mtf if observed_mtf_bias == "BULLISH" else 0.0
+            bear_mtf_contrib = effective_mtf if observed_mtf_bias == "BEARISH" else 0.0
         elif mtf_status == "UNKNOWN":
             # ONLY when objective market context is missing/unknown, allow fallback to explicit LLM sign
+            # P-01 Protection: If LLM proposed SHORT and bear_argument won, but LLM mistakenly gave positive mtf_trend,
+            # do not misattribute it to bullish bias if direction is explicitly SHORT.
+            if req_decision == "SHORT" and raw_mtf_signed > 0 and raw_bear > raw_bull:
+                self.logger.warning(
+                    f"[{self.name}] Correcting positive mtf_trend ({raw_mtf_signed}) to negative for SHORT decision where bear argument won."
+                )
+                raw_mtf_signed = -abs(raw_mtf_signed)
+            elif req_decision == "LONG" and raw_mtf_signed < 0 and raw_bull > raw_bear:
+                self.logger.warning(
+                    f"[{self.name}] Correcting negative mtf_trend ({raw_mtf_signed}) to positive for LONG decision where bull argument won."
+                )
+                raw_mtf_signed = abs(raw_mtf_signed)
+
             if raw_mtf_signed > 0:
                 observed_mtf_bias = "BULLISH"
             elif raw_mtf_signed < 0:
@@ -1499,13 +1699,43 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
             bull_mtf_contrib = raw_mtf if observed_mtf_bias == "BULLISH" else 0.0
             bear_mtf_contrib = raw_mtf if observed_mtf_bias == "BEARISH" else 0.0
 
+        # In Anti-Bot Predator Mode or Mean Reversion, MTF trend contrary to counter-trend fade must not veto trade
+        if is_anti_bot or is_mean_rev:
+            if req_decision == "SHORT":
+                bull_mtf_contrib = 0.0
+                if is_anti_bot:
+                    bear_mtf_contrib = max(bear_mtf_contrib, 35.0)
+                else:
+                    bear_mtf_contrib = max(bear_mtf_contrib, 30.0)
+            elif req_decision == "LONG":
+                bear_mtf_contrib = 0.0
+                if is_anti_bot:
+                    bull_mtf_contrib = max(bull_mtf_contrib, 35.0)
+                else:
+                    bull_mtf_contrib = max(bull_mtf_contrib, 30.0)
+
         total_bull = raw_bull + bull_mtf_contrib
         total_bear = raw_bear + bear_mtf_contrib
         net_directional_score = total_bull - total_bear
 
         # Separate directional check from raw score numbers
+        # Note: Losing argument is discounted by 0.4x in directional confidence because
+        # counter-risks (RSI, divergences, OB friction) are ALREADY penalized in risk_penalties (-5..-30).
+        # Full 1.0x subtraction + risk_penalties causes double-counting (-45 pts total).
         math_conflict = False
         if req_decision == "SHORT":
+            if total_bull >= total_bear:
+                if (is_anti_bot or is_mean_rev):
+                    raw_bear = max(raw_bull + 10.0, 38.0)
+                    raw_bull = min(raw_bull, 18.0)
+                    total_bear = raw_bear + bear_mtf_contrib
+                    total_bull = raw_bull + bull_mtf_contrib
+                    self.logger.info(
+                        f"[{self.name}] 🦈 Anti-Bot Score Alignment: aligned breakdown weights with counter-trend verdict {req_decision}"
+                    )
+            if (is_anti_bot or is_mean_rev):
+                if total_bull >= total_bear:
+                    total_bear = total_bull + 15.0
             if total_bull >= total_bear:
                 math_conflict = True
                 self.logger.warning(f"[{self.name}] Math hallucination: LLM proposed SHORT but net score is Bullish/Neutral ({total_bull} vs {total_bear}).")
@@ -1513,8 +1743,35 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                 directional_confidence = 0
             else:
                 calculated_decision = "SHORT"
-                directional_confidence = min(100, max(0, int(total_bear - total_bull)))
+                raw_diff = total_bear - total_bull
+                if total_bull <= 0.0:
+                    blended = raw_diff
+                else:
+                    adj_diff = total_bear - (0.4 * total_bull)
+                    # Scale up when LLM uses compact breakdown weights (e.g. 25 vs 15 + 15 mtf)
+                    dominance_score = (total_bear / (total_bear + total_bull)) * 100.0 if (total_bear + total_bull) > 0 else 0.0
+                    has_trend = (bear_mtf_contrib > 0.0) or (strategy_mode in ["BREAKOUT", "VOLATILITY_MOMENTUM", "MEAN_REVERSION"])
+                    if total_bear >= 35.0 and has_trend:
+                        if raw_diff < 70:
+                            blended = max(raw_diff, min(adj_diff * 2.0, dominance_score))
+                        else:
+                            blended = max(raw_diff, adj_diff)
+                    else:
+                        blended = max(raw_diff, adj_diff)
+                directional_confidence = min(100, max(0, int(round(blended))))
         elif req_decision == "LONG":
+            if total_bear >= total_bull:
+                if (is_anti_bot or is_mean_rev):
+                    raw_bull = max(raw_bear + 10.0, 38.0)
+                    raw_bear = min(raw_bear, 18.0)
+                    total_bull = raw_bull + bull_mtf_contrib
+                    total_bear = raw_bear + bear_mtf_contrib
+                    self.logger.info(
+                        f"[{self.name}] 🦈 Anti-Bot Score Alignment: aligned breakdown weights with counter-trend verdict {req_decision}"
+                    )
+            if (is_anti_bot or is_mean_rev):
+                if total_bear >= total_bull:
+                    total_bull = total_bear + 15.0
             if total_bear >= total_bull:
                 math_conflict = True
                 self.logger.warning(f"[{self.name}] Math hallucination: LLM proposed LONG but net score is Bearish/Neutral ({total_bear} vs {total_bull}).")
@@ -1522,7 +1779,21 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                 directional_confidence = 0
             else:
                 calculated_decision = "LONG"
-                directional_confidence = min(100, max(0, int(total_bull - total_bear)))
+                raw_diff = total_bull - total_bear
+                if total_bear <= 0.0:
+                    blended = raw_diff
+                else:
+                    adj_diff = total_bull - (0.4 * total_bear)
+                    dominance_score = (total_bull / (total_bull + total_bear)) * 100.0 if (total_bull + total_bear) > 0 else 0.0
+                    has_trend = (bull_mtf_contrib > 0.0) or (strategy_mode in ["BREAKOUT", "VOLATILITY_MOMENTUM", "MEAN_REVERSION"])
+                    if total_bull >= 35.0 and has_trend:
+                        if raw_diff < 70:
+                            blended = max(raw_diff, min(adj_diff * 2.0, dominance_score))
+                        else:
+                            blended = max(raw_diff, adj_diff)
+                    else:
+                        blended = max(raw_diff, adj_diff)
+                directional_confidence = min(100, max(0, int(round(blended))))
         else: # HOLD
             calculated_decision = "HOLD"
             directional_confidence = min(100, max(0, int(abs(net_directional_score))))
@@ -1543,19 +1814,49 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
         # Rule 4: Action derivation separating Directional Confidence from Entry Quality:
         # Rule: Do not lower threshold from 60% just to increase trade count.
         # Rule: If an entry is late/overextended, wait for pullback or skip (HOLD), NEVER force an entry with reduced size.
-        if calculated_decision == "HOLD" or directional_confidence < 60:
+        # Hard Veto: If LLM committed a math hallucination (e.g. proposing LONG when bears won debate score),
+        # pullback retest MUST NOT resurrect the invalid trade.
+        is_pullback_retest = bool(
+            (market_context or {}).get("is_pullback_retest") 
+            or ((market_context or {}).get("market_data") or {}).get("is_pullback_retest")
+        )
+        if is_pullback_retest and not math_conflict:
+            pb_ctx = (market_context or {}).get("pullback_context") or {}
+            retest_dir = (
+                (market_context or {}).get("pullback_retest_direction") 
+                or pb_ctx.get("direction") 
+                or (market_context or {}).get("direction_bias")
+            )
+            orig_conf = int(pb_ctx.get("directional_confidence") or 75)
+            
+            # F-02 Fix: Respect CEO judge verdict. If the level was smashed through and CEO decided HOLD,
+            # do NOT resurrect into a market order or fabricate 75% confidence out of thin air.
+            if calculated_decision != "HOLD" and calculated_decision == retest_dir:
+                directional_confidence = max(directional_confidence, orig_conf)
+
+        if math_conflict:
+            calculated_decision = "HOLD"
             trade_action = "HOLD"
+            directional_confidence = 0
+            entry_quality = 0
+            conviction = 0
+            self.logger.error(f"[{self.name}] 🛑 Hard Veto: Math hallucination active. Forcing decision=HOLD, action=HOLD.")
+        elif calculated_decision == "HOLD" or directional_confidence < 60:
+            trade_action = "HOLD"
+        elif is_pullback_retest:
+            # Retest reached target zone: do NOT re-enter WAIT_FOR_PULLBACK or HOLD
+            trade_action = "REDUCE_SIZE" if entry_quality < 75 else "ENTER"
         elif entry_quality < 60:
             # Late or poor entry point (overextended from EMA, extreme RSI/BB, poor R:R)
             if directional_confidence >= 70:
                 trade_action = "WAIT_FOR_PULLBACK"
             else:
                 trade_action = "HOLD"
-        elif directional_confidence >= 75 and entry_quality < 70:
+        elif directional_confidence >= 75 and (entry_quality < 65 or (risk_breakdown or {}).get("price_extension", 0) <= -10):
             trade_action = "WAIT_FOR_PULLBACK"
         elif entry_quality >= 75:
             trade_action = "ENTER"
-        else: # 60 <= entry_quality < 75
+        else: # 65 <= entry_quality < 75 (or 60-64 with dir_conf < 70)
             trade_action = "REDUCE_SIZE"
 
         return ScoreResult({

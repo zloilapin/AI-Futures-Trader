@@ -89,8 +89,10 @@ class DiagnosticTracker:
         if not isinstance(snapshot, dict):
             return
         try:
-            os.makedirs(os.path.dirname(filepath), exist_ok=True)
-            with open(filepath, "a", encoding="utf-8") as f:
+            from core.state_store import StateStore
+            norm_path = StateStore._normalize_path(filepath)
+            os.makedirs(os.path.dirname(norm_path), exist_ok=True)
+            with open(norm_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(snapshot, ensure_ascii=False) + "\n")
         except Exception as e:
             # Non-blocking telemetry

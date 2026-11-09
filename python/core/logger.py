@@ -2,7 +2,7 @@ import os
 import sys
 import json
 import structlog
-from datetime import datetime
+from datetime import datetime, timezone
 
 class TradeLogger:
     """
@@ -10,7 +10,11 @@ class TradeLogger:
     Uses structlog for structured JSON lines output.
     """
     def __init__(self, base_dir="logs"):
-        self.base_dir = base_dir
+        is_test_env = ("pytest" in sys.modules) or bool(os.environ.get("PYTEST_CURRENT_TEST"))
+        if is_test_env and base_dir == "logs":
+            self.base_dir = os.path.join("logs", "pytest_sandbox")
+        else:
+            self.base_dir = base_dir
         
         # Configure structlog for JSON output to files
         structlog.configure(
@@ -29,7 +33,14 @@ class TradeLogger:
     def _get_hierarchical_path(self) -> str:
         """
         Ensures the day folder is created strictly inside the month-1 folder.
+        If under test environment, writes inside logs/pytest_sandbox directly.
         """
+        is_test_env = ("pytest" in sys.modules) or bool(os.environ.get("PYTEST_CURRENT_TEST"))
+        if is_test_env:
+            path = self.base_dir if "pytest_sandbox" in self.base_dir else os.path.join(self.base_dir, "pytest_sandbox")
+            os.makedirs(path, exist_ok=True)
+            return path
+
         now = datetime.now()
         month_folder = f"{now.strftime('%m')}-1"    
         day_folder = now.strftime("%d_%m_%Y")       
@@ -46,7 +57,7 @@ class TradeLogger:
         file_path = os.path.join(log_dir, "decisions.jsonl")
         
         log_data = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "agent": agent_name,
             "message": message,
             **kwargs
@@ -97,7 +108,7 @@ class TradeLogger:
             log_dir = self._get_hierarchical_path()
             file_path = os.path.join(log_dir, "decisions.jsonl")
             log_data = {
-                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                 "agent": "System_Core",
                 "message": message,
                 "level": "debug",

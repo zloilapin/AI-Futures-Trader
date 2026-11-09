@@ -120,18 +120,21 @@ async def test_escalation_bypassed_on_high_conviction(mock_logger):
 # ==============================================================================
 
 @pytest.mark.asyncio
-async def test_consensus_never_forces_reduce_size_when_conviction_below_60(mock_logger):
+async def test_consensus_never_forces_reduce_size_when_conviction_below_60(mock_logger, monkeypatch):
     primary_llm = MagicMock()
     primary_llm.model_name = "qwen/qwen-2.5-72b-instruct"
     escalation_llm = MagicMock()
     escalation_llm.model_name = "meta-llama/llama-3.1-8b-instruct"
 
+    from core.config import config
+    monkeypatch.setattr(config, "ESCALATE_WAIT_FOR_PULLBACK", True)
+
     ceo = CEOAgent(mock_logger, primary_llm, escalation_llm)
 
-    # Primary returns LONG with conviction 65% (DirConf 85%, Penalties -20)
+    # Primary returns LONG with conviction 62% (DirConf 85%, Penalties -23 -> WAIT_FOR_PULLBACK)
     primary_resp = {
         "decision": "LONG",
-        "score_breakdown": {"bull_argument": 45, "bear_argument": 0, "mtf_trend": 40, "risk_penalties": -20},
+        "score_breakdown": {"bull_argument": 45, "bear_argument": 0, "mtf_trend": 40, "risk_penalties": -23},
         "reasoning_en": "Primary evaluation"
     }
     # Arbitrator returns LONG but with conviction 45% (DirConf 75%, Penalties -30)
@@ -301,7 +304,16 @@ def test_ceo_escalation_patch_methods_direct():
     assert bp_reduce is True
 
     # Borderline setup (WAIT_FOR_PULLBACK or gray zone)
-    bp_borderline, _ = CEOEscalationPatch.should_bypass_escalation({"action": "WAIT_FOR_PULLBACK", "decision": "SHORT", "dir_conf": 70.0, "entry_quality": 55.0})
+    # When ESCALATE_WAIT_FOR_PULLBACK is False (default), WAIT_FOR_PULLBACK is bypassed to Pullback Watchlist
+    bp_pb, _ = CEOEscalationPatch.should_bypass_escalation({"action": "WAIT_FOR_PULLBACK", "decision": "SHORT", "dir_conf": 70.0, "entry_quality": 55.0})
+    assert bp_pb is True
+
+    # Weak setup (EntryQual 55 < 62.0) is bypassed by Smart Escalation Cutoff
+    bp_weak, _ = CEOEscalationPatch.should_bypass_escalation({"action": "ENTER", "decision": "SHORT", "dir_conf": 70.0, "entry_quality": 55.0})
+    assert bp_weak is True
+
+    # True borderline actionable ENTER (DirConf 70 < 75, EntryQual 65 >= 62 and < 70) escalates to Arbiter
+    bp_borderline, _ = CEOEscalationPatch.should_bypass_escalation({"action": "ENTER", "decision": "SHORT", "dir_conf": 70.0, "entry_quality": 65.0})
     assert bp_borderline is False
 
     # 2. validate_arbiter_math checks
@@ -418,13 +430,16 @@ async def test_ceo_analyze_bypasses_8b_on_confident_reduce_size(mock_logger):
 
 
 @pytest.mark.asyncio
-async def test_ceo_analyze_preserves_verdict_on_arbiter_math_conflict(mock_logger):
+async def test_ceo_analyze_preserves_verdict_on_arbiter_math_conflict(mock_logger, monkeypatch):
     """
     Issue 2: Arbiter math hallucination fallback (Cycles #12, #43-#47)
     Primary proposed SHORT WAIT_FOR_PULLBACK.
     Arbiter returns broken math (score_breakdown conflict or invalid penalty math).
     System must strictly preserve WAIT_FOR_PULLBACK and NOT reset to HOLD.
     """
+    from core.config import config
+    monkeypatch.setattr(config, "ESCALATE_WAIT_FOR_PULLBACK", True)
+
     primary_llm = MagicMock()
     primary_llm.model_name = "qwen/qwen-plus"
     escalation_llm = MagicMock()

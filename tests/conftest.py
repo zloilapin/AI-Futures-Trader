@@ -6,6 +6,46 @@ from unittest.mock import AsyncMock, MagicMock
 # Add the python directory to the path so we can import modules
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../python')))
 
+@pytest.fixture(autouse=True)
+def isolate_test_state_and_memory(tmp_path):
+    """
+    Guarantees complete physical isolation of pytest from live production memory files.
+    All StateStore operations, diagnostics, and decision snapshots are redirected to a temporary test folder.
+    Zero pollution of live files in data/memory/* (nado_state.json, diagnostics.json, decision_snapshots.jsonl).
+    """
+    from core.state_store import StateStore
+    
+    old_override = StateStore._base_dir_override
+    StateStore._base_dir_override = str(tmp_path)
+    
+    from core.config import config
+    old_shadow = getattr(config, 'SHADOW_MODE', False)
+    old_allow_forbidden = getattr(config, 'ALLOW_FORBIDDEN_STRATEGIES', False)
+    old_anti_bot = getattr(config, 'ANTI_BOT_MODE', False)
+    old_auto_predator = getattr(config, 'AUTO_PREDATOR_SWITCH', False)
+    old_nado_live = getattr(config, 'NADO_LIVE_TRADING_ENABLED', False)
+    old_live = getattr(config, 'LIVE_TRADING_ENABLED', False)
+    config.SHADOW_MODE = False
+    config.ALLOW_FORBIDDEN_STRATEGIES = False
+    config.ANTI_BOT_MODE = False
+    config.AUTO_PREDATOR_SWITCH = False
+    config.NADO_LIVE_TRADING_ENABLED = False
+    config.LIVE_TRADING_ENABLED = False
+    
+    # Initialize clean subdirectories in tmp_path
+    os.makedirs(os.path.join(tmp_path, "data", "memory"), exist_ok=True)
+    
+    yield tmp_path
+    
+    StateStore._base_dir_override = old_override
+    config.SHADOW_MODE = old_shadow
+    config.ALLOW_FORBIDDEN_STRATEGIES = old_allow_forbidden
+    config.ANTI_BOT_MODE = old_anti_bot
+    config.AUTO_PREDATOR_SWITCH = old_auto_predator
+    config.NADO_LIVE_TRADING_ENABLED = old_nado_live
+    config.LIVE_TRADING_ENABLED = old_live
+
+
 @pytest.fixture
 def mock_llm_client():
     from core.llm_client import LLMClient

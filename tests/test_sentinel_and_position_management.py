@@ -22,22 +22,24 @@ def test_sentinel_dynamic_cost_buffer_altcoin_vs_major(mock_logger):
     agent = SentinelAgent(mock_logger)
     profile_rules = {
         "sentinel_be_atr": 1.0,
-        "sentinel_trail_activation_atr": 2.0,
+        "be_activation_r": 1.0,
+        "sentinel_trail_activation_atr": 2.5,
         "sentinel_trail_distance_atr": 1.5,
         "sentinel_min_improve_atr": 0.25
     }
     eval_atr = 100.0
 
     # 1. Major asset (BTC-USD) -> 0.20% (0.001 fee + 0.001 slippage) = $20 buffer on $10,000 entry
+    # Entry 10000, initial SL 9800 (1R = 200, 2%). Price at 10200 (+200 = 1.0R, > 1.2% min_pct)
     pos_btc = {
         "symbol": "BTC-USD",
         "direction": "LONG",
         "entry_price": 10000.0,
         "sl_price": 9800.0,
-        "highest_price": 10120.0,
+        "highest_price": 10220.0,
         "protection_state": "PROTECTED"
     }
-    market_btc = {"price_data": {"current_price": 10100.0}}
+    market_btc = {"price_data": {"current_price": 10200.0}}
     res_btc = asyncio.run(agent.analyze(pos_btc, market_btc, profile_rules, eval_atr))
     assert res_btc["state"] == "BREAK_EVEN"
     assert res_btc["new_sl"] == pytest.approx(10020.0)
@@ -48,10 +50,10 @@ def test_sentinel_dynamic_cost_buffer_altcoin_vs_major(mock_logger):
         "direction": "LONG",
         "entry_price": 10000.0,
         "sl_price": 9800.0,
-        "highest_price": 10120.0,
+        "highest_price": 10220.0,
         "protection_state": "PROTECTED"
     }
-    market_sol = {"price_data": {"current_price": 10100.0}}
+    market_sol = {"price_data": {"current_price": 10200.0}}
     res_sol = asyncio.run(agent.analyze(pos_sol, market_sol, profile_rules, eval_atr))
     assert res_sol["state"] == "BREAK_EVEN"
     assert res_sol["new_sl"] == pytest.approx(10035.0)
@@ -306,4 +308,75 @@ def test_nado_sync_with_exchange_unprotected_sl_alert():
             assert "CRITICAL ALERT" in alert_msg
             assert "BTC-USD" in alert_msg
             assert "НЕ ИМЕЕТ подтвержденного Stop-Loss" in alert_msg
+
+
+def test_sentinel_tp1_synchronization_prevents_early_be(mock_logger):
+    """Verifies that Sentinel does NOT prematurely move SL to BE on 0.9R if TP1 tier is pending."""
+    agent = SentinelAgent(mock_logger)
+    profile_rules = {
+        "sentinel_be_atr": 1.0,
+        "sentinel_trail_activation_atr": 3.0,
+        "sentinel_trail_distance_atr": 1.5,
+        "sentinel_min_improve_atr": 0.25
+    }
+    eval_atr = 10.0
+
+    # SHORT position with entry 1000.0, planned SL 1020.0 (1R = 20.0)
+    # Price is 982.0 (profit = 18.0 = 0.90R, which would normally trigger BE at 0.9R)
+    # But Partial TP Tier 1 is still PENDING!
+    pos_short = {
+        "symbol": "ETH-USD",
+        "direction": "SHORT",
+        "entry_price": 1000.0,
+        "sl_price": 1020.0,
+        "initial_sl": 1020.0,
+        "lowest_price": 982.0,
+        "protection_state": "PROTECTED",
+        "partial_tp_plan": {
+            "tiers": [
+                {"tier_index": 1, "status": "PENDING", "target_price": 980.0}
+            ]
+        }
+    }
+    market_data = {"price_data": {"current_price": 982.0}}
+    res = asyncio.run(agent.analyze(pos_short, market_data, profile_rules, eval_atr))
+
+    # Must NOT move to BE at 0.90R because TP1 is pending!
+    assert res["new_sl"] is None
+    assert res["state"] == "PROTECTED"
+
+    # Once price reaches >= 1.0R (e.g. 980.0 or below), BE is permitted
+    market_data["price_data"]["current_price"] = 980.0
+    res_at_1r = asyncio.run(agent.analyze(pos_short, market_data, profile_rules, eval_atr))
+    assert res_at_1r["state"] == "BREAK_EVEN"
+    assert res_at_1r["new_sl"] is not None
+    assert "TP1 synchronized" in res_at_1r["reasoning"]
+
+
+def test_partial_tp_calculator_min_notional_fallback():
+    """Verifies that PartialTPCalculator falls back to SINGLE_TIER if a tier is below min_notional."""
+    from services.partial_tp_calculator import PartialTPCalculator
+    market_params = {
+        "size_increment": 0.01,
+        "price_increment": 0.01,
+        "min_size": 0.01,
+        "min_notional": 50.0  # $50 minimum notional per order
+    }
+    # Total volume: 0.1 BNB at $600 = $60 notional.
+    # 50% split would be 0.05 BNB = $30 notional, which is < $50 min_notional!
+    plan = PartialTPCalculator.calculate_plan(
+        symbol="BNB-USD",
+        direction="LONG",
+        entry_price=600.0,
+        tp_final_price=630.0,
+        total_contracts=0.10,
+        market_params=market_params,
+        preferred_mode="2_TIER",
+        sl_price=590.0
+    )
+    # Must safely fallback to SINGLE_TIER to prevent exchange rejection
+    assert plan.mode == "SINGLE_TIER"
+    assert len(plan.tiers) == 1
+    assert plan.tiers[0].close_contracts == 0.10
+    assert plan.tiers[0].is_final is True
 

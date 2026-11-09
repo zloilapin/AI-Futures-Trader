@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Nado DEX LinkSigner Onboarding</title>
+  <!-- Telegram WebApp SDK -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <!-- Ethers.js v6 -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.2/ethers.umd.min.js"></script>
+  <style>
+    :root {
+      --bg-color: var(--tg-theme-bg-color, #17212b);
+      --text-color: var(--tg-theme-text-color, #f5f5f5);
+      --hint-color: var(--tg-theme-hint-color, #708499);
+      --link-color: var(--tg-theme-link-color, #64b5f6);
+      --btn-color: var(--tg-theme-button-color, #5288c1);
+      --btn-text: var(--tg-theme-button-text-color, #ffffff);
+      --card-bg: var(--tg-theme-secondary-bg-color, #232e3c);
+      --border-color: rgba(255, 255, 255, 0.08);
+      --success-color: #4caf50;
+      --warn-color: #ff9800;
+      --error-color: #f44336;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg-color);
+      color: var(--text-color);
+      padding: 16px;
+      font-size: 14px;
+      line-height: 1.5;
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+
+    .container {
+      max-width: 480px;
+      margin: 0 auto;
+      width: 100%;
+    }
+
+    .header {
+      text-align: center;
+      margin-bottom: 20px;
+    }
+
+    .header h1 {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--text-color);
+      margin-bottom: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+
+    .header p {
+      font-size: 13px;
+      color: var(--hint-color);
+    }
+
+    .card {
+      background: var(--card-bg);
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 14px;
+      border: 1px solid var(--border-color);
+    }
+
+    .security-badge {
+      background: rgba(76, 175, 80, 0.12);
+      border: 1px solid rgba(76, 175, 80, 0.3);
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 12px;
+      margin-bottom: 16px;
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+    }
+
+    .security-badge .icon {
+      font-size: 16px;
+      flex-shrink: 0;
+    }
+
+    .field-row {
+      margin-bottom: 12px;
+    }
+
+    .field-row:last-child {
+      margin-bottom: 0;
+    }
+
+    .field-label {
+      font-size: 12px;
+      color: var(--hint-color);
+      margin-bottom: 4px;
+      display: block;
+      font-weight: 500;
+    }
+
+    .field-value {
+      font-family: 'SF Mono', Consolas, Monaco, monospace;
+      font-size: 12px;
+      background: rgba(0, 0, 0, 0.2);
+      padding: 8px 10px;
+      border-radius: 6px;
+      word-break: break-all;
+      border: 1px solid var(--border-color);
+    }
+
+    .btn {
+      width: 100%;
+      padding: 13px 16px;
+      border-radius: 10px;
+      border: none;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: opacity 0.2s, transform 0.1s;
+      margin-bottom: 10px;
+    }
+
+    .btn:active {
+      transform: scale(0.98);
+    }
+
+    .btn-primary {
+      background: var(--btn-color);
+      color: var(--btn-text);
+    }
+
+    .btn-primary:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text-color);
+    }
+
+    .network-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      background: rgba(100, 181, 246, 0.12);
+      color: var(--link-color);
+      padding: 4px 8px;
+      border-radius: 6px;
+      font-weight: 500;
+    }
+
+    .status-box {
+      border-radius: 8px;
+      padding: 12px;
+      font-size: 13px;
+      margin-top: 12px;
+      display: none;
+    }
+
+    .status-box.success {
+      display: block;
+      background: rgba(76, 175, 80, 0.15);
+      border: 1px solid var(--success-color);
+      color: #a5d6a7;
+    }
+
+    .status-box.error {
+      display: block;
+      background: rgba(244, 67, 54, 0.15);
+      border: 1px solid var(--error-color);
+      color: #ef9a9a;
+    }
+
+    .fallback-card {
+      margin-top: 14px;
+      display: none;
+    }
+
+    .fallback-card.visible {
+      display: block;
+    }
+
+    .copy-cmd {
+      background: #0d1117;
+      border: 1px dashed var(--link-color);
+      border-radius: 8px;
+      padding: 10px;
+      font-family: monospace;
+      font-size: 11px;
+      word-break: break-all;
+      user-select: all;
+      margin: 8px 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>⚡ AI-Futures-Trader</h1>
+      <p>Non-Custodial Nado DEX LinkSigner Onboarding</p>
+      <div style="margin-top: 10px; display: flex; flex-wrap: wrap; justify-content: center; gap: 6px;">
+        <span class="network-badge" style="background: rgba(147, 51, 234, 0.15); color: #c084fc; font-size: 11px;">🧠 Gemini 2.5 Flash</span>
+        <span class="network-badge" style="background: rgba(59, 130, 246, 0.15); color: #60a5fa; font-size: 11px;">⚖️ DeepSeek-V3</span>
+        <span class="network-badge" style="background: rgba(245, 158, 11, 0.15); color: #fbbf24; font-size: 11px;">⚡ Llama 3.3 70B</span>
+        <span class="network-badge" style="background: rgba(16, 185, 129, 0.15); color: #34d399; font-size: 11px;">🛡️ Sentinel 24/7</span>
+      </div>
+    </div>
+
+    <div class="security-badge">
+      <div class="icon">🛡️</div>
+      <div>
+        <strong>100% Non-Custodial Security Guarantee:</strong><br>
+        The generated session key only has permissions to place and manage orders.
+        <strong>Withdrawal of collateral is strictly forbidden</strong> at the Nado smart contract level. Your funds cannot be stolen.
+      </div>
+    </div>
+
+    <!-- Referral & 10% Fee Discount Banner -->
+    <div class="card" style="background: linear-gradient(135deg, rgba(100, 181, 246, 0.12), rgba(76, 175, 80, 0.12)); border: 1px solid rgba(100, 181, 246, 0.35); padding: 14px; margin-bottom: 14px;">
+      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
+        <span style="font-weight: 700; color: #90caf9; font-size: 13px; display: flex; align-items: center; gap: 6px;">
+          🎁 <span>Шаг 0: Скидка 10% на комиссии</span>
+        </span>
+        <span class="network-badge" id="refBadge" style="background: rgba(76, 175, 80, 0.2); color: #81c784;">Код: ptn3l1u</span>
+      </div>
+      <p style="font-size: 12px; color: var(--hint-color); margin-bottom: 10px; line-height: 1.4;">
+        Зарегистрируйтесь на Nado DEX по официальной реферальной ссылке, чтобы получить <strong>скидку 10%</strong> на все торговые комиссии биржи:
+      </p>
+      <a id="nadoReferralLink" href="https://app.nado.xyz?join=ptn3l1u" target="_blank" rel="noopener noreferrer" class="btn" style="background: #238636; color: #ffffff; text-decoration: none; font-size: 13px; font-weight: 600; padding: 10px; margin-bottom: 0;">
+        🚀 Открыть Nado DEX (Скидка 10%)
+      </a>
+    </div>
+
+    <div class="card">
+      <div class="field-row" style="display:flex; justify-content:space-between; align-items:center;">
+        <span class="field-label" style="margin:0;">Target Network</span>
+        <span class="network-badge">🟣 Ink L2 Mainnet (57073)</span>
+      </div>
+      <hr style="border:none; border-top:1px solid var(--border-color); margin:10px 0;">
+      <div class="field-row">
+        <span class="field-label">Agent Session Key (Signer):</span>
+        <div class="field-value" id="signerDisplay">Loading...</div>
+      </div>
+      <div class="field-row">
+        <span class="field-label">Nado Subaccount:</span>
+        <div class="field-value" id="subaccountDisplay">default</div>
+      </div>
+      <div class="field-row" id="walletRow" style="display:none;">
+        <span class="field-label">Connected Wallet (Owner):</span>
+        <div class="field-value" id="ownerDisplay" style="color:var(--link-color); font-weight:600;">-</div>
+      </div>
+    </div>
+
+    <div id="statusBox" class="status-box"></div>
+
+    <div style="margin-top: 16px;">
+      <button id="btnConnect" class="btn btn-primary" onclick="connectWallet()">
+        🦊 1. Connect EVM Wallet
+      </button>
+
+      <button id="btnSign" class="btn btn-primary" style="display:none;" onclick="signLinkSigner()">
+        ✍️ 2. Sign EIP-712 LinkSigner
+      </button>
+    </div>
+
+    <div id="fallbackCard" class="card fallback-card">
+      <div style="font-weight:600; color:var(--success-color); margin-bottom:6px;">
+        ✅ Подпись успешно сформирована!
+      </div>
+      <p style="font-size:12px; color:var(--hint-color); margin-bottom:6px;">
+        Если окно Telegram не закрылось автоматически, скопируй команду и отправь её боту в чат:
+      </p>
+      <div class="copy-cmd" id="copyCmdText"></div>
+      <button class="btn btn-secondary" onclick="copyFallbackCmd()">📋 Скопировать команду</button>
+    </div>
+  </div>
+
+  <script>
+    // Initialize Telegram WebApp
+    const tg = window.Telegram ? window.Telegram.WebApp : null;
+    if (tg) {
+      tg.ready();
+      tg.expand();
+    }
+
+    // Config & Chain Details
+    const INK_CHAIN_ID_DEC = 57073;
+    const INK_CHAIN_ID_HEX = '0xdef1';
+    const INK_RPC = 'https://rpc-gel.inkonchain.com';
+    const NADO_MAINNET_ENDPOINT = '0x05ec92D78ED421f3D3Ada77FFdE167106565974E';
+
+    // Parse URL params
+    const urlParams = new URLSearchParams(window.location.search);
+    const signerAddr = urlParams.get('signer') || '0x0000000000000000000000000000000000000000';
+    const subaccountName = urlParams.get('subaccount') || 'default';
+    const refCode = urlParams.get('join') || urlParams.get('ref') || 'ptn3l1u';
+
+    document.getElementById('signerDisplay').innerText = signerAddr;
+    document.getElementById('subaccountDisplay').innerText = subaccountName;
+
+    const refLinkEl = document.getElementById('nadoReferralLink');
+    const refBadgeEl = document.getElementById('refBadge');
+    if (refLinkEl && refBadgeEl) {
+      refLinkEl.href = `https://app.nado.xyz?join=${encodeURIComponent(refCode)}`;
+      refBadgeEl.innerText = `Код: ${refCode}`;
+    }
+
+    let provider = null;
+    let signer = null;
+    let userAddress = null;
+    let signedPayload = null;
+
+    function showStatus(msg, type = 'success') {
+      const el = document.getElementById('statusBox');
+      el.className = 'status-box ' + type;
+      el.innerHTML = msg;
+    }
+
+    // Format subaccount bytes32 hex
+    function formatSubaccountHex(address, subName) {
+      const cleanAddr = address.toLowerCase().replace(/^0x/, '');
+      let hexName = '';
+      for (let i = 0; i < subName.length; i++) {
+        hexName += subName.charCodeAt(i).toString(16).padStart(2, '0');
+      }
+      hexName = hexName.padEnd(24, '0');
+      return '0x' + cleanAddr + hexName;
+    }
+
+    // Format signer bytes32 hex (address + 12 zero bytes)
+    function formatSignerHex(address) {
+      const cleanAddr = address.toLowerCase().replace(/^0x/, '');
+      return '0x' + cleanAddr + ''.padEnd(24, '0');
+    }
+
+    async function switchNetwork() {
+      if (!window.ethereum) return;
+      try {
+        await window.ethereum.request({
+          method: 'wallet_switchEthereumChain',
+          params: [{ chainId: INK_CHAIN_ID_HEX }]
+        });
+      } catch (switchError) {
+        // If chain is not added (error code 4902), add it
+        if (switchError.code === 4902) {
+          await window.ethereum.request({
+            method: 'wallet_addEthereumChain',
+            params: [{
+              chainId: INK_CHAIN_ID_HEX,
+              chainName: 'Ink L2 Mainnet',
+              rpcUrls: [INK_RPC],
+              nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+              blockExplorerUrls: ['https://explorer.inkonchain.com']
+            }]
+          });
+        } else {
+          throw switchError;
+        }
+      }
+    }
+
+    async function connectWallet() {
+      try {
+        if (!window.ethereum) {
+          showStatus('❌ No EVM wallet detected (MetaMask/Rabby/Trust). Please open inside Web3 browser or MetaMask.', 'error');
+          return;
+        }
+        showStatus('⏳ Connecting wallet...', 'success');
+        provider = new ethers.BrowserProvider(window.ethereum);
+        await switchNetwork();
+        const accounts = await provider.send("eth_requestAccounts", []);
+        if (!accounts || accounts.length === 0) {
+          showStatus('❌ No accounts selected.', 'error');
+          return;
+        }
+        signer = await provider.getSigner();
+        userAddress = accounts[0];
+
+        document.getElementById('walletRow').style.display = 'block';
+        document.getElementById('ownerDisplay').innerText = userAddress;
+        document.getElementById('btnConnect').style.display = 'none';
+        document.getElementById('btnSign').style.display = 'flex';
+        showStatus('✅ Wallet connected: ' + userAddress.slice(0, 6) + '...' + userAddress.slice(-4), 'success');
+      } catch (err) {
+        console.error(err);
+        showStatus('❌ Failed to connect: ' + (err.message || err), 'error');
+      }
+    }
+
+    async function signLinkSigner() {
+      try {
+        if (!signer || !userAddress) {
+          showStatus('❌ Please connect wallet first.', 'error');
+          return;
+        }
+
+        showStatus('⏳ Requesting EIP-712 signature in wallet...', 'success');
+
+        const domain = {
+          name: "Nado",
+          version: "0.0.1",
+          chainId: INK_CHAIN_ID_DEC,
+          verifyingContract: NADO_MAINNET_ENDPOINT
+        };
+
+        const types = {
+          LinkSigner: [
+            { name: "sender", type: "bytes32" },
+            { name: "signer", type: "bytes32" },
+            { name: "nonce", type: "uint64" }
+          ]
+        };
+
+        const nonce = Date.now();
+        const senderHex = formatSubaccountHex(userAddress, subaccountName);
+        const signerHex = formatSignerHex(signerAddr);
+
+        const message = {
+          sender: senderHex,
+          signer: signerHex,
+          nonce: BigInt(nonce)
+        };
+
+        // Sign typed data with ethers v6
+        const signature = await signer.signTypedData(domain, types, message);
+        console.log("LinkSigner signature:", signature);
+
+        signedPayload = {
+          owner: userAddress,
+          subaccount: subaccountName,
+          signer: signerAddr,
+          signature: signature,
+          nonce: nonce
+        };
+
+        // Prepare fallback command text
+        const fallbackCmd = `/link_confirm ${userAddress} ${nonce} ${signature}`;
+        document.getElementById('copyCmdText').innerText = fallbackCmd;
+        document.getElementById('fallbackCard').classList.add('visible');
+        document.getElementById('btnSign').style.display = 'none';
+
+        showStatus('🎉 Подпись успешно получена! Передаем в Telegram...', 'success');
+
+        // Send via Telegram WebApp if available
+        if (tg) {
+          try {
+            tg.sendData(JSON.stringify(signedPayload));
+            setTimeout(() => {
+              tg.close();
+            }, 1000);
+          } catch (e) {
+            console.warn("tg.sendData not available in this context:", e);
+          }
+        }
+      } catch (err) {
+        console.error(err);
+        showStatus('❌ Signing rejected or failed: ' + (err.message || err), 'error');
+      }
+    }
+
+    function copyFallbackCmd() {
+      const text = document.getElementById('copyCmdText').innerText;
+      navigator.clipboard.writeText(text).then(() => {
+        showStatus('📋 Команда скопирована в буфер обмена! Отправь её боту.', 'success');
+      }).catch(() => {
+        showStatus('⚠️ Выдели и скопируй команду вручную.', 'error');
+      });
+    }
+  </script>
+</body>
+</html>
+

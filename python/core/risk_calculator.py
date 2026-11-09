@@ -53,7 +53,8 @@ def estimate_total_loss(
     slippage_stress_pct: float = 0.001,
     funding_rate_hourly: float = 0.0,
     holding_hours: float = 4.0,
-    approved_risk: Optional[float] = None
+    approved_risk: Optional[float] = None,
+    is_long: Optional[bool] = None
 ) -> LossEstimationResult:
     """
     Computes a comprehensive loss estimation for an open position hitting its stop-loss.
@@ -72,7 +73,31 @@ def estimate_total_loss(
     sl = validate_finite_positive("sl_price", sl_price)
     fee_rate = validate_finite_positive("taker_fee_pct", taker_fee_pct if taker_fee_pct is not None else 0.0005, allow_zero=True, max_val=0.50)
     slip_rate = validate_finite_positive("slippage_stress_pct", slippage_stress_pct if slippage_stress_pct is not None else 0.001, allow_zero=True, max_val=0.50)
-    funding_rate = validate_finite_positive("funding_rate_hourly", abs(float(funding_rate_hourly or 0.0)), allow_zero=True, max_val=0.20)
+    fr_val = float(funding_rate_hourly or 0.0)
+    # Determine position side if not explicitly provided:
+    # sl < entry -> LONG (stop is below fill)
+    # sl > entry -> SHORT (stop is above fill)
+    if is_long is None:
+        if sl < entry:
+            pos_is_long = True
+        elif sl > entry:
+            pos_is_long = False
+        else:
+            pos_is_long = None
+    else:
+        pos_is_long = is_long
+
+    # Calculate adverse funding rate (only add cost when funding works against the position)
+    if pos_is_long is True:
+        # Long pays funding when rate is positive; receives funding (income) when negative
+        adverse_fr = max(0.0, fr_val)
+    elif pos_is_long is False:
+        # Short pays funding when rate is negative; receives funding (income) when positive
+        adverse_fr = max(0.0, -fr_val)
+    else:
+        adverse_fr = abs(fr_val)
+
+    funding_rate = validate_finite_positive("funding_rate_hourly", adverse_fr, allow_zero=True, max_val=0.20)
     hours = validate_finite_positive("holding_hours", holding_hours if holding_hours is not None else 4.0, allow_zero=True, max_val=720.0)
 
     # Base price loss
@@ -84,7 +109,7 @@ def estimate_total_loss(
     # Slippage stress on stop-loss market execution
     slippage_stress = round(c * sl * slip_rate, 4)
 
-    # Holding funding cost
+    # Holding funding cost (only adverse funding included)
     funding_loss = round(c * entry * funding_rate * hours, 4)
 
     # Aggregate figures

@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, AsyncMock, patch
 from agents.risk_manager import RiskManager
 from core.logger import TradeLogger
 from core.models import FinalTradeDecision
+from core.strategy_router import StrategyProfile
 from services.nado_trading_service import NadoTradingService
 
 @pytest.fixture
@@ -319,17 +320,69 @@ async def test_nado_trading_service_tracks_daily_drawdown():
     # 1. Baseline day start at $1000
     summary1 = await service.get_portfolio_summary()
     assert summary1["current_balance"] == 1000.0
+    assert summary1["peak_balance"] == 1000.0
     assert summary1["daily_pnl_usd"] == 0.0
     assert summary1["daily_pnl_pct"] == 0.0
     assert summary1["daily_drawdown_pct"] == 0.0
+    assert summary1["max_drawdown_pct"] == 0.0
     
     # 2. Simulate equity drop to $940 (6% daily drawdown)
     mock_spot.balance.amount = int(940 * 1e18)
-    summary2 = await service.get_portfolio_summary()
+    summary2 = await service.get_portfolio_summary(bypass_cache=True)
     assert summary2["current_balance"] == 940.0
+    assert summary2["peak_balance"] == 1000.0
     assert summary2["daily_pnl_usd"] == -60.0
     assert summary2["daily_pnl_pct"] == -6.0
     assert summary2["daily_drawdown_pct"] == 0.06
+    assert summary2["max_drawdown_pct"] == 0.06
+
+@pytest.mark.asyncio
+async def test_peak_balance_high_water_mark_survives_new_utc_day(risk_mgr, base_market_data):
+    """
+    Verifies that when a new UTC day resets daily_drawdown_pct to 0.00%,
+    the high-water mark peak_balance is preserved, allowing RiskManager
+    to enforce two-factor equity drawdown sizing protection.
+    """
+    portfolio_new_day = {
+        "balance": 930.0,
+        "total_usd": 930.0,
+        "current_balance": 930.0,
+        "spot_balance": 930.0,
+        "available_margin": 900.0,
+        "margin_used": 30.0,
+        "maintenance_health_usd": 850.0,
+        "initial_balance": 1000.0,
+        "peak_balance": 1000.0,      # HWM peak was $1000, current is $930 (7% drawdown)
+        "daily_drawdown_pct": 0.0,    # Reset at 00:00 UTC
+        "daily_pnl_pct": 0.0,
+        "daily_pnl_usd": 0.0,
+        "active_positions": {},
+        "recent_streak": ["LOSS", "WIN"],
+        "strict_portfolio_health": True
+    }
+    
+    ceo_enter = {
+        "symbol": "ETH-USD",
+        "decision": "LONG",
+        "conviction": 85,
+        "entry_quality": 85,
+        "trade_action": "ENTER",
+        "action": "ENTER"
+    }
+    
+    res = await risk_mgr.analyze(
+        ceo_enter,
+        portfolio_new_day,
+        base_market_data,
+        effective_profile="BALANCED",
+        strategy_mode="TREND_FOLLOWING"
+    )
+    
+    # Despite daily_drawdown_pct == 0.0%, drawdown from peak is 7.0%,
+    # so dd_mult should be 0.45x (EQUITY_ELEVATED: 6-10% drawdown)
+    assert res.get("approved") is True
+    applied = res.get("applied_multipliers", {})
+    assert applied.get("dd_mult") == 0.45, f"Expected dd_mult=0.45 for 7% peak drawdown, got {applied.get('dd_mult')}"
 
 @pytest.mark.asyncio
 async def test_nado_trading_service_reanchors_on_external_transfer():
@@ -441,13 +494,12 @@ async def test_risk_manager_penalty_suppression_veto(risk_mgr, base_market_data,
     ceo_decision = {
         "symbol": "BTC-USD",
         "decision": "LONG",
-        "conviction": 85,
-        "trade_action": "REDUCE_SIZE" # x0.75
+        "conviction": 72,  # Above min_conviction 70, but below 75% floor (Cohort C)
+        "trade_action": "ENTER"
     }
     
-    # 3 consecutive losses cuts risk to 0.25x
-    portfolio = dict(base_portfolio_data, recent_streak=["LOSS", "LOSS", "LOSS"])
-    # 0.70 * 0.75 * 0.25 = 0.131x base_risk (well below 0.35x floor)
+    # 5 consecutive losses cuts portfolio_mult deeply (<= 0.20)
+    portfolio = dict(base_portfolio_data, recent_streak=["LOSS", "LOSS", "LOSS", "LOSS", "LOSS"])
     verdict = await risk_mgr.analyze(
         ceo_decision, portfolio, base_market_data, 
         effective_profile="BALANCED"
@@ -456,6 +508,37 @@ async def test_risk_manager_penalty_suppression_veto(risk_mgr, base_market_data,
     assert verdict["approved"] is False
     assert verdict["veto_category"] == "PENALTY_SUPPRESSION"
     assert "Dynamic risk" in verdict["reasoning"]
+
+@pytest.mark.asyncio
+async def test_risk_manager_high_conviction_floor_on_cohort_b_reduce_size(risk_mgr, base_market_data, base_portfolio_data):
+    """
+    Cohort B trades (REDUCE_SIZE with conviction >= 75%) must be saved from PENALTY_SUPPRESSION deadlock:
+    1. At 3 losses: Anti-double-penalty preserves dynamic risk at 0.60% (above 0.375% floor).
+    2. At 5 losses (portfolio_mult=0.20): dynamic risk (0.30%) is boosted to min_viable_risk floor (0.375%).
+    """
+    ceo_decision = {
+        "symbol": "ZEC-USD",
+        "decision": "LONG",
+        "conviction": 87,
+        "trade_action": "REDUCE_SIZE"
+    }
+    # Case 1: 3 losses - anti double penalty preserves viable risk
+    portfolio_3_losses = dict(base_portfolio_data, recent_streak=["LOSS", "LOSS", "LOSS"])
+    verdict_3 = await risk_mgr.analyze(
+        ceo_decision, portfolio_3_losses, base_market_data,
+        effective_profile="BALANCED"
+    )
+    assert verdict_3["approved"] is True
+    assert verdict_3["final_risk_pct"] == pytest.approx(0.006, rel=1e-3)
+
+    # Case 2: 5 losses - dynamic risk 0.30% boosted to 0.375% min_viable_risk floor
+    portfolio_5_losses = dict(base_portfolio_data, recent_streak=["LOSS", "LOSS", "LOSS", "LOSS", "LOSS"])
+    verdict_5 = await risk_mgr.analyze(
+        ceo_decision, portfolio_5_losses, base_market_data,
+        effective_profile="BALANCED"
+    )
+    assert verdict_5["approved"] is True
+    assert verdict_5["final_risk_pct"] == pytest.approx(0.00375, rel=1e-3)
 
 @pytest.mark.asyncio
 async def test_risk_manager_liquidation_precedence_and_price(risk_mgr, base_market_data, base_portfolio_data):
@@ -776,7 +859,7 @@ async def test_open_position_behavioral_limit_price_and_slippage():
     mock_market.product_id = 2
     mock_market.book_info.size_increment = "50000000000000"       # 0.00005 BTC x18
     mock_market.book_info.price_increment_x18 = "1000000000000000000"  # 1.0 x18
-    mock_market.book_info.min_size = "100000000000000000000"      # dummy 100.0
+    mock_market.book_info.min_size = "0"                           # Min notional 0 for slippage behavior test
     service._market_cache = {2: mock_market}
 
     captured_params = []
@@ -1398,9 +1481,11 @@ async def test_cohort_classification_and_double_penalty_floor(risk_mgr, base_por
     """
     Validates:
     1. Cohort tagging (A, B, C, D) based on conviction threshold and trade_action.
-    2. Preventing 0.525x compounding penalty collapse (0.70 * 0.75):
-       When conviction is marginal (delta < 5 -> conf_mult=0.70) AND action is REDUCE_SIZE (0.75),
-       the signal_mult is safely floored at 0.60x rather than crashing to 0.525x.
+    2. Flat-Protected Sizing [0.85x .. 1.00x] to prevent Adverse Sizing Selection:
+       - Conf mult capped at 1.00x (preventing 1.15x/1.25x over-leverage on euphoria).
+       - Boundary conviction delta < 5 floored at 0.90x.
+       - Action mult for REDUCE_SIZE is 0.85x (narrowing spread vs ENTER).
+       - Compounding signal_mult safely floored at 0.85x.
     3. Exposure of planned_risk_usd, cohort, base_risk_pct, final_risk_pct, and applied_multipliers.
     """
     portfolio = dict(base_portfolio_data, total_usd=1000.0, available_margin=1000.0)
@@ -1410,7 +1495,7 @@ async def test_cohort_classification_and_double_penalty_floor(risk_mgr, base_por
     verdict_a = await risk_mgr.analyze(decision_a, portfolio, base_market_data, effective_profile="BALANCED")
     assert verdict_a["approved"] is True
     assert verdict_a["cohort"] == "A"
-    assert verdict_a["applied_multipliers"]["conf_mult"] == 1.15
+    assert verdict_a["applied_multipliers"]["conf_mult"] == 1.00
     assert verdict_a["applied_multipliers"]["action_mult"] == 1.0
 
     # Cohort B: High Conviction, Reduced Size
@@ -1418,13 +1503,14 @@ async def test_cohort_classification_and_double_penalty_floor(risk_mgr, base_por
     verdict_b = await risk_mgr.analyze(decision_b, portfolio, base_market_data, effective_profile="BALANCED")
     assert verdict_b["approved"] is True
     assert verdict_b["cohort"] == "B"
-    assert verdict_b["applied_multipliers"]["action_mult"] == 0.75
+    assert verdict_b["applied_multipliers"]["action_mult"] == 0.85
 
     # Cohort C: Low Conviction (< min_conviction + 10 = 80), Full Size
     decision_c = {"symbol": "BTC-USD", "decision": "LONG", "conviction": 73, "trade_action": "ENTER"}
     verdict_c = await risk_mgr.analyze(decision_c, portfolio, base_market_data, effective_profile="BALANCED")
     assert verdict_c["approved"] is True
     assert verdict_c["cohort"] == "C"
+    assert verdict_c["applied_multipliers"]["conf_mult"] == 0.90
     assert verdict_c["applied_multipliers"]["action_mult"] == 1.0
 
     # Cohort D: Low Conviction (< 80) and Reduced Size
@@ -1435,7 +1521,7 @@ async def test_cohort_classification_and_double_penalty_floor(risk_mgr, base_por
     assert verdict_d_veto["approved"] is False
     assert verdict_d_veto["veto_category"] == "COHORT_D_NEGATIVE_EXPECTANCY"
 
-    # 2. When BLOCK_COHORT_D_TRADES is disabled, verify that 0.60x floor protects against 0.525x collapse:
+    # 2. When BLOCK_COHORT_D_TRADES is disabled, verify that 0.85x floor protects against excessive collapse:
     from core.config import config
     orig_block = getattr(config, "BLOCK_COHORT_D_TRADES", True)
     try:
@@ -1443,13 +1529,14 @@ async def test_cohort_classification_and_double_penalty_floor(risk_mgr, base_por
         verdict_d = await risk_mgr.analyze(decision_d, portfolio, base_market_data, effective_profile="BALANCED")
         assert verdict_d["approved"] is True
         assert verdict_d["cohort"] == "D"
-        assert verdict_d["applied_multipliers"]["conf_mult"] == 0.70
-        assert verdict_d["applied_multipliers"]["action_mult"] == 0.75
-        assert verdict_d["applied_multipliers"]["signal_mult"] == 0.60
+        assert verdict_d["applied_multipliers"]["conf_mult"] == 0.90
+        assert verdict_d["applied_multipliers"]["action_mult"] == 0.85
+        assert verdict_d["applied_multipliers"]["signal_mult"] == 0.85
         assert verdict_d["planned_risk_usd"] > 0
         assert verdict_d["base_risk_pct"] == 0.015
     finally:
         config.BLOCK_COHORT_D_TRADES = orig_block
+
 
 
 def test_continuous_half_kelly_calibration(risk_mgr):
@@ -1957,7 +2044,9 @@ async def test_drawdown_discrepancy_and_strict_fail_closed(risk_mgr, base_portfo
             "strict_metadata": True,
             "size_increment": 0.001,
             "price_increment": 1.0,
-            "taker_fee_pct": 0.0005
+            "taker_fee_pct": 0.0005,
+            "min_size": 0.001,
+            "min_notional": 10.0
         }
     }
 
@@ -1988,6 +2077,19 @@ async def test_drawdown_discrepancy_and_strict_fail_closed(risk_mgr, base_portfo
     verdict_missing = await risk_mgr.analyze(ceo_decision, portfolio_missing, market)
     assert verdict_missing["approved"] is False
     assert verdict_missing["veto_category"] == "MISSING_PORTFOLIO_HEALTH"
+
+    # Case 3: Small fractional intraday loss (< 1.0%, e.g. -0.32% or -$0.31) must NOT be inflated 100x to 32%
+    portfolio_small_loss = dict(
+        base_portfolio_data,
+        total_usd=97.29,
+        available_margin=90.0,
+        daily_drawdown_pct=0.0032,
+        daily_pnl_pct=-0.32,
+        daily_pnl_usd=-0.31
+    )
+    verdict_small = await risk_mgr.analyze(ceo_decision, portfolio_small_loss, market, effective_profile="AGGRESSIVE")
+    assert verdict_small["approved"] is True, f"VETOED: {verdict_small.get('veto_category')} -> {verdict_small.get('reasoning')}"
+    assert verdict_small.get("veto_category") is None
 
 
 # ==============================================================================
@@ -3015,3 +3117,126 @@ async def test_risk_manager_default_omitted_macro_regime_fails_closed(mock_logge
     res_valid = await raw_rm.analyze(ceo_decision, base_portfolio_data, base_market_data, macro_regime="RANGE_CHOPPY")
     assert res_valid.get("veto_category") != "UNKNOWN_MACRO_REGIME"
 
+
+@pytest.mark.asyncio
+async def test_gate_2_4_trailing_stop_in_profit_does_not_exhaust_open_risk_cap(risk_mgr, base_market_data):
+    """
+    Gate 2.4 Audit Hardening:
+    Verifies that when an open position has a trailing stop moved into profit (e.g. SHORT with sl < entry,
+    or LONG with sl > entry), the locked-in profit eliminates capital risk to the entry.
+    It must NOT treat locked-in profit as risk via abs(entry - sl) and must NOT veto subsequent entries.
+    """
+    ceo_decision = {"symbol": "AVAX-USD", "decision": "LONG", "conviction": 85, "trade_action": "ENTER"}
+    # Balance = $1000. Cap for BALANCED = 4% ($40).
+    # Open ETH SHORT position in profit: entry = 3000, sl = 2800 (trailing stop locked in $200/unit profit!).
+    # With contracts = 0.5, previous abs(3000 - 2800) * 0.5 = $100 would have falsely exhausted the $40 cap!
+    portfolio = {
+        "total_usd": 1000.0,
+        "available_margin": 800.0,
+        "active_positions": {
+            "ETH-USD": {
+                "symbol": "ETH-USD",
+                "direction": "SHORT",
+                "entry_price": 3000.0,
+                "sl_price": 2800.0,
+                "contracts": 0.5
+            }
+        }
+    }
+    market = {
+        "price_data": {"current_price": 30.0},
+        "indicators": {"atr_14": 1.0},
+        "order_book_data": {"spread_pct": 0.05},
+        "derivatives_data": {"taker_fee_pct": 0.0005, "size_increment": 0.1, "price_increment": 0.01}
+    }
+    verdict = await risk_mgr.analyze(ceo_decision, portfolio, market, effective_profile="BALANCED", macro_regime="TRENDING")
+    # Position in profit has 0 open capital risk -> trade is approved
+    assert verdict["approved"] is True
+    assert verdict.get("veto_category") != "TOTAL_OPEN_RISK_CAP"
+
+
+def test_estimate_total_loss_favorable_funding_rate_is_zero_cost():
+    """
+    Risk Calculator Audit Hardening:
+    Verifies that when funding rate is favorable (e.g. SHORT with positive funding, or LONG with negative funding),
+    the funding income is NOT counted as a stress loss (funding_loss == 0.0).
+    When funding rate is adverse, funding cost is accurately calculated and included.
+    """
+    from core.risk_calculator import estimate_total_loss
+
+    # 1. SHORT with POSITIVE funding rate (+0.0002): exchange pays funding to shorts -> cost is 0
+    short_favorable = estimate_total_loss(
+        contracts=1.0,
+        fill_price=100.0,
+        sl_price=105.0,  # SL > entry -> SHORT
+        funding_rate_hourly=0.0002,
+        holding_hours=4.0
+    )
+    assert short_favorable.funding_loss_usd == 0.0
+
+    # 2. SHORT with NEGATIVE funding rate (-0.0002): shorts pay longs -> cost is added
+    short_adverse = estimate_total_loss(
+        contracts=1.0,
+        fill_price=100.0,
+        sl_price=105.0,
+        funding_rate_hourly=-0.0002,
+        holding_hours=4.0
+    )
+    assert short_adverse.funding_loss_usd == round(1.0 * 100.0 * 0.0002 * 4.0, 4)
+    assert short_adverse.funding_loss_usd > 0.0
+
+    # 3. LONG with NEGATIVE funding rate (-0.0002): exchange pays funding to longs -> cost is 0
+    long_favorable = estimate_total_loss(
+        contracts=1.0,
+        fill_price=100.0,
+        sl_price=95.0,  # SL < entry -> LONG
+        funding_rate_hourly=-0.0002,
+        holding_hours=4.0
+    )
+    assert long_favorable.funding_loss_usd == 0.0
+
+    # 4. LONG with POSITIVE funding rate (+0.0002): longs pay shorts -> cost is added
+    long_adverse = estimate_total_loss(
+        contracts=1.0,
+        fill_price=100.0,
+        sl_price=95.0,
+        funding_rate_hourly=0.0002,
+        holding_hours=4.0
+    )
+    assert long_adverse.funding_loss_usd == round(1.0 * 100.0 * 0.0002 * 4.0, 4)
+    assert long_adverse.funding_loss_usd > 0.0
+
+
+
+
+def test_smooth_step_up_recovery_after_loss_streak(risk_mgr):
+    """
+    Sizing Anti-Whipsaw Audit Hardening:
+    Verifies that after 2+ consecutive losses, recovering wins smoothly step up
+    (0.75x -> 0.85x -> 1.00x) rather than immediately jumping from 0.50x to 1.00x,
+    preventing asymmetric adverse selection between winning and losing trades.
+    """
+    # 1. Two consecutive losses -> 0.50x
+    m1, msg1 = risk_mgr._calculate_drawdown_multiplier(["LOSS", "LOSS"], daily_drawdown_pct=0.0)
+    assert m1 == 0.50
+    assert "DRAWDOWN PROTECTION" in msg1
+
+    # 2. First win after 2 losses -> Tier 1 recovery at 0.75x
+    m2, msg2 = risk_mgr._calculate_drawdown_multiplier(["LOSS", "LOSS", "WIN"], daily_drawdown_pct=0.0)
+    assert m2 == 0.75
+    assert "PROBATION RECOVERY TIER 1" in msg2
+
+    # 3. Second consecutive win -> Tier 2 recovery at 0.85x
+    m3, msg3 = risk_mgr._calculate_drawdown_multiplier(["LOSS", "LOSS", "WIN", "WIN"], daily_drawdown_pct=0.0)
+    assert m3 == 0.85
+    assert "PROBATION RECOVERY TIER 2" in msg3
+
+    # 4. Third consecutive win -> Full recovery at 1.00x
+    m4, msg4 = risk_mgr._calculate_drawdown_multiplier(["LOSS", "LOSS", "WIN", "WIN", "WIN"], daily_drawdown_pct=0.0)
+    assert m4 == 1.00
+    assert "STREAK_NORMAL" in msg4
+
+    # 5. Probation loss during recovery -> Kept at 0.60x (not crashed to 0.25x or 0.50x)
+    m5, msg5 = risk_mgr._calculate_drawdown_multiplier(["LOSS", "LOSS", "WIN", "LOSS"], daily_drawdown_pct=0.0)
+    assert m5 == 0.60
+    assert "PROBATION: Mild loss" in msg5

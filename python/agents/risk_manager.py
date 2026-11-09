@@ -1,7 +1,7 @@
 import os
 import json
 import math
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple, List
 
 from agents.base_agent import BaseAgent
 from core.logger import TradeLogger
@@ -44,6 +44,30 @@ class RiskManager(BaseAgent):
         super().__init__("Risk_Manager", logger, llm_client)
         self.default_macro_regime = default_macro_regime
 
+    @staticmethod
+    def is_risk_free_position(pos: dict) -> bool:
+        """Returns True if position has zero open price risk (BE or trailing stop beyond entry)."""
+        if not isinstance(pos, dict):
+            return False
+        state = str(pos.get("protection_state") or pos.get("state") or "").upper()
+        if any(k in state for k in ("BREAK_EVEN", "TRAILING", "TIME_STOP_BE")):
+            return True
+        plan = pos.get("partial_tp_plan")
+        if isinstance(plan, dict) and plan.get("be_activated"):
+            return True
+        direction = str(pos.get("direction", pos.get("side", ""))).upper()
+        try:
+            entry = float(pos.get("entry_price") or 0.0)
+            sl = float(pos.get("sl_price") or 0.0)
+            if entry > 0 and sl > 0:
+                if ("LONG" in direction or "BUY" in direction) and sl >= entry:
+                    return True
+                if ("SHORT" in direction or "SELL" in direction) and sl <= entry:
+                    return True
+        except (ValueError, TypeError):
+            pass
+        return False
+
     def _get_profile_rules(self, profile: str, strategy_mode: str = "TREND_FOLLOWING") -> dict:
         max_concurrent = getattr(config, "MAX_CONCURRENT_POSITIONS", 3)
         if profile == "AGGRESSIVE":
@@ -60,9 +84,9 @@ class RiskManager(BaseAgent):
                 "target_margin_pct": 0.20,
                 "max_margin_pct": 0.45,
                 "max_leverage": 15,
-                "sentinel_be_atr": 2.2,
-                "sentinel_trail_atr": 3.0,
-                "sentinel_trail_activation_atr": 3.0,
+                "sentinel_be_atr": 1.5,
+                "sentinel_trail_atr": 2.5,
+                "sentinel_trail_activation_atr": 2.5,
                 "sentinel_trail_distance_atr": 2.0,
                 "sentinel_min_improve_atr": 0.25
             }
@@ -80,10 +104,10 @@ class RiskManager(BaseAgent):
                 "target_margin_pct": 0.05,
                 "max_margin_pct": 0.10,
                 "max_leverage": 5,
-                "sentinel_be_atr": 1.5,
-                "sentinel_trail_atr": 2.0,
-                "sentinel_trail_activation_atr": 2.5,
-                "sentinel_trail_distance_atr": 2.0,
+                "sentinel_be_atr": 1.2,
+                "sentinel_trail_atr": 2.2,
+                "sentinel_trail_activation_atr": 2.2,
+                "sentinel_trail_distance_atr": 1.8,
                 "sentinel_min_improve_atr": 0.30
             }
         else: # BALANCED
@@ -100,10 +124,10 @@ class RiskManager(BaseAgent):
                 "target_margin_pct": 0.10,
                 "max_margin_pct": 0.20,
                 "max_leverage": 10,
-                "sentinel_be_atr": 1.8,
+                "sentinel_be_atr": 1.5,
                 "sentinel_trail_atr": 2.5,
                 "sentinel_trail_activation_atr": 2.5,
-                "sentinel_trail_distance_atr": 1.5,
+                "sentinel_trail_distance_atr": 2.0,
                 "sentinel_min_improve_atr": 0.25
             }
             
@@ -119,7 +143,13 @@ class RiskManager(BaseAgent):
             rules["min_rr"] = min(rules.get("min_rr", 1.25), 1.20)
         elif strategy_mode == "MEAN_REVERSION":
             rules["min_conviction"] = 70
-            rules["min_rr"] = 1.00 # Mean reversion requires at least 1:1 reward-to-risk
+            if getattr(config, "ANTI_BOT_MODE", False) is True:
+                # In Anti-Bot Predator Mode, mean reversion scalps have a high win-rate (70-80%)
+                # targeting a fast snapback to EMA-20 / BB middle with a safety stop outside the wick.
+                # Net RR naturally ranges 0.25 - 0.75:1 while strictly guaranteeing positive net profit after fees.
+                rules["min_rr"] = 0.25
+            else:
+                rules["min_rr"] = 1.00 # Mean reversion requires at least 1:1 reward-to-risk
             
         # Slight penalty for non-trend strategies if the overall macro is highly conservative
         if profile == "CONSERVATIVE" and strategy_mode != "TREND_FOLLOWING":
@@ -129,23 +159,18 @@ class RiskManager(BaseAgent):
 
     def _get_conviction_multiplier(self, min_conviction: int, conviction: int) -> float:
         """
-        Relative asymmetric scaling: Scaled relative to the profile threshold.
-        - threshold + 0-4%   -> 0.70x (boundary penalty)
-        - threshold + 5-14%  -> 1.00x (base setup)
-        - threshold + 15-19% -> 1.15x (high quality)
-        - threshold + 20%+   -> 1.25x (ceiling)
+        Flat-Protected Conviction Scaling:
+        Prevents Adverse Sizing Selection (entering losers at 1.25x and winners at 0.60x).
+        - Below threshold    -> 0.00x (veto)
+        - Boundary (+0..4%)  -> 0.90x (slight caution)
+        - Standard (+5%+)    -> 1.00x (strict 1.0R cap, never over-leverage on LLM euphoria)
         """
         if conviction < min_conviction:
             return 0.0
         delta = conviction - min_conviction
         if delta < 5:
-            return 0.70
-        elif delta < 15:
-            return 1.00
-        elif delta < 20:
-            return 1.15
-        else:
-            return 1.25
+            return 0.90
+        return 1.00
 
     def _calculate_drawdown_multiplier(
         self,
@@ -177,7 +202,8 @@ class RiskManager(BaseAgent):
         if peak_balance > 0 and current_balance > 0 and current_balance < peak_balance:
             dd_pct = ((peak_balance - current_balance) / peak_balance) * 100.0
         else:
-            dd_pct = max(0.0, daily_drawdown_pct * 100.0)
+            dd_val = float(daily_drawdown_pct or 0.0)
+            dd_pct = dd_val if dd_val > 1.0 else max(0.0, dd_val * 100.0)
 
         # 1. Equity Drawdown factor
         if dd_pct < 2.0:
@@ -210,29 +236,49 @@ class RiskManager(BaseAgent):
 
             if consecutive_losses >= 5:
                 dd_from_streak = 0.25
-                streak_msg = "🚨 CRITICAL STREAK: 5+ losses in a row. Risk cut to 25%."
+                streak_msg = "🚨 CRITICAL STREAK: 5+ losses in a row. Risk cut to 25% (PENALTY_SUPPRESSION active)."
             elif consecutive_losses == 4:
                 dd_from_streak = 0.35
                 streak_msg = "DEEP DRAWDOWN: 4 losses in a row. Risk cut to 35%."
             elif consecutive_losses == 3:
                 dd_from_streak = 0.40
-                streak_msg = "🚨 RED ALERT: 3 losses in a row. Risk cut to 40%."
+                streak_msg = "🚨 ELEVATED DRAWDOWN: 3 losses in a row. Risk cut to 40%."
             elif consecutive_losses == 2:
                 dd_from_streak = 0.50
                 streak_msg = "DRAWDOWN PROTECTION: 2 losses in a row. Risk cut to 50%."
             elif consecutive_losses == 1:
                 # Check recovery probation state machine
-                if len(streak) >= 5 and streak[-5:-2] == ["LOSS", "LOSS", "LOSS"] and streak[-2] == "WIN":
+                if len(streak) >= 4 and any(streak[i:i+2] == ["LOSS", "LOSS"] for i in range(max(0, len(streak)-5), len(streak)-2)):
                     dd_from_streak = 0.60
-                    streak_msg = "PROBATION: Loss during recovery after 3-loss streak. Risk set to 60%."
+                    streak_msg = "PROBATION: Mild loss during recovery from drawdown. Sizing kept at 60%."
                 else:
                     dd_from_streak = 0.90
                     streak_msg = "MILD_DRAWDOWN: 1 loss. Sizing at 90%."
             else:
-                # Last was WIN: check if recovering from 3 losses
-                if len(streak) >= 4 and streak[-4:-1] == ["LOSS", "LOSS", "LOSS"]:
-                    dd_from_streak = 0.75
-                    streak_msg = "PROBATION RECOVERY: 1 win after 3 losses. Risk kept at 75%."
+                # Last was WIN: check recent history for smooth step-up recovery transitions
+                consecutive_wins = 0
+                for res in reversed(streak):
+                    if res == "WIN":
+                        consecutive_wins += 1
+                    else:
+                        break
+
+                preceding_losses = 0
+                idx_before_wins = len(streak) - consecutive_wins - 1
+                while idx_before_wins >= 0 and streak[idx_before_wins] == "LOSS":
+                    preceding_losses += 1
+                    idx_before_wins -= 1
+
+                if preceding_losses >= 2:
+                    if consecutive_wins == 1:
+                        dd_from_streak = 0.75
+                        streak_msg = f"PROBATION RECOVERY TIER 1: 1 win after {preceding_losses} losses. Sizing smoothed to 75%."
+                    elif consecutive_wins == 2:
+                        dd_from_streak = 0.85
+                        streak_msg = f"PROBATION RECOVERY TIER 2: 2 wins after {preceding_losses} losses. Sizing smoothed to 85%."
+                    else:
+                        dd_from_streak = 1.00
+                        streak_msg = "STREAK_NORMAL: Full recovery achieved."
                 else:
                     dd_from_streak = 1.00
                     streak_msg = "STREAK_NORMAL"
@@ -241,7 +287,67 @@ class RiskManager(BaseAgent):
         final_msg = f"{streak_msg} | {equity_msg} (Final Mult: {final_dd_mult:.2f}x)"
         return final_dd_mult, final_msg
 
+    def is_pre_debate_viable(self, portfolio_data: Dict[str, Any], profile_name: str = "BALANCED") -> tuple[bool, str]:
+        """
+        Pre-Debate Risk Viability Check:
+        Quickly evaluates if a trade is mathematically capable of passing the Risk Manager
+        under current portfolio health (drawdown, streak, kelly) BEFORE calling expensive LLM debates.
+        Returns: (is_viable, reason)
+        """
+        import time
+        cooldown_until = float(portfolio_data.get("cooldown_until") or 0.0)
+        if cooldown_until > time.time():
+            remaining_min = (cooldown_until - time.time()) / 60.0
+            return False, f"Portfolio in post-streak cooldown for {remaining_min:.1f} more minutes."
 
+        total_balance = float(
+            portfolio_data.get("total_usd") or
+            portfolio_data.get("total_balance") or
+            portfolio_data.get("equity") or
+            portfolio_data.get("current_balance") or
+            portfolio_data.get("initial_balance") or
+            100.0
+        )
+        peak_balance = float(portfolio_data.get("peak_balance") or portfolio_data.get("initial_balance") or total_balance)
+        raw_daily_dd = float(portfolio_data.get("daily_drawdown_pct") or 0.0)
+        daily_drawdown_pct = raw_daily_dd / 100.0 if raw_daily_dd > 1.0 else raw_daily_dd
+        recent_streak = portfolio_data.get("recent_streak", [])
+
+        effective_account_dd = max(
+            daily_drawdown_pct * 100.0,
+            ((peak_balance - total_balance) / peak_balance * 100.0) if peak_balance > total_balance > 0 else 0.0
+        )
+
+        dd_mult, _ = self._calculate_drawdown_multiplier(
+            recent_streak, daily_drawdown_pct, current_balance=total_balance, peak_balance=peak_balance
+        )
+
+        total_trades = int(portfolio_data.get("total_trades", 0))
+        raw_win_rate = float(portfolio_data.get("win_rate_pct", 50.0))
+        win_rate = raw_win_rate / 100.0 if raw_win_rate > 1.0 else raw_win_rate
+        hist_payoff = float(portfolio_data.get("historical_payoff_ratio", 0.0) or portfolio_data.get("payoff_ratio", 1.5) or 1.0)
+        kelly_floor = float(portfolio_data.get("min_kelly_mult", 0.50) or 0.50)
+        raw_kelly = self._calculate_kelly_multiplier(win_rate, hist_payoff, total_trades) if total_trades >= 15 else 1.0
+        kelly_mult = max(kelly_floor, raw_kelly)
+
+        portfolio_mult = dd_mult * kelly_mult
+
+        profile_rules = self._get_profile_rules(profile_name)
+        base_risk = profile_rules.get("base_risk", 0.015)
+        min_viable_risk = base_risk * 0.25
+
+        # With realistic market friction (spread and taker fee), projected market mult is <= 0.90
+        projected_market_mult = 0.90
+        max_projected_risk = base_risk * 1.0 * projected_market_mult * portfolio_mult
+
+        if max_projected_risk < min_viable_risk and effective_account_dd >= 12.0:
+            return False, (
+                f"Portfolio drawdown ({effective_account_dd:.2f}% >= 12.0%) and streak/kelly multiplier ({portfolio_mult:.2f}x) "
+                f"mathematically suppress dynamic risk ({max_projected_risk*100:.3f}%) below min viable risk ({min_viable_risk*100:.3f}%). "
+                f"High-Conviction Floor inactive."
+            )
+
+        return True, "Viable"
 
     def _calculate_kelly_multiplier(
         self,
@@ -288,6 +394,79 @@ class RiskManager(BaseAgent):
             return 1.00
         else:
             return round(0.50 + (f_star / 0.25) * 0.50, 4)
+
+    @classmethod
+    def compute_strategy_regime_stats_from_journal(
+        cls, journal_records: list, decay: float = 0.97
+    ) -> Dict[str, Dict[str, float]]:
+        """
+        Computes win/loss statistics grouped by '{regime}:{strategy_tag}' from historical trade journal
+        using exponential memory decay (Discounted Beta-Bernoulli) to prevent sample inertia and adapt
+        to regime shifts.
+
+        Decay factor gamma (default: 0.97) gives higher weight to recent trades:
+          - Effective sample size N_eff = 1 / (1 - gamma) ~= 33 trades per regime bucket.
+          - decay=1.0 can be passed to disable discounting (for static analysis/unit tests).
+
+        Win (R > +0.15): alpha increment = 1.0 + min(1.0, max(0.0, r / 2.0)) (bonus for outsized winners)
+        Loss (R < -0.22): beta increment = 1.0
+        Scratch (-0.22 <= R <= +0.15): neutral (no alpha/beta increment, temporal decay applied)
+        """
+        stats: Dict[str, Dict[str, float]] = {}
+        if not isinstance(journal_records, list):
+            return stats
+
+        for trade in journal_records:
+            if not isinstance(trade, dict):
+                continue
+            regime = str(trade.get("macro_regime") or trade.get("regime") or "UNKNOWN").upper()
+            strategy = str(trade.get("strategy_mode") or trade.get("strategy_tag") or "UNKNOWN").upper()
+            if regime == "UNKNOWN" and strategy == "UNKNOWN":
+                continue
+
+            key = f"{regime}:{strategy}"
+            if key not in stats:
+                stats[key] = {"wins": 0.0, "losses": 0.0, "total": 0}
+
+            # Exponential decay on historical pseudo-counts
+            if 0.0 < decay < 1.0:
+                stats[key]["wins"] *= decay
+                stats[key]["losses"] *= decay
+
+            r = float(trade.get("realized_r", 0.0) or 0.0)
+            stats[key]["total"] += 1
+            if r > 0.15:
+                win_pts = 1.0 + min(1.0, max(0.0, r / 2.0))
+                stats[key]["wins"] += win_pts
+            elif r < -0.22:
+                stats[key]["losses"] += 1.0
+
+        return stats
+
+    def get_bayesian_strategy_multiplier(
+        self, strategy_tag: str, regime: str, streak_history_by_tag: Optional[Dict[str, Any]] = None
+    ) -> Tuple[float, float, str]:
+        """
+        Computes the Bayesian confidence multiplier for a given strategy and market regime
+        using a conjugate Beta-Bernoulli prior Beta(alpha, beta).
+        Prior: alpha=4.0, beta=4.0 -> E[p] = 0.50 (neutral 50% baseline).
+        Returns: (multiplier [0.65x .. 1.15x], posterior_win_prob, info_str)
+        """
+        key = f"{regime}:{strategy_tag}"
+        stats = (streak_history_by_tag or {}).get(key, {"wins": 0.0, "losses": 0.0, "total": 0})
+        wins = float(stats.get("wins", 0.0) or 0.0)
+        losses = float(stats.get("losses", 0.0) or 0.0)
+
+        # Conjugate Beta prior: Beta(4, 4)
+        alpha = 4.0 + wins
+        beta = 4.0 + losses
+        posterior_win_prob = alpha / (alpha + beta)
+
+        # Scale multiplier in safe boundary [0.65x .. 1.15x]
+        raw_mult = 1.0 + (posterior_win_prob - 0.50) * 1.5
+        bayes_mult = round(max(0.65, min(1.15, raw_mult)), 3)
+        info_str = f"Beta({alpha:.1f}, {beta:.1f}) -> p={posterior_win_prob:.2f} [Bucket: {key}]"
+        return bayes_mult, round(posterior_win_prob, 4), info_str
 
     def _build_veto_result(self, veto_category: str, reason: str, trade_action: str = "HOLD") -> Dict[str, Any]:
         """Uniform dictionary constructor for rejected / vetoed trade candidates."""
@@ -352,10 +531,17 @@ class RiskManager(BaseAgent):
             self.logger.info(f"[{self.name}] 🔥 VOLATILITY_MOMENTUM MODE ACTIVATED: Tightening SL/TP.")
             profile_name += "_VOL_MOMENTUM"
         elif strategy_mode == "MEAN_REVERSION":
-            sl_mult = 1.0        # Tight stop just beyond extreme band
-            tp_mult = 1.2        # Reversion multiplier
-            self.logger.info(f"[{self.name}] 🔄 MEAN_REVERSION MODE ACTIVATED: Targeting mean reversion to EMA-20.")
-            profile_name += "_MEAN_REVERSION"
+            if getattr(config, "ANTI_BOT_MODE", False) is True:
+                sl_mult = 1.25
+                tp_mult = 2.2
+                min_rr_required = min(min_rr_required, 0.25)
+                self.logger.info(f"[{self.name}] 🦈 ANTI_BOT MEAN_REVERSION MODE: sl_mult=1.25, tp_mult=2.2, min_rr={min_rr_required}")
+                profile_name += "_ANTI_BOT_MR"
+            else:
+                sl_mult = 1.0        # Tight stop just beyond extreme band
+                tp_mult = 1.2        # Reversion multiplier
+                self.logger.info(f"[{self.name}] 🔄 MEAN_REVERSION MODE ACTIVATED: Targeting mean reversion to EMA-20.")
+                profile_name += "_MEAN_REVERSION"
         
         self.logger.info(f"[{self.name}] Расчет математики риска по профилю: {profile_name} (Base Risk: {base_risk*100}%)...")
         
@@ -374,7 +560,7 @@ class RiskManager(BaseAgent):
             indicators = {}
         raw_atr = indicators.get("atr_14", 0.0)
         
-        raw_total_balance = portfolio_data.get("total_usd", portfolio_data.get("current_balance", 0.0))
+        raw_total_balance = portfolio_data.get("total_usd") or portfolio_data.get("total_balance") or portfolio_data.get("equity") or portfolio_data.get("current_balance", 0.0)
         raw_avail_margin = portfolio_data.get("available_margin", raw_total_balance)
         
         # ═══ Stage 1: Deterministic Guard & Early Numeric Sanitization (P2) ═══
@@ -405,6 +591,16 @@ class RiskManager(BaseAgent):
         available_margin = float(raw_avail_margin)
         
         max_leverage = profile_rules.get("max_leverage", 10.0)
+        # Check if Deterministic Guard flagged exhaustion scaling or leverage override
+        is_exhaustion_scale = bool(_extract_cand_field(ceo_decision, "exhaustion_scale", False))
+        max_leverage_override = _extract_cand_field(ceo_decision, "max_leverage_override")
+        if max_leverage_override is not None:
+            try:
+                max_leverage = min(float(max_leverage), float(max_leverage_override))
+            except (ValueError, TypeError):
+                pass
+        elif is_exhaustion_scale:
+            max_leverage = min(float(max_leverage), 4.0)
         max_notional_usd = total_balance * max_leverage
 
         if trade_action == "WAIT_FOR_PULLBACK":
@@ -465,15 +661,17 @@ class RiskManager(BaseAgent):
             else:
                 daily_drawdown_pct = 0.0
 
-            # Derive implied drawdown from daily_pnl_pct or daily_pnl_usd
+            # Derive implied drawdown from daily_pnl_usd (ground truth) and daily_pnl_pct
             implied_dd = 0.0
+            if raw_pnl_usd is not None and total_balance > 0:
+                pnl_usd = float(raw_pnl_usd or 0.0)
+                implied_dd = max(implied_dd, max(0.0, -pnl_usd / total_balance) if pnl_usd < 0 else 0.0)
             if raw_pnl_pct is not None:
                 pnl_val = float(raw_pnl_pct or 0.0)
-                pnl_pct_dec = pnl_val / 100.0 if abs(pnl_val) > 1.0 else pnl_val
-                implied_dd = max(0.0, -pnl_pct_dec) if pnl_pct_dec < 0 else 0.0
-            elif raw_pnl_usd is not None and total_balance > 0:
-                pnl_usd = float(raw_pnl_usd or 0.0)
-                implied_dd = max(0.0, -pnl_usd / total_balance) if pnl_usd < 0 else 0.0
+                # daily_pnl_pct is always on 0-100% scale (e.g. -0.32% or -7.0%).
+                # Standard conversion to decimal fraction: pnl_val / 100.0
+                pnl_pct_dec = pnl_val / 100.0
+                implied_dd = max(implied_dd, max(0.0, -pnl_pct_dec) if pnl_pct_dec < 0 else 0.0)
 
             # Contradiction guard: if drawdown reports 0 (or low) but PnL reflects significant loss,
             # always adopt the conservative larger drawdown
@@ -565,27 +763,63 @@ class RiskManager(BaseAgent):
                         log_fn(f"[{self.name}] 🚨 RISK_BREACH_UNRESOLVED VETO: {msg}")
                         return self._build_veto_result("RISK_BREACH_UNRESOLVED", msg, trade_action)
 
-        # Gate 2.2: Maximum Concurrent Positions Veto Gate
-        max_positions = profile_rules.get("max_concurrent_positions", getattr(config, "MAX_CONCURRENT_POSITIONS", 3))
-        num_active = len(unique_positions)
-        if num_active >= max_positions:
-            msg = f"Maximum concurrent positions reached ({num_active} >= {max_positions} limit)."
+        # Gate 2.2: Maximum Concurrent Positions Veto Gate (Risk-Free Slot Recycling: 3 Risk + 1 Break-Even)
+        max_risk_positions = profile_rules.get("max_concurrent_positions", getattr(config, "MAX_CONCURRENT_POSITIONS", 3))
+        risk_positions = [p for p in unique_positions if not self.is_risk_free_position(p)]
+        be_positions = [p for p in unique_positions if self.is_risk_free_position(p)]
+        max_total_positions = getattr(config, "MAX_ACCOUNT_POSITIONS", 4) if len(be_positions) > 0 else max_risk_positions
+
+        if len(unique_positions) >= max_total_positions:
+            msg = f"Maximum concurrent positions reached ({len(unique_positions)} >= {max_total_positions} limit, BE: {len(be_positions)})."
             self.logger.warning(f"[{self.name}] 🚫 MAX_CONCURRENT_POSITIONS VETO: {msg}")
             return self._build_veto_result("MAX_CONCURRENT_POSITIONS", msg, trade_action)
 
-        # Gate 2.2b: Directional Cluster Cap in Non-Trending / Choppy / Unknown Regimes
-        # Prevents opening all positions in the same direction unless market is in a confirmed TRENDING regime.
-        if str(macro_regime).upper() != "TRENDING":
-            same_dir_count = 0
+        if len(risk_positions) >= max_risk_positions:
+            msg = f"Maximum concurrent positions reached with active risk ({len(risk_positions)} >= {max_risk_positions} limit, BE: {len(be_positions)})."
+            self.logger.warning(f"[{self.name}] 🚫 MAX_CONCURRENT_POSITIONS VETO: {msg}")
+            return self._build_veto_result("MAX_CONCURRENT_POSITIONS", msg, trade_action)
+
+        # Gate 2.2b: Directional Cluster Cap (Risk-Free Slot Recycling: 2 Risk + 1 Break-Even)
+        # Prevents opening more than 2 positions with active risk in the same direction.
+        # A 3rd directional position is permitted ONLY if at least 1 existing position is in Break-Even.
+        same_dir_total = 0
+        same_dir_risk = 0
+        for p in unique_positions:
+            p_dir = str(p.get("direction", p.get("side", ""))).upper()
+            if (decision == "LONG" and ("LONG" in p_dir or "BUY" in p_dir)) or \
+               (decision == "SHORT" and ("SHORT" in p_dir or "SELL" in p_dir)):
+                same_dir_total += 1
+                if not self.is_risk_free_position(p):
+                    same_dir_risk += 1
+
+        max_dir_risk = 2
+        max_dir_total = 3 if (same_dir_total > same_dir_risk) else 2
+
+        if same_dir_total >= max_dir_total or same_dir_risk >= max_dir_risk:
+            msg = (
+                f"Directional cluster limit reached: {same_dir_total}/{max_dir_total} active {decision} positions "
+                f"({same_dir_risk}/{max_dir_risk} with active risk) in {macro_regime} regime."
+            )
+            self.logger.warning(f"[{self.name}] 🚫 DIRECTIONAL_CLUSTER_CAP VETO: {msg}")
+            return self._build_veto_result("DIRECTIONAL_CLUSTER_CAP", msg, trade_action)
+
+        # Gate 2.2c: 1-Per-Candle Breakout Cluster Cap (Defense-in-depth)
+        # Prevents opening multiple breakout market orders in the same direction on the same 15m candle bucket
+        if strategy_mode in ["BREAKOUT", "VOLATILITY_MOMENTUM"]:
+            import time
+            now_ts = time.time()
+            current_bucket = int(now_ts // 900)
             for p in unique_positions:
-                p_dir = str(p.get("direction", p.get("side", ""))).upper()
-                if (decision == "LONG" and ("LONG" in p_dir or "BUY" in p_dir)) or \
-                   (decision == "SHORT" and ("SHORT" in p_dir or "SELL" in p_dir)):
-                    same_dir_count += 1
-            if same_dir_count >= 2:
-                msg = f"Directional cluster limit reached: {same_dir_count} active {decision} positions already open in {macro_regime} regime."
-                self.logger.warning(f"[{self.name}] 🚫 DIRECTIONAL_CLUSTER_CAP VETO: {msg}")
-                return self._build_veto_result("DIRECTIONAL_CLUSTER_CAP", msg, trade_action)
+                if isinstance(p, dict):
+                    p_strat = str(p.get("strategy_mode", "")).upper()
+                    p_open = float(p.get("open_time", 0.0) or p.get("timestamp", 0.0) or 0.0)
+                    p_dir = str(p.get("direction", p.get("side", ""))).upper()
+                    if p_strat in ["BREAKOUT", "VOLATILITY_MOMENTUM"] and int(p_open // 900) == current_bucket:
+                        if (decision == "LONG" and ("LONG" in p_dir or "BUY" in p_dir)) or \
+                           (decision == "SHORT" and ("SHORT" in p_dir or "SELL" in p_dir)):
+                            msg = f"1-Per-Candle Breakout Cap: active {decision} BREAKOUT already opened in candle bucket {current_bucket}."
+                            self.logger.warning(f"[{self.name}] ⏸️ BREAKOUT_CANDLE_CLUSTER_CAP VETO: {msg}")
+                            return self._build_veto_result("BREAKOUT_CANDLE_CLUSTER_CAP", msg, trade_action)
 
         # Gate 2.3: Duplicate Asset Exposure Veto Gate
         if symbol:
@@ -658,9 +892,27 @@ class RiskManager(BaseAgent):
             sl = float(raw_sl)
             
             # 5. Calculate verified risk to stop: price movement loss + round-trip exit fee
-            pos_price_risk = size * abs(entry - sl)
-            pos_fee_risk = size * sl * est_exit_fee_rate
-            pos_risk = pos_price_risk + pos_fee_risk
+            # Directional risk: if trailing stop has moved into profit, capital risk is eliminated
+            pos_dir = str(pos.get("direction", pos.get("side", ""))).upper()
+            if "SHORT" in pos_dir or f_size < 0:
+                is_short = True
+            elif "LONG" in pos_dir or f_size > 0:
+                is_short = False
+            elif sl > entry:
+                is_short = True
+            elif sl < entry:
+                is_short = False
+            else:
+                is_short = None
+
+            if is_short is True:
+                net_move_risk = (sl - entry) + (sl * est_exit_fee_rate)
+            elif is_short is False:
+                net_move_risk = (entry - sl) + (sl * est_exit_fee_rate)
+            else:
+                net_move_risk = abs(entry - sl) + (sl * est_exit_fee_rate)
+
+            pos_risk = size * max(0.0, net_move_risk)
             existing_risk_usd += pos_risk
                 
         remaining_risk_budget_usd = max(0.0, max_portfolio_risk_usd - existing_risk_usd)
@@ -701,6 +953,7 @@ class RiskManager(BaseAgent):
         expected_slippage_pct = exec_price_info["expected_slippage_pct"]
 
         # Calculate SL and TP distances based on strategy mode
+        is_anti_bot = bool(getattr(config, "ANTI_BOT_MODE", False))
         if strategy_mode == "MEAN_REVERSION":
             mean_target = float(indicators.get("bb_middle") or indicators.get("ema_20") or 0.0)
             if mean_target <= 0:
@@ -719,15 +972,41 @@ class RiskManager(BaseAgent):
                 return self._build_veto_result("INVALID_MEAN_TARGET", msg, trade_action)
 
             dist_to_mean = abs(current_price - mean_target)
-            min_edge_pct = 0.008  # 0.8% minimum distance to mean to justify slippage & exchange fees
+            is_anti_bot = bool(getattr(config, "ANTI_BOT_MODE", False))
+            if is_anti_bot:
+                min_edge_pct = 0.005  # 0.5% min edge in anti-bot predator mode
+                min_sl_pct = 0.0045   # 0.45%
+                min_tp_pct = 0.0085   # 0.85%
+                sl_mult = 1.25
+                tp_mult = 2.2
+            else:
+                min_edge_pct = 0.008  # 0.8% minimum distance to mean to justify slippage & exchange fees
+                min_sl_pct = 0.008
+                min_tp_pct = 0.008
+
             if dist_to_mean < (current_price * min_edge_pct):
                 msg = f"Distance to mean ({dist_to_mean:.2f}, {dist_to_mean/current_price*100:.2f}%) is too narrow to cover fees/slippage (< {min_edge_pct*100:.1f}% min edge)."
                 self.logger.warning(f"[{self.name}] ❌ LOW_EDGE VETO: {msg}")
                 return self._build_veto_result("LOW_EDGE", msg, trade_action)
 
-            # Target 90% of distance to mean
-            tp_dist_base = dist_to_mean * 0.90
-            sl_dist_base = max(atr_14 * sl_mult, current_price * 0.008)
+            if is_anti_bot:
+                # Anti-Bot v2.0: Compact SL clamped to max 1.2% of entry price
+                raw_sl = max(atr_14 * sl_mult, current_price * min_sl_pct)
+                sl_dist_base = min(raw_sl, current_price * 0.012)
+
+                # Sniper Take-Profit targeting EMA-20 (dynamic mean return)
+                ema_20 = float(indicators.get("ema_20") or 0.0)
+                if ema_20 > 0:
+                    ema_dist = abs(current_price - ema_20)
+                    if ema_dist >= (current_price * 0.0065):
+                        tp_dist_base = max(ema_dist * 1.15, current_price * min_tp_pct)
+                    else:
+                        tp_dist_base = max(atr_14 * 2.2, current_price * 0.0095)
+                else:
+                    tp_dist_base = max(dist_to_mean * 0.90, current_price * min_tp_pct)
+            else:
+                tp_dist_base = dist_to_mean * 0.90
+                sl_dist_base = max(atr_14 * sl_mult, current_price * min_sl_pct)
         elif strategy_mode == "VOLATILITY_MOMENTUM":
             # Scalping mode: BTC/ETH can tolerate tighter noise floors (0.6% / 1.2%),
             # while altcoins require at least 1.0% SL and 2.0% TP to prevent 1-min noise wicks from prematurely hitting stops
@@ -736,8 +1015,48 @@ class RiskManager(BaseAgent):
             sl_dist_base = max(atr_14 * sl_mult, current_price * min_sl_ratio)
             tp_dist_base = max(atr_14 * tp_mult, current_price * min_tp_ratio)
         else:
-            sl_dist_base = max(atr_14 * sl_mult, current_price * config.MIN_SL_PCT)
-            tp_dist_base = max(atr_14 * tp_mult, current_price * config.MIN_TP_PCT)
+            # Lever 5: Volatility-Adaptive Stop Loss Clamp with Structural Anchor
+            is_major = base_asset in ["BTC", "ETH"]
+            min_sl_dist = current_price * (0.008 if is_major else 0.010)  # 0.8% floor for majors, 1.0% for altcoins
+            max_sl_dist = current_price * (0.022 if is_major else 0.055)  # 2.2% ceiling for majors, 5.5% for volatile altcoins
+            raw_sl_dist = atr_14 * sl_mult if atr_14 > 0 else (current_price * 0.015)
+
+            # Preserve wide stop for extreme outliers (e.g. stress tests with ATR > 10% of price)
+            atr_pct = (atr_14 / current_price) if current_price > 0 else 0.0
+            if atr_pct <= 0.10:
+                sl_dist_clamped = min(max_sl_dist, max(min_sl_dist, raw_sl_dist))
+            else:
+                sl_dist_clamped = raw_sl_dist
+
+            # Structural anchor behind recent 3-candle swing extreme
+            c_list = price_data.get("candles") or market_data.get("multi_timeframe", {}).get("tf_15m", {}).get("candles_20", [])
+            if isinstance(c_list, list) and len(c_list) >= 3:
+                recent_candles = c_list[-3:]
+                try:
+                    if decision == "LONG":
+                        swing_low = min(float(c.get("low", current_price)) for c in recent_candles if isinstance(c, dict))
+                        structural_sl = swing_low - (0.10 * (atr_14 if atr_14 > 0 else current_price * 0.01))
+                        structural_dist = current_price - structural_sl
+                        if min_sl_dist <= structural_dist <= max_sl_dist:
+                            sl_dist_base = structural_dist
+                        else:
+                            sl_dist_base = sl_dist_clamped
+                    else: # SHORT
+                        swing_high = max(float(c.get("high", current_price)) for c in recent_candles if isinstance(c, dict))
+                        structural_sl = swing_high + (0.10 * (atr_14 if atr_14 > 0 else current_price * 0.01))
+                        structural_dist = structural_sl - current_price
+                        if min_sl_dist <= structural_dist <= max_sl_dist:
+                            sl_dist_base = structural_dist
+                        else:
+                            sl_dist_base = sl_dist_clamped
+                except Exception:
+                    sl_dist_base = sl_dist_clamped
+            else:
+                sl_dist_base = sl_dist_clamped
+
+            # Target Take Profit preserves or improves standard R:R
+            target_rr = (tp_mult / sl_mult) if sl_mult > 0 else 1.5
+            tp_dist_base = max(atr_14 * tp_mult, sl_dist_base * target_rr, current_price * config.MIN_TP_PCT)
 
         if decision == "LONG":
             sl_price = current_price - sl_dist_base
@@ -747,7 +1066,9 @@ class RiskManager(BaseAgent):
             tp_price = current_price - tp_dist_base
 
         # Strict Mean Reversion Guard: TP must NEVER cross or touch the mean target
-        if strategy_mode == "MEAN_REVERSION" and mean_target > 0:
+        # For Anti-Bot v2.0, EMA-20 * 1.15 target intentionally penetrates beyond EMA-20 inside the channel,
+        # so bypass mean_buffer clamping when is_anti_bot is True.
+        if strategy_mode == "MEAN_REVERSION" and mean_target > 0 and not is_anti_bot:
             mean_buffer = max(mean_target * 0.001, dist_to_mean * 0.05)
             if decision == "LONG":
                 tp_price = min(tp_price, mean_target - mean_buffer)
@@ -839,11 +1160,100 @@ class RiskManager(BaseAgent):
             self.logger.warning(f"[{self.name}] ❌ POOR_RISK_REWARD VETO: {msg}")
             return self._build_veto_result("POOR_RISK_REWARD", msg, trade_action)
 
-        # Expectancy Gate with Hysteresis (N >= 30 trades evaluated on HISTORICAL closed trades) (P1 Finding 1)
-        win_count = int(portfolio_data.get("win_count", 0) or 0)
-        loss_count = int(portfolio_data.get("loss_count", 0) or 0)
-        total_trades = win_count + loss_count
-        win_rate = (win_count / total_trades) if total_trades > 0 else 0.0
+        # Pre-compute Bayesian Strategy Multiplier before Expectancy Gate
+        strat_tag = str(strategy_mode or "TREND_FOLLOWING").upper()
+        regime_tag = str(macro_regime or self.default_macro_regime or "UNKNOWN").upper()
+        streak_by_tag = portfolio_data.get("streak_history_by_tag")
+        if streak_by_tag is None:
+            try:
+                from core.state_store import StateStore
+                journal_records = StateStore.load("data/memory/trade_journal.json", default=[])
+                streak_by_tag = self.compute_strategy_regime_stats_from_journal(journal_records, decay=0.97)
+            except Exception:
+                streak_by_tag = {}
+
+        is_anti_bot_mr = bool((getattr(config, "ANTI_BOT_MODE", False) or strategy_mode == "MEAN_REVERSION") and strat_tag == "MEAN_REVERSION")
+
+        bayes_mult, bayes_prob, bayes_info = self.get_bayesian_strategy_multiplier(
+            strategy_tag=strat_tag,
+            regime=regime_tag,
+            streak_history_by_tag=streak_by_tag
+        )
+        if is_anti_bot_mr:
+            bayes_mult = max(0.90, bayes_mult)
+
+        # ═══ Bayesian Expectancy Gate & Regime Strategy Filter ═══
+        # 1. Prohibit BREAKOUT in TRANSITION regime (statistically negative expectation: false breakout wick traps)
+        allow_forbidden = bool(getattr(config, "ALLOW_FORBIDDEN_STRATEGIES", False))
+
+        if not allow_forbidden and regime_tag == "TRANSITION" and strat_tag == "BREAKOUT":
+            self.logger.warning(
+                f"[{self.name}] ❌ STRATEGY REGIME VETO: {regime_tag}:{strat_tag} is prohibited due to false breakout wick traps. "
+                f"BREAKOUT is strictly banned in TRANSITION."
+            )
+            return self._build_veto_result(
+                "REGIME_STRATEGY_MISMATCH",
+                f"BREAKOUT is prohibited in TRANSITION regime (risk of liquidity traps)",
+                trade_action
+            )
+        elif allow_forbidden and regime_tag == "TRANSITION" and strat_tag == "BREAKOUT":
+            self.logger.info(
+                f"[{self.name}] ⚠️ STRATEGY REGIME VETO BYPASSED (ALLOW_FORBIDDEN_STRATEGIES=True): "
+                f"Allowing {regime_tag}:{strat_tag} with Cohort B safety sizing."
+            )
+            trade_action = "REDUCE_SIZE"
+
+        # 2. Anti-Death-Spiral Bayesian Expectancy Gate:
+        # On small/immature trade sample (< 10 trades), NEVER apply hard VETO on allowed trend strategies.
+        # Until at least 10 real trades are recorded, smooth multiplier within [0.85, 1.15].
+        bucket_stats = (streak_by_tag or {}).get(f"{regime_tag}:{strat_tag}", {})
+        bucket_losses = float(bucket_stats.get("losses", 0.0) or 0.0)
+        bucket_total = int(bucket_stats.get("total", 0) or 0)
+
+        if strat_tag in ["TREND_FOLLOWING", "RELATIVE_MOMENTUM"]:
+            if bucket_total < 10:
+                bayes_mult = max(0.85, min(1.15, bayes_mult))
+                self.logger.info(
+                    f"[{self.name}] 🛡️ Bayesian Warm-Up Protection ({regime_tag}:{strat_tag}, {bucket_total}/10 trades): "
+                    f"Clamping bayes_mult={bayes_mult:.2f} in [0.85, 1.15] without hard veto."
+                )
+            elif bayes_prob < 0.40:
+                self.logger.warning(
+                    f"[{self.name}] ❌ BAYESIAN NEGATIVE EDGE VETO: {bayes_info} has posterior win prob {bayes_prob:.1%} < 40.0% "
+                    f"on mature sample of {bucket_total} trades. Rejecting trade candidate."
+                )
+                return self._build_veto_result(
+                    "NEGATIVE_BAYESIAN_EXPECTANCY",
+                    f"Bayesian win probability ({bayes_prob:.1%}) < 40.0% for bucket {regime_tag}:{strat_tag} ({bucket_total} trades)",
+                    trade_action
+                )
+        else:
+            if bucket_total >= 10 and bayes_prob < 0.40:
+                self.logger.warning(
+                    f"[{self.name}] ❌ BAYESIAN NEGATIVE EDGE VETO: {bayes_info} has posterior win prob {bayes_prob:.1%} < 40.0% "
+                    f"on mature sample of {bucket_total} trades. Rejecting trade candidate."
+                )
+                return self._build_veto_result(
+                    "NEGATIVE_BAYESIAN_EXPECTANCY",
+                    f"Bayesian win probability ({bayes_prob:.1%}) < 40.0% for bucket {regime_tag}:{strat_tag} ({bucket_total} trades)",
+                    trade_action
+                )
+
+        # Expectancy Gate with Hysteresis (evaluates rolling window era if >= 10 trades, else lifetime if >= 30 trades)
+        window_total = int(portfolio_data.get("window_trades_count", 0) or 0)
+        if window_total >= 10:
+            win_count = int(portfolio_data.get("window_win_count", 0) or 0)
+            loss_count = int(portfolio_data.get("window_loss_count", 0) or 0)
+            total_trades = window_total
+            win_rate = (win_count / total_trades) if total_trades > 0 else 0.0
+            min_req_trades = 10
+        else:
+            win_count = int(portfolio_data.get("win_count", 0) or 0)
+            loss_count = int(portfolio_data.get("loss_count", 0) or 0)
+            total_trades = win_count + loss_count
+            win_rate = (win_count / total_trades) if total_trades > 0 else 0.0
+            min_req_trades = 30
+
         expectancy_penalty_active = getattr(self, "_expectancy_penalty_active", False)
         
         hist_payoff = float(portfolio_data.get("historical_payoff_ratio", 0.0) or portfolio_data.get("historical_avg_rr", 0.0) or 0.0)
@@ -854,7 +1264,7 @@ class RiskManager(BaseAgent):
                 hist_payoff = avg_w / avg_l
             # If missing, remain 0.0 without fabricating unmeasured 1.0 assumption
         
-        if total_trades >= 30 and hist_payoff > 0:
+        if total_trades >= min_req_trades and hist_payoff > 0:
             historical_expected_r = (win_rate * hist_payoff) - (1.0 - win_rate)
             
             # Hysteresis: trigger at E < -0.10R, clear at E > +0.05R
@@ -865,7 +1275,17 @@ class RiskManager(BaseAgent):
                 self._expectancy_penalty_active = False
                 expectancy_penalty_active = False
                 
-            if expectancy_penalty_active:
+            # Anti-Double Penalty & Era Alignment:
+            # If Discounted Beta-Bernoulli confirms a positive strategy edge (bayes_mult > 1.0),
+            # or if era recovery floor is active (min_kelly_mult >= 0.80), suppress the generic lifetime penalty.
+            if expectancy_penalty_active and (bayes_mult > 1.0 or float(portfolio_data.get("min_kelly_mult", 0.50) or 0.50) >= 0.80):
+                self.logger.info(
+                    f"[{self.name}] ℹ️ EXPECTANCY GATE BYPASS: Specific regime edge or era recovery active "
+                    f"(bayes_mult={bayes_mult:.3f}, b_hist={hist_payoff:.2f}). Legacy lifetime penalty suppressed."
+                )
+                expectancy_penalty_active = False
+
+        if expectancy_penalty_active:
                 penalty_factor = 0.75
                 self.logger.warning(
                     f"[{self.name}] ⚠️ EXPECTANCY GATE ACTIVE: Historical strategy expectancy is {historical_expected_r:.2f}R "
@@ -879,13 +1299,20 @@ class RiskManager(BaseAgent):
             return self._build_veto_result("LOW_CONFIDENCE", f"Conviction {conviction} is below Expectancy/Win Rate Gate threshold {min_conviction}", trade_action)
 
         # ═══ Stage 5: Multipliers & Dynamic Risk Percentage ═══
-        # 1. Volume & Spread Quality Multiplier
+        # 1. Volume & Spread Quality Multiplier (F-05 Fix: Production Key Fallback & Young Candle Shield)
         volume_mult = 1.0
-        ohlcv = market_data.get("price_data", {}).get("ohlcv_1h", [])
+        ohlcv = (
+            market_data.get("price_data", {}).get("ohlcv_1h")
+            or market_data.get("multi_timeframe", {}).get("tf_1h", {}).get("candles_20", [])
+        )
         if isinstance(ohlcv, list) and len(ohlcv) >= 10:
             avg_volume_10 = sum(float(c.get("volume", 0) or 0) for c in ohlcv[-10:]) / 10
-            v1 = float(ohlcv[-1].get("volume", 0) or 0)
-            if avg_volume_10 > 0 and v1 < avg_volume_10:
+            # Young candle defense: at early seconds of a new 1h candle, v[-1] is near 0.
+            # Use max of latest candle and preceding closed candle:
+            v_curr = float(ohlcv[-1].get("volume", 0) or 0)
+            v_prev = float(ohlcv[-2].get("volume", 0) or 0) if len(ohlcv) >= 2 else v_curr
+            effective_v = max(v_curr, v_prev)
+            if avg_volume_10 > 0 and effective_v < avg_volume_10:
                 volume_mult = 0.85
                 
         spread_pct = float(market_data.get("order_book_data", {}).get("spread_pct", 0) or 0)
@@ -904,21 +1331,55 @@ class RiskManager(BaseAgent):
         if dd_mult < 1.0:
             self.logger.warning(f"[{self.name}] {dd_msg}")
 
-        # 3. Fractional (Half) Kelly Multiplier (Active at N >= 15 trades using historical payoff ratio)
-        kelly_mult = self._calculate_kelly_multiplier(win_rate, hist_payoff, total_trades) if total_trades >= 15 else 1.0
+        # 3. Fractional (Half) Kelly Multiplier with Era Recovery Soft Floor
+        kelly_floor = float(portfolio_data.get("min_kelly_mult", 0.50) or 0.50)
+        raw_kelly = self._calculate_kelly_multiplier(win_rate, hist_payoff, total_trades) if total_trades >= 15 else 1.0
+        kelly_mult = max(kelly_floor, raw_kelly)
 
         # 4. Conviction and Action Multipliers (Signal Edge)
         conv_for_risk = float(_extract_cand_field(ceo_decision, "conviction_for_risk", conviction) or conviction)
         conf_mult = self._get_conviction_multiplier(min_conviction, max(conviction, int(conv_for_risk)))
-        action_mult = 0.75 if trade_action == "REDUCE_SIZE" else 1.0
+        
+        # Check for exhaustion scale or explicit risk_mult_override from Deterministic Guard
+        risk_mult_override = _extract_cand_field(ceo_decision, "risk_mult_override")
+        action_size_mult_override = _extract_cand_field(ceo_decision, "action_size_mult_override")
+        is_vol_explosion = bool(_extract_cand_field(ceo_decision, "volume_explosion_override", False))
+        if risk_mult_override is not None:
+            try:
+                action_mult = float(risk_mult_override)
+            except (ValueError, TypeError):
+                action_mult = 0.50 if (is_exhaustion_scale or is_vol_explosion) else (0.85 if trade_action == "REDUCE_SIZE" else 1.0)
+        elif action_size_mult_override is not None:
+            try:
+                action_mult = float(action_size_mult_override)
+            except (ValueError, TypeError):
+                action_mult = 0.50
+        elif is_exhaustion_scale or is_vol_explosion:
+            action_mult = 0.50
+        else:
+            action_mult = 0.85 if trade_action == "REDUCE_SIZE" else 1.0
 
         # Cohort Determination for mathematical expectancy analytics (Groups A, B, C, D):
         # A: High Conviction (>= min_conviction + 10), Full Size (action == ENTER)
-        # B: High Conviction (>= min_conviction + 10), Reduced Size (action == REDUCE_SIZE)
+        # B: High Conviction (>= min_conviction + 10 or (conv_for_risk >= min(75.0, min_conviction + 5.0) and entry_quality >= 60.0)), Reduced Size (action == REDUCE_SIZE)
         # C: Low Conviction (< min_conviction + 10), Full Size (action == ENTER)
         # D: Low Conviction (< min_conviction + 10), Reduced Size (action == REDUCE_SIZE)
-        is_high_conv = conv_for_risk >= (min_conviction + 10)
         is_full_size = (trade_action != "REDUCE_SIZE")
+        if is_full_size:
+            is_high_conv = conv_for_risk >= (min_conviction + 10)
+        else:
+            # For REDUCE_SIZE (e.g. Pullback Retests or conservative entries), allow solid setups
+            # (Explicit conv_for_risk >= 80, or Pullback Retest with DirConf >= 75 and EntryQuality >= 60)
+            # to qualify for Cohort B protection rather than falling into empirical Cohort D veto.
+            cand_eq = float(_extract_cand_field(ceo_decision, "entry_quality", conviction) or conviction)
+            has_explicit_conv_risk = _extract_cand_field(ceo_decision, "conviction_for_risk") is not None
+            is_retest = bool(_extract_cand_field(ceo_decision, "is_pullback_retest") or (market_data.get("is_pullback_retest") if market_data else False))
+            is_high_conv = (conv_for_risk >= (min_conviction + 10)) or (
+                has_explicit_conv_risk and conv_for_risk >= 75.0 and cand_eq >= 60.0
+            ) or (
+                is_retest and conv_for_risk >= min(75.0, min_conviction + 5.0) and cand_eq >= 60.0
+            ) or is_vol_explosion
+
         if is_high_conv and is_full_size:
             cohort = "A"
         elif is_high_conv and not is_full_size:
@@ -937,40 +1398,59 @@ class RiskManager(BaseAgent):
             self.logger.warning(f"[{self.name}] 🚫 COHORT_D_VETO: {msg}")
             return self._build_veto_result("COHORT_D_NEGATIVE_EXPECTANCY", msg, "HOLD")
 
-        # Signal edge multiplier with dampening against excessive double-penalty:
-        # If conviction is already near threshold (conf_mult = 0.70) AND trade_action is REDUCE_SIZE (0.75),
-        # compounding 0.70 * 0.75 = 0.525 severely punishes trades.
-        # We preserve action downscaling while setting a conservative signal floor (0.60x):
-        raw_signal_mult = conf_mult * action_mult
-        signal_mult = max(0.60, raw_signal_mult) if (conf_mult < 1.0 and action_mult < 1.0) else raw_signal_mult
-
         # Orthogonal Factor 2: Market Friction (Volume & Spread)
         market_mult = quality_mult
+        if is_anti_bot_mr:
+            market_mult = max(1.0, market_mult)
 
         # Orthogonal Factor 3: Portfolio Health (Drawdown streak & Kelly)
         portfolio_mult = dd_mult * kelly_mult
 
+        # Anti-Double Penalty: If portfolio is already strictly throttled (<= 0.50x) by DD streak or Kelly,
+        # do not apply action_mult = 0.85 penalty from REDUCE_SIZE on top of it.
+        effective_action_mult = 1.0 if (portfolio_mult <= 0.50 and trade_action == "REDUCE_SIZE") else action_mult
+        raw_signal_mult = conf_mult * effective_action_mult
+        min_allowed_signal = 0.50 if (is_exhaustion_scale or is_vol_explosion) else 0.85
+        signal_mult = max(min_allowed_signal, raw_signal_mult)
+
         # Combine into dynamic risk percentage with a safe floor check
-        dynamic_risk_pct = base_risk * signal_mult * market_mult * portfolio_mult
-        min_viable_risk = base_risk * 0.35  # Protect at least 35% of base risk to meet exchange minimums
+        # Orthogonal Factor 4: Online Bayesian Strategy Sizing (Pre-computed above for Expectancy Gate)
+
+        # Anti-Double Penalty for Bayes: If portfolio is already strictly throttled (portfolio_mult <= 0.45)
+        # and bayes_mult < 1.0, clamp bayes penalty floor to 0.85x to avoid double penalty starvation
+        effective_bayes_mult = max(0.90 if is_anti_bot_mr else 0.85, bayes_mult) if (portfolio_mult <= 0.45 and bayes_mult < 1.0) else (max(0.90, bayes_mult) if is_anti_bot_mr else bayes_mult)
+
+        dynamic_risk_pct = base_risk * signal_mult * market_mult * portfolio_mult * effective_bayes_mult
+        # Lowered from 0.35 to 0.25 of base risk (0.375% for BALANCED, 0.50% for AGGRESSIVE)
+        # to prevent mathematical deadlocks while preserving exchange minimum viable sizing
+        min_viable_risk = base_risk * 0.25
 
         if dynamic_risk_pct < min_viable_risk:
-            # Tier-A Setup Floor:
-            # If trade is a high-confidence setup (trade_action == "ENTER" and (Cohort A or Conviction >= 75%)),
-            # market friction is low (market_mult >= 0.85), and actual account drawdown is safe (< 6%),
-            # clamp dynamic risk to min_viable_risk rather than deadlocking the system.
-            is_tier_a_setup = (trade_action == "ENTER" and (cohort == "A" or conviction >= 75))
-            if is_tier_a_setup and market_mult >= 0.85 and (daily_drawdown_pct * 100.0) < 6.0:
+            # High-Conviction / Tier-A Setup Floor:
+            # Protect high-conviction trades (Cohort A or B, or Conviction >= 75%)
+            # when market friction is low (market_mult >= 0.85) and actual account drawdown is safe (< 12%).
+            # Clamp dynamic risk to min_viable_risk (preserving positive bayes edge if bayes_mult > 1.0).
+            is_high_conviction_setup = (
+                (trade_action == "ENTER" and (cohort == "A" or conviction >= 75))
+                or (trade_action == "REDUCE_SIZE" and (cohort in ["A", "B"] or conviction >= 75))
+            )
+            effective_account_dd = max(
+                daily_drawdown_pct * 100.0,
+                ((peak_bal - total_balance) / peak_bal * 100.0) if peak_bal > total_balance > 0 else 0.0
+            )
+            if is_high_conviction_setup and market_mult >= 0.85 and effective_account_dd < 12.0:
+                boosted_floor = min_viable_risk * max(1.0, bayes_mult)
                 self.logger.info(
-                    f"[{self.name}] 🛡️ Tier-A Setup Floor applied: Boosting dynamic risk from "
-                    f"{dynamic_risk_pct*100:.3f}% to {min_viable_risk*100:.3f}% "
-                    f"(Conviction={conviction}%, Action={trade_action}, DD={daily_drawdown_pct*100:.2f}%)"
+                    f"[{self.name}] 🛡️ High-Conviction Floor applied: Boosting dynamic risk from "
+                    f"{dynamic_risk_pct*100:.3f}% to {boosted_floor*100:.3f}% "
+                    f"(Cohort={cohort}, Conviction={conviction}%, Action={trade_action}, DD={effective_account_dd:.2f}%, Bayes=x{bayes_mult:.2f})"
                 )
-                dynamic_risk_pct = min_viable_risk
+                dynamic_risk_pct = boosted_floor
             else:
                 msg = (f"Dynamic risk ({dynamic_risk_pct*100:.3f}%) fell below minimum viable risk "
                        f"({min_viable_risk*100:.3f}%). Cumulative penalties (Signal x{signal_mult:.2f}, "
-                       f"DD x{dd_mult:.2f}, Qual x{quality_mult:.2f}, Kelly x{kelly_mult:.2f}) suppress viable trade edge. Vetoing to protect capital.")
+                       f"DD x{dd_mult:.2f}, Qual x{quality_mult:.2f}, Kelly x{kelly_mult:.2f}, Bayes x{bayes_mult:.2f}) "
+                       f"suppress viable trade edge. Vetoing to protect capital.")
                 self.logger.warning(f"[{self.name}] 🚫 PENALTY_SUPPRESSION VETO: {msg}")
                 return self._build_veto_result("PENALTY_SUPPRESSION", msg, trade_action)
 
@@ -978,18 +1458,21 @@ class RiskManager(BaseAgent):
         
         applied_multipliers = {
             "conf_mult": conf_mult,
-            "action_mult": action_mult,
+            "action_mult": effective_action_mult,
             "signal_mult": round(signal_mult, 4),
             "quality_mult": round(quality_mult, 4),
+            "market_mult": round(market_mult, 4),
             "dd_mult": round(dd_mult, 4),
             "kelly_mult": round(kelly_mult, 4),
+            "bayes_mult": round(bayes_mult, 4),
             "combined_mult": round(dynamic_risk_pct / base_risk, 4) if base_risk > 0 else 1.0
         }
 
         self.logger.info(
             f"[{self.name}] Final Risk: {dynamic_risk_pct*100:.2f}% (Base: {base_risk*100}%, Signal: x{signal_mult:.2f} "
-            f"[Conf: x{conf_mult}, Action: x{action_mult}], Market: x{market_mult:.2f}, "
-            f"Portfolio: x{portfolio_mult:.2f} [DD: x{dd_mult}, Kelly: x{kelly_mult:.2f}], Cohort: {cohort}, Cap: {risk_cap*100}%)"
+            f"[Conf: x{conf_mult}, Action: x{effective_action_mult}], Market: x{market_mult:.2f}, "
+            f"Portfolio: x{portfolio_mult:.2f} [DD: x{dd_mult}, Kelly: x{kelly_mult:.2f}], "
+            f"Bayes: x{bayes_mult:.2f} [{bayes_info}], Cohort: {cohort}, Cap: {risk_cap*100}%)"
         )
 
         # ═══ Stage 6: Position Sizing (Canonical Math with Fee Integration) ═══
@@ -1007,22 +1490,31 @@ class RiskManager(BaseAgent):
             contracts = risk_amount_usd / effective_loss_per_contract
             notional_usd = contracts * execution_entry
             
-            # Nado DEX Native Trigger Threshold Optimization ($100 Exchange Limit):
-            # If notional is close to the exchange threshold ($85.00 - $99.99) and max leverage allows it,
-            # conditionally bump notional to $101.00 to enable native exchange triggers (avoiding error 2094),
-            # provided the resulting risk does not exceed 1.5% of total balance.
-            if 85.0 <= notional_usd < 100.0:
-                bumped_notional = 101.0
+            # Nado DEX CLOB & Native Trigger Optimization ($104.00 Exchange Safe Bump):
+            # If notional is below the exchange CLOB threshold ($35.00 <= notional_usd < 103.50),
+            # conditionally bump notional to $104.00 to pass exchange limit (avoiding error 2094),
+            # provided the resulting risk does not exceed max(risk_amount_usd * 1.45, total_balance * 0.026).
+            min_bump_threshold = 35.0
+            target_bump_notional = 104.0
+            is_trigger_bumped = False
+            is_production_mode = getattr(config, "SHADOW_MODE", False) or getattr(config, "NADO_LIVE_TRADING_ENABLED", False) or getattr(config, "LIVE_TRADING_ENABLED", False)
+            raw_mn = derivatives_data.get("min_notional")
+            needs_bump = (is_production_mode or raw_mn is None or float(raw_mn or 0.0) >= 100.0)
+            if needs_bump and min_bump_threshold <= notional_usd < 103.50:
+                bumped_notional = target_bump_notional
                 bumped_contracts = bumped_notional / execution_entry if execution_entry > 0 else contracts
                 bumped_risk = bumped_contracts * effective_loss_per_contract
-                if bumped_notional <= max_notional_usd and total_balance > 0 and (bumped_risk / total_balance) <= 0.015:
+                max_allowed_bump_risk = max(risk_amount_usd * 1.45, total_balance * 0.026) if total_balance > 0 else (risk_amount_usd * 1.45)
+                can_bump = (bumped_notional <= max_notional_usd) and (bumped_risk <= max_allowed_bump_risk)
+                if bumped_notional <= max_notional_usd and total_balance > 0 and can_bump:
                     self.logger.info(
-                        f"[{self.name}] ⚡ Nado Trigger Optimization: Bumped notional from ${notional_usd:.2f} to ${bumped_notional:.2f} "
-                        f"to pass $100 exchange limit for native on-chain SL/TP triggers (Risk: ${bumped_risk:.2f} / {(bumped_risk/total_balance)*100:.2f}%)."
+                        f"[{self.name}] ⚡ Nado CLOB Optimization: Bumped notional from ${notional_usd:.2f} to ${bumped_notional:.2f} "
+                        f"to pass $101 exchange limit for CLOB and native SL/TP triggers (Risk: ${bumped_risk:.2f} / {(bumped_risk/total_balance)*100:.2f}%)."
                     )
                     notional_usd = bumped_notional
                     contracts = bumped_contracts
                     risk_amount_usd = bumped_risk
+                    is_trigger_bumped = True
 
             # Hard Cap on Max Account Notional
             if notional_usd > max_notional_usd:
@@ -1096,16 +1588,37 @@ class RiskManager(BaseAgent):
         else:
             final_leverage = max(1.0, float(int(safe_ceiling_leverage)))
         
-        # Enforce Target Margin strictly (Variant A: margin is the anchor)
-        max_safe_notional = target_margin_usd * final_leverage
+        # Enforce Target Margin strictly (Variant A: margin is the anchor) (F-04 Fix: Protect $101 Nado Bump)
+        is_trigger_bumped = locals().get("is_trigger_bumped", False) or (abs(notional_usd - 101.0) < 1e-4)
+
+        # When Nado Trigger Optimization is active ($101.00 bump to pass $100 exchange limit), or if notional can fit in usable_margin,
+        # allow using usable_margin (up to max_margin_pct) rather than restricting to target_margin_usd,
+        # so we do not clamp $101.00 back down below $100.50 and trigger an unnecessary MIN_NOTIONAL veto.
+        fits_in_usable_margin = (final_leverage > 0 and (notional_usd / final_leverage) <= usable_margin)
+        allowed_margin_ceiling = usable_margin if (is_trigger_bumped or is_anti_bot_mr) else target_margin_usd
+        max_safe_notional = allowed_margin_ceiling * final_leverage
+
         if notional_usd > max_safe_notional:
-            self.logger.warning(
-                f"[{self.name}] Required margin at {final_leverage}x would exceed target margin. "
-                f"Reducing notional from ${notional_usd:.2f} to ${max_safe_notional:.2f} to strictly enforce target."
-            )
-            notional_usd = max_safe_notional
-            contracts = notional_usd / execution_entry if execution_entry > 0 else 0.0
-            risk_amount_usd = contracts * effective_loss_per_contract
+            # If notional was intentionally bumped to $101.00 for native exchange triggers or in Anti-Bot MR mode,
+            # check if usable_margin (capped at max_margin_pct) can safely accommodate it without exceeding limits
+            required_bump_margin = notional_usd / final_leverage if final_leverage > 0 else notional_usd
+            if (is_trigger_bumped or is_anti_bot_mr) and required_bump_margin <= usable_margin:
+                self.logger.info(
+                    f"[{self.name}] 🛡️ Preserving Nado Trigger Optimization ($101.00 notional): "
+                    f"Required margin ${required_bump_margin:.2f} <= usable margin ${usable_margin:.2f} at {final_leverage}x."
+                )
+            elif (is_trigger_bumped or is_anti_bot_mr) and (notional_usd >= 100.50) and (notional_usd / final_leverage <= usable_margin * 0.95):
+                self.logger.info(
+                    f"[{self.name}] 🛡️ Preserving notional above $100.50: required margin ${notional_usd / final_leverage:.2f} fits in usable_margin * 0.95 (${usable_margin * 0.95:.2f})."
+                )
+            else:
+                self.logger.warning(
+                    f"[{self.name}] Required margin at {final_leverage}x would exceed target margin. "
+                    f"Reducing notional from ${notional_usd:.2f} to ${max_safe_notional:.2f} to strictly enforce target."
+                )
+                notional_usd = max_safe_notional
+                contracts = notional_usd / execution_entry if execution_entry > 0 else 0.0
+                risk_amount_usd = contracts * effective_loss_per_contract
             
         effective_leverage = final_leverage
 
@@ -1162,14 +1675,27 @@ class RiskManager(BaseAgent):
             self.logger.warning(f"[{self.name}] 🚫 MARKET_METADATA_UNAVAILABLE VETO: {msg}")
             return self._build_veto_result("MARKET_METADATA_UNAVAILABLE", msg, trade_action)
         if size_increment > 0:
-            contracts = (contracts // size_increment) * size_increment
+            if is_trigger_bumped:
+                steps = math.ceil(round(contracts / size_increment, 8))
+            else:
+                steps = math.floor(round(contracts / size_increment, 8))
+            step_str = f"{size_increment:.10f}".rstrip("0")
+            decimals = len(step_str.split(".")[1]) if "." in step_str else 0
+            contracts = round(steps * size_increment, min(decimals, 8))
         notional_usd = round(contracts * execution_entry, 2)
         margin_usd = round(notional_usd / effective_leverage if effective_leverage > 0 else notional_usd, 2)
         margin_pct = round((margin_usd / total_balance) * 100 if total_balance > 0 else 0, 2)
 
         raw_min = derivatives_data.get("min_size")
         is_confirmed_min = bool(derivatives_data.get("confirmed_min_size") or derivatives_data.get("is_confirmed"))
-        min_notional = float(derivatives_data.get("min_notional") or 0.0)
+        is_production_mode = getattr(config, "SHADOW_MODE", False) or getattr(config, "NADO_LIVE_TRADING_ENABLED", False) or getattr(config, "LIVE_TRADING_ENABLED", False)
+        raw_min_notional = derivatives_data.get("min_notional")
+        if is_production_mode or (raw_min_notional is not None and float(raw_min_notional or 0.0) >= 40.0):
+            min_viable_floor = float(getattr(config, "MIN_NOTIONAL_FLOOR_USD", 40.0) or 40.0)
+            min_notional = float(raw_min_notional or 0.0) if raw_min_notional is not None else 100.0
+        else:
+            min_viable_floor = float(raw_min_notional or 0.0)
+            min_notional = float(raw_min_notional or 0.0)
 
         if raw_min is not None:
             try:
@@ -1214,16 +1740,80 @@ class RiskManager(BaseAgent):
             msg = f"Calculated contracts ({contracts}) is below exchange minimum size ({min_size})."
             self.logger.warning(f"[{self.name}] 🚫 MIN_SIZE VETO: {msg}")
             return self._build_veto_result("MIN_SIZE", msg, trade_action)
-        elif min_notional > 0 and notional_usd < min_notional:
-            msg = f"Calculated notional (${notional_usd:.2f}) is below exchange minimum notional (${min_notional:.2f})."
+        elif notional_usd < 35.0:
+            msg = (
+                f"VETO: MIN_NOTIONAL. Calculated notional (${notional_usd:.2f}) is below minimum floor "
+                f"($35.00 minimum slot size). Refusing micro-dust trade to preserve portfolio slots."
+            )
             self.logger.warning(f"[{self.name}] 🚫 MIN_NOTIONAL VETO: {msg}")
             return self._build_veto_result("MIN_NOTIONAL", msg, trade_action)
+        elif notional_usd < 103.50:
+            NADO_SIZE_INCREMENTS = {
+                "LIT-USD": 1.0,
+                "SOL-USD": 0.1,
+                "HYPE-USD": 0.1,
+                "ZEC-USD": 0.01,
+                "BNB-USD": 0.005,
+                "ETH-USD": 0.001,
+                "BTC-USD": 0.00005,
+            }
+            canonical_sym = symbol.replace("/", "-").strip().upper()
+            if "-" not in canonical_sym:
+                canonical_sym = f"{canonical_sym}-USD"
+            effective_inc = size_increment if size_increment > 0 else NADO_SIZE_INCREMENTS.get(canonical_sym, 0.0001)
+
+            step_str = f"{effective_inc:.10f}".rstrip("0")
+            decimals = len(step_str.split(".")[1]) if "." in step_str else 0
+            target_bump = 104.0
+            raw_bump_cntr = target_bump / execution_entry if execution_entry > 0 else 0.0
+            bump_steps = math.ceil(round(raw_bump_cntr / effective_inc, 8))
+            bump_contracts = round(bump_steps * effective_inc, min(decimals, 8))
+            bump_notional = round(bump_contracts * execution_entry, 2)
+            bump_risk = bump_contracts * effective_loss_per_contract
+            bump_margin = round(bump_notional / effective_leverage if effective_leverage > 0 else bump_notional, 2)
+
+            max_allowed_risk_budget = max(risk_amount_usd * 1.45, total_balance * 0.026) if total_balance > 0 else (risk_amount_usd * 1.45)
+            can_safely_bump = (
+                notional_usd >= 35.0
+                and bump_notional >= 101.0
+                and bump_notional <= max_notional_usd
+                and bump_margin <= (usable_margin * 1.05)
+                and bump_margin <= available_margin
+                and bump_risk <= max_allowed_risk_budget
+            )
+
+            if can_safely_bump:
+                self.logger.info(
+                    f"[{self.name}] ⚡ Stage 8: Safely bumped sub-notional from ${notional_usd:.2f} to ${bump_notional:.2f} >= $101.00 "
+                    f"(Contracts: {bump_contracts}, Margin: ${bump_margin:.2f} <= ${usable_margin:.2f}, Risk: ${bump_risk:.2f} <= ${max_allowed_risk_budget:.2f})."
+                )
+                contracts = bump_contracts
+                notional_usd = bump_notional
+                risk_amount_usd = round(bump_risk, 2)
+                margin_usd = bump_margin
+                margin_pct = round((margin_usd / total_balance) * 100 if total_balance > 0 else 0, 2)
+                is_trigger_bumped = True
+            else:
+                msg = (
+                    f"VETO: MIN_NOTIONAL (${notional_usd:.2f} < $101.00 exchange CLOB min_size). "
+                    f"Calculated notional is below exchange minimum and cannot be safely bumped to $104.00 "
+                    f"(bump risk ${bump_risk:.2f} vs cap ${max_allowed_risk_budget:.2f}, margin ${bump_margin:.2f} vs usable ${usable_margin:.2f})."
+                )
+                self.logger.warning(f"[{self.name}] 🚫 MIN_NOTIONAL VETO: {msg}")
+                return self._build_veto_result("MIN_NOTIONAL", msg, trade_action)
         elif notional_usd > max_notional_usd:
             msg = f"Required notional ${notional_usd:.2f} exceeds max allowed ${max_notional_usd:.2f}."
             self.logger.warning(f"[{self.name}] 🚫 MAX NOTIONAL VETO: {msg}")
             return self._build_veto_result("MAX_MARGIN", msg, trade_action)
         elif margin_usd > available_margin:
             msg = f"Required margin ${margin_usd:.2f} exceeds available margin (${available_margin:.2f})."
+            self.logger.warning(f"[{self.name}] ❌ INSUFFICIENT MARGIN VETO: {msg}")
+            return self._build_veto_result("INSUFFICIENT_BALANCE", msg, trade_action)
+
+        if notional_usd < 101.0:
+            msg = f"VETO: MIN_NOTIONAL (${notional_usd:.2f} < $101.00 exchange CLOB min_size). Refusing order."
+            self.logger.warning(f"[{self.name}] 🚫 MIN_NOTIONAL VETO: {msg}")
+            return self._build_veto_result("MIN_NOTIONAL", msg, trade_action)
             self.logger.warning(f"[{self.name}] ❌ INSUFFICIENT MARGIN VETO: {msg}")
             return self._build_veto_result("INSUFFICIENT_BALANCE", msg, trade_action)
 
@@ -1273,7 +1863,8 @@ class RiskManager(BaseAgent):
                 slippage_stress_pct=slippage_stress,
                 funding_rate_hourly=funding_rate_hourly,
                 holding_hours=holding_hours,
-                approved_risk=risk_amount_usd
+                approved_risk=risk_amount_usd,
+                is_long=(decision == "LONG")
             )
         except ValueError as val_err:
             msg = f"Invalid risk parameters for loss calculation: {val_err}"
@@ -1304,6 +1895,17 @@ class RiskManager(BaseAgent):
             self.logger.warning(f"[{self.name}] ❌ EXCESSIVE_STRESS_RISK VETO: {msg}")
             return self._build_veto_result("EXCESSIVE_STRESS_RISK", msg, trade_action)
 
+        # ═══ Stage 8 Final Verification: Enforce Minimum Viable Floor ($40.00) ═══
+        notional_usd = round(contracts * execution_entry, 2)
+        if notional_usd < 101.0:
+            msg = (
+                f"VETO: MIN_NOTIONAL (${notional_usd:.2f} < $101.00 exchange CLOB min_size). "
+                f"Final verified notional is below exchange minimum notional floor ($101.00)."
+            )
+            self.logger.warning(f"[{self.name}] 🚫 MIN_NOTIONAL VETO: {msg}")
+            return self._build_veto_result("MIN_NOTIONAL", msg, trade_action)
+
+        is_software_tpsl = False
         final_reasoning = f"Math calculated based on {profile_name} profile. SL={sl_price}, TP={tp_price}, RR={rr_ratio}"
         planned_price_risk_usd = round(contracts * distance_to_sl, 2)
         return {
@@ -1311,6 +1913,11 @@ class RiskManager(BaseAgent):
             "veto_category": None,
             "trade_action": trade_action,
             "reasoning": final_reasoning,
+            "is_software_tpsl": is_software_tpsl,
+            "software_tpsl": is_software_tpsl,
+            "use_software_tpsl": is_software_tpsl,
+            "software_sl_tp_only": is_software_tpsl,
+            "execution_mode": "SOFTWARE_TPSL" if is_software_tpsl else "NATIVE_TPSL",
             "risk_amount_usd": risk_amount_usd,
             "approved_risk_usd": risk_amount_usd,
             "planned_risk_usd": risk_amount_usd,
@@ -1349,5 +1956,8 @@ class RiskManager(BaseAgent):
             "slip_buffer": expected_slip_buffer,
             "maintenance_margin_pct": mmf,
             "position_size_pct": margin_pct,
+            "bayes_strategy_multiplier": bayes_mult,
+            "bayes_posterior_win_prob": bayes_prob,
+            "bayes_strategy_bucket": f"{regime_tag}:{strat_tag}",
         }
 

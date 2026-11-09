@@ -1,8 +1,16 @@
 import os
+import sys
 import aiohttp
 import asyncio
 from typing import Optional
 from core.session import SessionManager
+
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
 
 class TelegramService:
     """
@@ -10,10 +18,11 @@ class TelegramService:
     Requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID environment variables.
     """
     def __init__(self):
-        # Берем ключи из переменных окружения (безопасный подход)
-        self.bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-        self.chat_id = os.getenv("TELEGRAM_CHAT_ID")
-        self.public_channel_id = os.getenv("PUBLIC_CHANNEL_ID")
+        # Берем ключи из переменных окружения или config (безопасный подход)
+        from core.config import config
+        self.bot_token = os.getenv("TELEGRAM_BOT_TOKEN") or getattr(config, "TELEGRAM_BOT_TOKEN", "")
+        self.chat_id = os.getenv("TELEGRAM_CHAT_ID") or getattr(config, "TELEGRAM_CHAT_ID", "")
+        self.public_channel_id = os.getenv("PUBLIC_CHANNEL_ID") or getattr(config, "PUBLIC_CHANNEL_ID", "")
         
         self.api_url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage" if self.bot_token else None
 
@@ -52,6 +61,12 @@ class TelegramService:
         }
         if parse_mode:
             payload["parse_mode"] = parse_mode
+        if reply_markup is None and self.chat_id and not str(self.chat_id).startswith("-100"):
+            try:
+                from services.telegram_bot_listener import REPLY_KEYBOARD
+                reply_markup = REPLY_KEYBOARD
+            except Exception:
+                pass
         if reply_markup:
             payload["reply_markup"] = reply_markup
 

@@ -59,7 +59,12 @@ class MarketDataService:
             return data
         return {}
 
-    def _save_oi_history(self):
+    def _save_oi_history(self, force: bool = False):
+        import time
+        now = time.time()
+        if not force and (now - getattr(self, "_last_oi_save_ts", 0) < 60.0):
+            return
+        self._last_oi_save_ts = now
         from core.state_store import StateStore
         StateStore.save(self._oi_file, self._oi_history)
 
@@ -117,18 +122,18 @@ class MarketDataService:
                     # Sort by highest volume
                     data.sort(key=lambda x: x[1], reverse=True)
                     
-                    return [{"symbol": f"{sym}-USD", "volumeQuote": vol} for sym, vol in data[:limit]]
+                    return [{"symbol": f"{sym}-USD", "volumeQuote": vol, "change_24h": None} for sym, vol in data[:limit]]
             except Exception as e:
                 self._log(f"⚠️ [MarketDataService] Failed to fetch Nado volume snapshots: {e}")
                 
         # If dynamic fetch fails, fallback to product_map keys
             stablecoins = {'USDT', 'USDC', 'USDE', 'DAI', 'USD'}
             nado_symbols = [sym for sym in self.product_map.keys() if sym.upper() not in stablecoins]
-            return [{"symbol": f"{sym}-USD", "volumeQuote": 10000000} for sym in nado_symbols[:limit]]
+            return [{"symbol": f"{sym}-USD", "volumeQuote": 10000000, "change_24h": None} for sym in nado_symbols[:limit]]
             
         self._log(f"⚠️ [MarketDataService] Nado Client not initialized. Cannot fetch active perps.")
         # Fallback list if API fails
-        return [{"symbol": f"{s}-USD", "volumeQuote": 0.0} for s in ["BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "LINK", "AVAX"]]
+        return [{"symbol": f"{s}-USD", "volumeQuote": 0.0, "change_24h": None} for s in ["BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "LINK", "AVAX"]]
 
 
     def _normalize_candles(self, raw_candles: List[Any]) -> List[Dict[str, float]]:
@@ -184,7 +189,17 @@ class MarketDataService:
             limit=max(limit, min_candles)
         )
         try:
-            candles = await asyncio.to_thread(self.nado_client.market.get_candlesticks, params)
+            candles = None
+            for attempt in range(2):
+                try:
+                    candles = await asyncio.to_thread(self.nado_client.market.get_candlesticks, params)
+                    if candles and hasattr(candles, "candlesticks"):
+                        break
+                except Exception as net_err:
+                    if attempt == 0:
+                        await asyncio.sleep(0.5)
+                    else:
+                        raise net_err
             parsed = [{
                 "open": float(c.open_x18) / 1e18,
                 "high": float(c.high_x18) / 1e18,
@@ -218,27 +233,34 @@ class MarketDataService:
                 
                 # CRITICAL-16, HIGH-17: Robust MTF Trend using EMA-9 and ATR
                 # 1. Calculate ATR (Average True Range) over available candles
-                if len(candles) > 1:
+                # F-19 Fix: Unify ATR-14 (Wilder's RMA) and SMA-seeded EMA-9 / EMA-21 with fetch_indicators
+                if len(candles) > 14:
+                    tr = [max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1])) for i in range(1, len(candles))]
+                    atr = sum(tr[:14]) / 14.0
+                    for val in tr[14:]:
+                        atr = (atr * 13.0 + val) / 14.0
+                elif len(candles) > 1:
                     tr = [max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1])) for i in range(1, len(candles))]
                     atr = sum(tr) / len(tr)
                 else:
                     atr = 0
                     
-                # 2. Calculate EMA-9 and EMA-21 (require at least 21 candles for trend determination)
+                # 2. Calculate EMA-9 and EMA-21 with standard SMA seed
                 trend = "NEUTRAL"
                 if len(closes) >= 21:
                     mult_9 = 2.0 / (9.0 + 1.0)
                     mult_21 = 2.0 / (21.0 + 1.0)
-                    ema_9 = closes[0]
-                    ema_21 = closes[0]
-                    for c in closes[1:]:
+                    ema_9 = sum(closes[:9]) / 9.0
+                    for c in closes[9:]:
                         ema_9 = (c - ema_9) * mult_9 + ema_9
+                    ema_21 = sum(closes[:21]) / 21.0
+                    for c in closes[21:]:
                         ema_21 = (c - ema_21) * mult_21 + ema_21
                         
-                    # 3. Determine Trend using EMA Crossover + ATR Separation
-                    if current_price > ema_9 and ema_9 > ema_21 and (current_price - ema_21) > (atr * 0.2):
+                    # 3. Determine Trend using EMA Crossover + Structural Hold (Audit F-11)
+                    if ema_9 > ema_21 and (ema_9 - ema_21) > (atr * 0.05) and current_price >= (ema_21 - atr * 0.10):
                         trend = "BULLISH"
-                    elif current_price < ema_9 and ema_9 < ema_21 and (ema_21 - current_price) > (atr * 0.2):
+                    elif ema_9 < ema_21 and (ema_21 - ema_9) > (atr * 0.05) and current_price <= (ema_21 + atr * 0.10):
                         trend = "BEARISH"
                 
                 # Safe pct_diff calculation avoiding division by zero/epsilon artifacts
@@ -250,6 +272,7 @@ class MarketDataService:
                     "interval_min": interval_min,
                     "current_price": round(current_price, 6),
                     "trend": trend,
+                    "atr": round(atr, 6),
                     "change_pct": round(pct_diff, 2),
                     "volume": round(vol * current_price, 2),
                     "candles_20": candles,
@@ -388,14 +411,14 @@ class MarketDataService:
     async def fetch_indicators(self, symbol: str) -> Dict[str, Any]:
         """Fetches candle data and computes RSI-14, EMA-20/50/200, MACD, ATR-14, ADX-14, VWAP, and Bollinger Bands."""
         try:
-            # 200 candles is industry standard for stable EMA, MACD, ADX and VWAP warm-up.
+            # 250 candles for stable EMA-20/50/200, MACD, ADX and VWAP warm-up (Audit F-12).
             # Reuses cached 15m candles from _fetch_ohlc_interval/fetch_multi_timeframe if already fetched.
-            candles = await self._fetch_nado_candles(symbol, 15, 200)
+            candles = await self._fetch_nado_candles(symbol, 15, 250)
             
             if candles:
-                closes = [float(c["close"]) for c in candles[-200:]]
-                highs = [float(c["high"]) for c in candles[-200:]]
-                lows = [float(c["low"]) for c in candles[-200:]]
+                closes = [float(c["close"]) for c in candles[-250:]]
+                highs = [float(c["high"]) for c in candles[-250:]]
+                lows = [float(c["low"]) for c in candles[-250:]]
                 current_price = closes[-1]
 
                 if len(closes) >= 35:
@@ -529,12 +552,28 @@ class MarketDataService:
                         bb_position_pct = 50.0
 
                     # 9. Breakout & Momentum (Volume Spike & Donchian 20)
-                    if len(candles) >= 21:
+                    if len(candles) >= 22:
+                        cur_vol = float(candles[-1].get("volume", 0))
+                        prev_vol = float(candles[-2].get("volume", 0))
+                        # If current candle is young (< 50% volume of prev), evaluate breakout of closed candle[-2]
+                        # against preceding 20 bars candles[-22:-2] to prevent overwriting donchian level by breakout candle itself
+                        use_prev_bar = (cur_vol < prev_vol * 0.5)
+                        ref_slice = candles[-22:-2] if use_prev_bar else candles[-21:-1]
+                        
+                        past_20_vols = [float(c.get("volume", 0)) for c in ref_slice]
+                        vol_sma_20 = sum(past_20_vols) / len(past_20_vols) if past_20_vols else 0.0
+                        effective_vol = max(cur_vol, prev_vol) if use_prev_bar else cur_vol
+                        volume_spike_pct = round((effective_vol / vol_sma_20) * 100.0, 2) if vol_sma_20 > 0 else 0.0
+
+                        past_20_highs = [float(c.get("high", 0)) for c in ref_slice]
+                        past_20_lows = [float(c.get("low", 0)) for c in ref_slice]
+                        donchian_high = max(past_20_highs) if past_20_highs else current_price
+                        donchian_low = min(past_20_lows) if past_20_lows else current_price
+                    elif len(candles) >= 21:
                         past_20_vols = [float(c.get("volume", 0)) for c in candles[-21:-1]]
                         vol_sma_20 = sum(past_20_vols) / len(past_20_vols) if past_20_vols else 0.0
                         current_vol = float(candles[-1].get("volume", 0))
                         volume_spike_pct = round((current_vol / vol_sma_20) * 100.0, 2) if vol_sma_20 > 0 else 0.0
-                        
                         past_20_highs = [float(c.get("high", 0)) for c in candles[-21:-1]]
                         past_20_lows = [float(c.get("low", 0)) for c in candles[-21:-1]]
                         donchian_high = max(past_20_highs) if past_20_highs else current_price
@@ -556,17 +595,50 @@ class MarketDataService:
                         _rs = _ag / (_al + 1e-6)
                         rsi_series.append(round(100.0 - (100.0 / (1.0 + _rs)), 2))
                     
+                    # F-20 Fix: Compare swing extremes in two 10-bar windows to eliminate single-bar index shift artifact
                     if len(rsi_series) >= 20 and len(closes) >= 20:
                         price_tail = closes[-20:]
                         rsi_tail = rsi_series[-20:]
-                        price_min1_idx = price_tail[:10].index(min(price_tail[:10]))
-                        price_min2_idx = 10 + price_tail[10:].index(min(price_tail[10:]))
-                        price_max1_idx = price_tail[:10].index(max(price_tail[:10]))
-                        price_max2_idx = 10 + price_tail[10:].index(max(price_tail[10:]))
-                        if price_tail[price_min2_idx] < price_tail[price_min1_idx] and rsi_tail[price_min2_idx] > rsi_tail[price_min1_idx]:
+                        p1_min = min(price_tail[:10])
+                        p2_min = min(price_tail[10:])
+                        p1_max = max(price_tail[:10])
+                        p2_max = max(price_tail[10:])
+
+                        rsi1_min = min(rsi_tail[:10])
+                        rsi2_min = min(rsi_tail[10:])
+                        rsi1_max = max(rsi_tail[:10])
+                        rsi2_max = max(rsi_tail[10:])
+
+                        if p2_min < p1_min and rsi2_min > (rsi1_min + 1.5):
                             rsi_divergence = "bullish"
-                        elif price_tail[price_max2_idx] > price_tail[price_max1_idx] and rsi_tail[price_max2_idx] < rsi_tail[price_max1_idx]:
+                        elif p2_max > p1_max and rsi2_max < (rsi1_max - 1.5):
                             rsi_divergence = "bearish"
+
+                    # 10b. Volume Trend & Trend Exhaustion Detection (15m timeframe)
+                    vol_declining_on_rise = False
+                    vol_declining_on_drop = False
+                    if len(candles) >= 3:
+                        try:
+                            v_prev = float(candles[-3].get("volume", 0))
+                            v_curr = float(candles[-2].get("volume", 0))
+                            p_prev = float(candles[-3].get("close", 0))
+                            p_curr = float(candles[-2].get("close", 0))
+                            if p_curr > p_prev and v_curr < v_prev:
+                                vol_declining_on_rise = True
+                            elif p_curr < p_prev and v_curr < v_prev:
+                                vol_declining_on_drop = True
+                        except (ValueError, TypeError):
+                            pass
+
+                    # Trend Exhaustion Criteria (15m timeframe):
+                    # - Long Exhaustion: (bb_pos > 85.0 or current_price >= donchian_high) and (rsi_divergence == "bearish" or vol_declining_on_rise)
+                    # - Short Exhaustion: (bb_pos < 15.0 or current_price <= donchian_low) and (rsi_divergence == "bullish" or vol_declining_on_drop)
+                    at_channel_high = (bb_position_pct > 85.0) or (donchian_high > 0 and current_price >= donchian_high)
+                    at_channel_low = (bb_position_pct < 15.0) or (donchian_low > 0 and current_price <= donchian_low)
+
+                    trend_exhaustion_long = at_channel_high and (rsi_divergence == "bearish" or vol_declining_on_rise)
+                    trend_exhaustion_short = at_channel_low and (rsi_divergence == "bullish" or vol_declining_on_drop)
+                    trend_exhaustion = trend_exhaustion_long or trend_exhaustion_short
 
                     # 11. MACD Crossover Detection
                     macd_crossover = "none"
@@ -675,11 +747,21 @@ class MarketDataService:
                         "donchian_high": donchian_high,
                         "donchian_low": donchian_low,
                         "last_closed_candle_close": closes[-2] if len(closes) >= 2 else current_price,
+                        "trend_exhaustion": trend_exhaustion,
+                        "trend_exhaustion_long": trend_exhaustion_long,
+                        "trend_exhaustion_short": trend_exhaustion_short,
+                        "rsi_divergence": rsi_divergence,
                         "algo_signals": {
                             "rsi_divergence": rsi_divergence,
                             "macd_crossover": macd_crossover,
                             "liquidity_sweeps": sweeps_detected,
-                            "candle_patterns": candle_patterns
+                            "candle_patterns": candle_patterns,
+                            "volume_declining": vol_declining_on_rise or vol_declining_on_drop,
+                            "volume_declining_on_rise": vol_declining_on_rise,
+                            "volume_declining_on_drop": vol_declining_on_drop,
+                            "trend_exhaustion": trend_exhaustion,
+                            "trend_exhaustion_long": trend_exhaustion_long,
+                            "trend_exhaustion_short": trend_exhaustion_short
                         },
                         "asset_return_24h": round(asset_return_24h, 2)
                     }
@@ -728,11 +810,21 @@ class MarketDataService:
             "donchian_high": price,
             "donchian_low": price,
             "last_closed_candle_close": price,
+            "trend_exhaustion": False,
+            "trend_exhaustion_long": False,
+            "trend_exhaustion_short": False,
+            "rsi_divergence": "none",
             "algo_signals": {
                 "rsi_divergence": "none",
                 "macd_crossover": "none",
                 "liquidity_sweeps": [],
-                "candle_patterns": []
+                "candle_patterns": [],
+                "volume_declining": False,
+                "volume_declining_on_rise": False,
+                "volume_declining_on_drop": False,
+                "trend_exhaustion": False,
+                "trend_exhaustion_long": False,
+                "trend_exhaustion_short": False
             },
             "asset_return_24h": 0.0
         }
@@ -777,24 +869,46 @@ class MarketDataService:
             if product_id is None:
                 return {"symbol": symbol, "open_interest": None, "open_interest_trend": "neutral", "funding_rate": None}
                 
-            # 1. Real-time OI from engine markets
+            # 1. Real-time OI from engine markets (with transient network retry)
             open_interest = None
-            markets = await asyncio.to_thread(self.nado_client.market.get_all_engine_markets)
-            for p in markets.perp_products:
-                if p.product_id == product_id:
-                    try:
-                        if hasattr(p, 'state') and hasattr(p.state, 'open_interest') and p.state.open_interest is not None:
-                            open_interest = float(p.state.open_interest) / 1e18
-                        elif hasattr(p, 'open_interest_x18') and p.open_interest_x18 is not None:
-                            open_interest = float(p.open_interest_x18) / 1e18
-                    except Exception:
-                        pass
-                    break
+            markets = None
+            for attempt in range(2):
+                try:
+                    markets = await asyncio.to_thread(self.nado_client.market.get_all_engine_markets)
+                    if markets and hasattr(markets, "perp_products"):
+                        break
+                except Exception as net_err:
+                    if attempt == 0:
+                        await asyncio.sleep(0.5)
+                    else:
+                        raise net_err
+
+            if markets and hasattr(markets, "perp_products"):
+                for p in markets.perp_products:
+                    if p.product_id == product_id:
+                        try:
+                            if hasattr(p, 'state') and hasattr(p.state, 'open_interest') and p.state.open_interest is not None:
+                                open_interest = float(p.state.open_interest) / 1e18
+                            elif hasattr(p, 'open_interest_x18') and p.open_interest_x18 is not None:
+                                open_interest = float(p.open_interest_x18) / 1e18
+                        except Exception:
+                            pass
+                        break
                     
-            # 2. Hourly Snapshot for Funding Rate (CRITICAL-14)
+            # 2. Hourly Snapshot for Funding Rate (CRITICAL-14, with transient network retry)
             funding_rate = None
+            snapshots = None
             params = IndexerMarketSnapshotsParams(interval=IndexerMarketSnapshotInterval(count=1, granularity=3600))
-            snapshots = await asyncio.to_thread(self.nado_client.market.get_market_snapshots, params)
+            for attempt in range(2):
+                try:
+                    snapshots = await asyncio.to_thread(self.nado_client.market.get_market_snapshots, params)
+                    if snapshots and snapshots.snapshots:
+                        break
+                except Exception as net_err:
+                    if attempt == 0:
+                        await asyncio.sleep(0.5)
+                    else:
+                        raise net_err
             
             if snapshots and snapshots.snapshots:
                 snap = snapshots.snapshots[0]
@@ -807,41 +921,47 @@ class MarketDataService:
                     except Exception:
                         pass
                     
-            if funding_rate is None or open_interest is None:
-                self._log(f"⚠️ [MarketDataService] Missing critical risk data OI ({open_interest}) or Funding ({funding_rate}) for {symbol}. VETO triggered.", level="debug")
-                return {"symbol": symbol, "open_interest": None, "open_interest_trend": "neutral", "funding_rate": None, "funding_rate_decimal": None}
-                
-            # 3. Time-Weighted OI Trend (CRITICAL-13)
+            # 3. Time-Weighted OI Trend (CRITICAL-13 & Audit F-16: Preserve OI and trend even if funding rate snapshot lags)
+            oi_trend = "neutral"
             import time
             current_time = time.time()
-            oi_trend = "neutral"
-            
-            if symbol not in self._oi_history or not isinstance(self._oi_history.get(symbol), list):
-                self._oi_history[symbol] = []
+            if open_interest is not None:
+                if symbol not in self._oi_history or not isinstance(self._oi_history.get(symbol), list):
+                    self._oi_history[symbol] = []
+                    
+                history = self._oi_history[symbol]
+                history.append({"ts": current_time, "oi": open_interest})
                 
-            history = self._oi_history[symbol]
-            history.append({"ts": current_time, "oi": open_interest})
-            
-            # Auto-purge data older than 2 hours (7200 seconds)
-            history = [x for x in history if current_time - x["ts"] <= 7200]
-            self._oi_history[symbol] = history
-            
-            # Find closest point to 1 hour ago
-            target_time = current_time - 3600
-            past_points = [x for x in history if x["ts"] <= current_time - 1800] # at least 30m old
-            
-            if past_points:
-                closest_point = min(past_points, key=lambda x: abs(x["ts"] - target_time))
-                prev_oi = closest_point["oi"]
-                if prev_oi > 0:
-                    if open_interest > prev_oi * 1.01: # 1% increase
-                        oi_trend = "rising"
-                    elif open_interest < prev_oi * 0.99: # 1% decrease
-                        oi_trend = "falling"
-                    else:
-                        oi_trend = "stable"
-                        
-            self._save_oi_history()
+                # Auto-purge data older than 2 hours (7200 seconds)
+                history = [x for x in history if current_time - x["ts"] <= 7200]
+                self._oi_history[symbol] = history
+                
+                # Find closest point to 1 hour ago
+                target_time = current_time - 3600
+                past_points = [x for x in history if x["ts"] <= current_time - 1800] # at least 30m old
+                
+                if past_points:
+                    closest_point = min(past_points, key=lambda x: abs(x["ts"] - target_time))
+                    prev_oi = closest_point["oi"]
+                    if prev_oi > 0:
+                        if open_interest > prev_oi * 1.01: # 1% increase
+                            oi_trend = "rising"
+                        elif open_interest < prev_oi * 0.99: # 1% decrease
+                            oi_trend = "falling"
+                        else:
+                            oi_trend = "stable"
+                            
+                self._save_oi_history()
+
+            if funding_rate is None or open_interest is None:
+                self._log(f"⚠️ [MarketDataService] Missing critical risk data OI ({open_interest}) or Funding ({funding_rate}) for {symbol}. VETO triggered.", level="debug")
+                return {
+                    "symbol": symbol,
+                    "open_interest": open_interest,
+                    "open_interest_trend": oi_trend,
+                    "funding_rate": None,
+                    "funding_rate_decimal": None
+                }
 
             return {
                 "symbol": symbol,
@@ -884,11 +1004,15 @@ class MarketDataService:
                         try:
                             result["size_increment"] = float(p.book_info.size_increment) / 1e18
                             raw_min_size = float(getattr(p.book_info, "min_size", 0)) / 1e18
-                            if raw_min_size == 100.0 or raw_min_size <= 0.0:
+                            if raw_min_size >= 10.0:
                                 result["min_size"] = result["size_increment"]
+                                result["min_notional"] = raw_min_size
+                            elif raw_min_size > 0:
+                                result["min_size"] = raw_min_size
+                                result["min_notional"] = 0.0
                             else:
-                                result["min_size"] = max(raw_min_size, result["size_increment"])
-                            result["min_notional"] = 0.0
+                                result["min_size"] = result["size_increment"]
+                                result["min_notional"] = 0.0
                             if hasattr(p.book_info, "price_increment_x18"):
                                 raw_price_inc = float(p.book_info.price_increment_x18) / 1e18
                                 if raw_price_inc > 0:

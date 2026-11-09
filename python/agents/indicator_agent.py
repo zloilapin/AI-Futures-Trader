@@ -149,7 +149,20 @@ class IndicatorAgent(BaseAgent):
                 reason_parts.append(f"Сильный медвежий тренд по ADX ({float(adx):.1f})")
 
         net_score = bull_score - bear_score
-        
+
+        # Higher Timeframe Trend Weighting Guard
+        # Prevents 15m local noise (oversold bounce or overbought pullback) from shouting 70%+ confidence
+        # directly against the dominant 1H macro trend.
+        is_counter_trend = False
+        if trend_1h == "BEARISH" and net_score > 0:
+            is_counter_trend = True
+            net_score = max(0, net_score - 2)
+            reason_parts.append("Внимание: Сигнал 15м направлен против медвежьего 1H тренда (пенализация -2 балла)")
+        elif trend_1h == "BULLISH" and net_score < 0:
+            is_counter_trend = True
+            net_score = min(0, net_score + 2)
+            reason_parts.append("Внимание: Сигнал 15м направлен против бычьего 1H тренда (пенализация -2 балла)")
+
         # If both sides are strong and balanced, it's a technical conflict -> NEUTRAL
         if bull_score >= 3 and bear_score >= 3 and abs(net_score) < 2:
             signal = "NEUTRAL"
@@ -157,16 +170,16 @@ class IndicatorAgent(BaseAgent):
             reason_parts.append(f"Противоречивые сигналы индикаторов (Быки: {bull_score}, Медведи: {bear_score}). Нейтралитет.")
         elif net_score >= 3:
             signal = "BULLISH"
-            confidence = 70 + min(25, net_score * 5)
+            confidence = (70 + min(25, net_score * 5)) if not is_counter_trend else min(60, 50 + net_score * 3)
         elif net_score <= -3:
             signal = "BEARISH"
-            confidence = 70 + min(25, abs(net_score) * 5)
+            confidence = (70 + min(25, abs(net_score) * 5)) if not is_counter_trend else min(60, 50 + abs(net_score) * 3)
         elif net_score > 0:
             signal = "BULLISH"
-            confidence = 55 + min(15, net_score * 5)
+            confidence = (55 + min(15, net_score * 5)) if not is_counter_trend else min(55, 45 + net_score * 3)
         elif net_score < 0:
             signal = "BEARISH"
-            confidence = 55 + min(15, abs(net_score) * 5)
+            confidence = (55 + min(15, abs(net_score) * 5)) if not is_counter_trend else min(55, 45 + abs(net_score) * 3)
         else:
             signal = "NEUTRAL"
             confidence = 50

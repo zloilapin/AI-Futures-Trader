@@ -37,33 +37,73 @@ class OIFundingAgent(BaseAgent):
         
         bull_score = 0
         bear_score = 0
+
+        # Determine price momentum / direction from price_data or indicators
+        price_dir = "NEUTRAL"
+        ind = market_data.get("indicators") or {}
+        price_data = market_data.get("price_data") or {}
+        curr_px = float(price_data.get("current_price") or ind.get("current_price") or 0.0)
+        ema_20 = float(ind.get("ema_20") or 0.0)
+
+        # 1. First priority: completed 15m candle close vs open
+        candles = price_data.get("candles") or []
+        if len(candles) >= 1:
+            last_c = candles[-1]
+            c_open = float(last_c.get("open", 0.0))
+            c_close = float(last_c.get("close", 0.0))
+            if c_close > c_open:
+                price_dir = "UP"
+            elif c_close < c_open:
+                price_dir = "DOWN"
         
-        if funding_rate > 0.0005:  # High positive funding (Longs paying shorts)
-            bear_score += 2
-            reason = f"Фандинг сильно позитивный ({funding_rate:.4f}). Лонги перегружены, риск сквиза вниз"
-            if oi_trend == "rising":
+        # 2. Second priority: price vs EMA-20
+        if price_dir == "NEUTRAL" and curr_px > 0 and ema_20 > 0:
+            if curr_px > ema_20:
+                price_dir = "UP"
+            elif curr_px < ema_20:
+                price_dir = "DOWN"
+
+        # Institutional capital flow dynamics (Price Direction + OI Trend)
+        if oi_trend == "rising":
+            if price_dir == "UP":
+                bull_score += 2
+                reason_parts.append("Приток институционального капитала в лонги (цена растет + OI растет: аккумуляция)")
+            elif price_dir == "DOWN":
+                bear_score += 2
+                reason_parts.append("Приток институционального капитала в шорты (цена падает + OI растет: набор коротких позиций)")
+            else:
+                reason_parts.append("Открытый интерес растет в консолидации (накопление позиций)")
+        elif oi_trend == "falling":
+            if price_dir == "UP":
                 bear_score += 1
-                reason += " (усилено ростом OI)"
-            reason_parts.append(reason)
-        elif funding_rate < -0.0005: # High negative funding (Shorts paying longs)
-            bull_score += 2
-            reason = f"Фандинг сильно негативный ({funding_rate:.4f}). Шорты перегружены, риск шорт-сквиза"
-            if oi_trend == "rising":
+                reason_parts.append("Рост цены на фоне закрытия шортов (цена растет + OI падает: шорт-сквиз/истощение импульса)")
+            elif price_dir == "DOWN":
                 bull_score += 1
-                reason += " (усилено ростом OI)"
-            reason_parts.append(reason)
+                reason_parts.append("Падение на сбросе позиций (цена падает + OI падает: ликвидация перегруженных лонгов/капитуляция)")
+            else:
+                reason_parts.append("Снижение открытого интереса (отток капитала с рынка)")
+
+        # Funding rate extremes (Crowd overextension & Squeeze risk - F-13 0.02%/hr threshold)
+        if funding_rate > 0.0002:  # High positive funding (Longs paying shorts > 0.02%/hr)
+            bear_score += 2
+            reason_parts.append(f"Фандинг сильно позитивный ({funding_rate:.4f} > 0.02%/ч: лонги перегружены, риск сквиза вниз)")
+        elif funding_rate < -0.0002: # High negative funding (Shorts paying longs < -0.02%/hr)
+            bull_score += 2
+            reason_parts.append(f"Фандинг сильно негативный ({funding_rate:.4f} < -0.02%/ч: шорты перегружены, риск шорт-сквиза)")
         else:
-            reason_parts.append(f"Фандинг нейтрален ({funding_rate:.4f})")
+            reason_parts.append(f"Фандинг сбалансирован ({funding_rate:.4f})")
             
         if oi_usd > 1000000:
             reason_parts.append("Высокий открытый интерес")
         
         if bull_score > bear_score:
             signal = "BULLISH"
-            confidence = 60 + bull_score * 10
+            diff = bull_score - bear_score
+            confidence = min(85, 60 + diff * 10)
         elif bear_score > bull_score:
             signal = "BEARISH"
-            confidence = 60 + bear_score * 10
+            diff = bear_score - bull_score
+            confidence = min(85, 60 + diff * 10)
             
         return {
             "signal": signal,

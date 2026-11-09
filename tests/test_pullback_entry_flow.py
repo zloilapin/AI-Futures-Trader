@@ -265,6 +265,274 @@ async def run_tests():
     assert score_res["trade_action"] == "WAIT_FOR_PULLBACK", f"Expected WAIT_FOR_PULLBACK for overextended entry, got {score_res['trade_action']}"
     print(f"✅ Late entry detected: DirConf={score_res['directional_confidence']}%, EntryQuality={score_res['entry_quality']}%, Action={score_res['trade_action']}.")
 
+    print("\n=== TEST 5: Bug Fixes Verification (80% Distance, Retest Promotion & Direction Retention) ===")
+    # 5.1 SHORT pullback 80% distance test
+    market_data_short = {"indicators": {"ema_20": 2406.70}}
+    pipeline.register_pullback_candidate(
+        symbol="ETH-SHORT",
+        decision="SHORT",
+        current_price=2399.50,
+        directional_conf=81,
+        conviction=61,
+        strategy_mode="TREND_FOLLOWING",
+        market_data=market_data_short,
+        ceo_verdict={},
+        strategy_profile=None,
+        ttl_seconds=600
+    )
+    target_price = pipeline._pullback_watchlist["ETH-SHORT"]["target_pullback_price"]
+    signal_price = pipeline._pullback_watchlist["ETH-SHORT"]["signal_price"]
+    dist = target_price - signal_price
+    threshold_80 = target_price - (0.20 * dist)
+
+    # At price below 80% distance, it should NOT trigger!
+    fetcher.price = threshold_80 - 1.0
+    trig, sym, reason = await pipeline.check_pullback_watchlist()
+    assert not trig, f"Price at {fetcher.price:.2f} should not trigger premature pullback retest (< {threshold_80:.2f})"
+    assert "ETH-SHORT" in pipeline._pullback_watchlist
+    print(f"✅ Premature pullback trigger prevented ({fetcher.price:.2f} < {threshold_80:.2f} threshold).")
+
+    # At price >= 80% distance, it SHOULD trigger!
+    fetcher.price = threshold_80 + 0.5
+    trig, sym, reason = await pipeline.check_pullback_watchlist()
+    assert trig, f"Price at {fetcher.price:.2f} must trigger pullback retest (>= {threshold_80:.2f})"
+    assert sym == "ETH-SHORT"
+    assert pipeline._priority_symbol == "ETH-SHORT"
+    assert pipeline._priority_direction == "SHORT"
+    print(f"✅ Pullback triggered at 80% distance threshold ({fetcher.price:.2f} >= {threshold_80:.2f}) with correct direction (SHORT).")
+
+    # 5.2 DeterministicGuard Pullback Retest Promotion: Cycle #2 HYPE scenario (DirConf=77%, raw EQ=52% -> effective EQ=67% -> REDUCE_SIZE)
+    retest_proposal = {
+        "decision": "SHORT",
+        "conviction": 52,
+        "directional_confidence": 77,
+        "entry_quality": 52,
+        "trade_action": "WAIT_FOR_PULLBACK",
+        "is_pullback_retest": True
+    }
+    short_profile = StrategyProfile(True, "TREND_FOLLOWING", "SHORT", "Short retest")
+    guard_retest_res = DeterministicGuard.evaluate(
+        strategy_profile=short_profile,
+        ceo_proposal=retest_proposal,
+        profile="BALANCED",
+        risk_manager=dummy_risk,
+        market_data={"is_pullback_retest": True},
+        symbol="HYPE-USD"
+    )
+    assert guard_retest_res.trade_action == "REDUCE_SIZE", f"Expected REDUCE_SIZE for EQ=67%, got {guard_retest_res.trade_action}"
+    assert guard_retest_res.conviction >= guard_retest_res.min_conviction, f"Expected conviction lifted to at least min_conv ({guard_retest_res.min_conviction}), got {guard_retest_res.conviction}"
+    assert guard_retest_res.is_actionable is True, "Retest with DirConf=77% and effective EQ=67% must be actionable"
+    print("✅ Retest setup promoted to REDUCE_SIZE with lifted conviction (Cycle #2 HYPE scenario resolved).")
+
+    # 5.3 StrategyRouter honors pullback_retest_direction even when short-term indicators are bullish
+    from core.strategy_router import StrategyRouter
+    retest_market_data = {
+        "is_pullback_retest": True,
+        "pullback_retest_direction": "SHORT",
+        "multi_timeframe": {"trend_1h": "BEARISH"},
+        "indicators": {"bb_position_pct": 60.0, "volume_spike_pct": 20.0},
+        "price_data": {"current_price": 78.24}
+    }
+    # Analyst reports have tech_bulls > tech_bears (2 bulls vs 1 bear) due to upward pullback bounce
+    bullish_analyst_reports = [
+        {"agent_name": "Indicator_Agent", "signal": "BULLISH"},
+        {"agent_name": "Candle_Agent", "signal": "BULLISH"},
+        {"agent_name": "Trend_Agent", "signal": "BEARISH"}
+    ]
+    routed_profile = StrategyRouter.evaluate(
+        "HYPE-USD", retest_market_data, bullish_analyst_reports, {}, detected_regime="TRENDING_BEAR"
+    )
+    assert routed_profile.direction_bias == "SHORT", f"Expected SHORT, got {routed_profile.direction_bias}"
+    assert "PULLBACK_RETEST SHORT" in routed_profile.reasoning
+    print("✅ StrategyRouter correctly preserved SHORT direction despite bullish 15m oscillators.")
+
+    print("\n=== TEST 6: Watchlist Deduplication & Directional Cluster Cap Protection ===")
+    # 6.1 remove_pullback_candidate by base ticker or full ticker
+    pipeline._pullback_watchlist.clear()
+    pipeline.register_pullback_candidate(
+        symbol="HYPE-USD",
+        decision="SHORT",
+        current_price=75.40,
+        directional_conf=80,
+        conviction=65,
+        strategy_mode="TREND_FOLLOWING",
+        market_data={"indicators": {"ema_20": 76.50}},
+        ceo_verdict={},
+        strategy_profile=None,
+        ttl_seconds=600
+    )
+    assert "HYPE-USD" in pipeline._pullback_watchlist
+    # Remove by base ticker "HYPE"
+    removed = pipeline.remove_pullback_candidate("HYPE", reason="order filled")
+    assert removed is True
+    assert "HYPE-USD" not in pipeline._pullback_watchlist
+    print("✅ remove_pullback_candidate successfully cleared HYPE-USD by base ticker 'HYPE'.")
+
+    # 6.2 Active positions auto-cleanup in check_pullback_watchlist
+    pipeline.register_pullback_candidate(
+        symbol="SOL-USD",
+        decision="SHORT",
+        current_price=100.0,
+        directional_conf=80,
+        conviction=65,
+        strategy_mode="TREND_FOLLOWING",
+        market_data={"indicators": {"ema_20": 102.0}},
+        ceo_verdict={},
+        strategy_profile=None,
+        ttl_seconds=600
+    )
+    # Simulate active position on SOL
+    pipeline.services.trading_service.active_positions["SOL"] = {"symbol": "SOL-USD", "direction": "SHORT"}
+    trig, sym, reason = await pipeline.check_pullback_watchlist()
+    assert trig is False
+    assert "SOL-USD" not in pipeline._pullback_watchlist
+    print("✅ check_pullback_watchlist automatically cleans up candidates that already have active positions.")
+
+    # 6.3 Directional cluster cap (2/2 SHORT) prevents wake-up
+    pipeline.services.trading_service.active_positions.clear()
+    pipeline.services.trading_service.active_positions["BTC"] = {"symbol": "BTC-USD", "direction": "SHORT"}
+    pipeline.services.trading_service.active_positions["ETH"] = {"symbol": "ETH-USD", "direction": "SHORT"}
+    pipeline.register_pullback_candidate(
+        symbol="AVAX-USD",
+        decision="SHORT",
+        current_price=20.0,
+        directional_conf=80,
+        conviction=65,
+        strategy_mode="TREND_FOLLOWING",
+        market_data={"indicators": {"ema_20": 20.5}},
+        ceo_verdict={},
+        strategy_profile=None,
+        ttl_seconds=600
+    )
+    # Even if target price reached, 2/2 SHORT is full so pipeline should NOT wake up
+    fetcher.price = 20.5
+    trig, sym, reason = await pipeline.check_pullback_watchlist()
+    assert trig is False, "Directional cluster cap (2/2 SHORT) must block wake-up"
+    assert "AVAX-USD" in pipeline._pullback_watchlist, "Watchlist item should be kept while cap is temporarily full"
+    print("✅ Directional cluster cap (2/2 SHORT) successfully prevents waking the pipeline.")
+
+    pipeline.services.trading_service.active_positions.clear()
+    pipeline._pullback_watchlist.clear()
+
+    print("\n=== TEST 7: FastRadar Volume Filter, Cluster Cap & Macro Leader Guard ===")
+    # 7.1 FastRadar volume confirmation (vol_ratio >= 1.3 or |delta_pct| >= 1.2%)
+    class RadarFetcher:
+        def __init__(self, price=99.4, volume=10.0, avg_vol=10.0, delta_pct=-0.6):
+            self.price = price
+            self.volume = volume
+            self.avg_vol = avg_vol
+            self.delta_pct = delta_pct
+        async def fetch_ohlcv(self, symbol):
+            # open price calculated from delta_pct
+            open_p = 100.0
+            candles = []
+            # 20 history candles around 100.0 (lows at 99.8)
+            for _ in range(20):
+                candles.append({"open": 100.0, "close": 100.0, "high": 100.5, "low": 99.8, "volume": self.avg_vol})
+            # Current candle (last) with close = self.price (< donchian_low 99.8)
+            candles.append({"open": open_p, "close": self.price, "high": open_p, "low": self.price, "volume": self.volume})
+            return {"current_price": self.price, "candles_20": candles}
+
+    # Low volume breakdown (Δ=-0.6%, Vol=0.8x) -> Must be rejected by FastRadar
+    pipeline.services.fetcher = RadarFetcher(price=99.4, volume=8.0, avg_vol=10.0, delta_pct=-0.6)
+    pipeline._fast_radar_cooldowns.clear()
+    pipeline._last_universe_symbols = ["ZEC-USD"]
+    trig, sym, reason = await pipeline.check_fast_market_momentum()
+    assert trig is False, "Low volume breakdown (< 1.3x) must NOT trigger FastRadar"
+    print("✅ FastRadar successfully filtered out low volume breakdown (Vol=0.8x < 1.3x).")
+
+    # Confirmed volume breakdown (Δ=-0.6%, Vol=1.5x) -> Must trigger FastRadar
+    pipeline.services.fetcher = RadarFetcher(price=99.4, volume=15.0, avg_vol=10.0, delta_pct=-0.6)
+    pipeline._fast_radar_cooldowns.clear()
+    trig, sym, reason = await pipeline.check_fast_market_momentum()
+    assert trig is True and sym == "BTC-USD"
+    print("✅ FastRadar successfully triggered on confirmed volume breakdown (Vol=1.5x >= 1.3x).")
+
+    # FastRadar cluster cap: when 2/2 SHORT slots full, do not trigger SHORT breakdown
+    pipeline.services.trading_service.active_positions["POS1"] = {"symbol": "BTC-USD", "direction": "SHORT"}
+    pipeline.services.trading_service.active_positions["POS2"] = {"symbol": "ETH-USD", "direction": "SHORT"}
+    pipeline._fast_radar_cooldowns.clear()
+    trig, sym, reason = await pipeline.check_fast_market_momentum()
+    assert trig is False, "FastRadar must NOT trigger breakdown when 2/2 SHORT positions are active"
+    print("✅ FastRadar directional cluster cap (2/2 SHORT) successfully blocked waking.")
+    pipeline.services.trading_service.active_positions.clear()
+
+    # 7.2 Macro Leader Guard: can_apply_profile_uplift
+    # Case A: Altcoin LONG with BTC/ETH BEARISH -> Blocked!
+    leaders_state = {"BTC": "BEARISH", "ETH": "BEARISH"}
+    can_up, up_msg = pipeline.can_apply_profile_uplift("BNB-USD", "LONG", leaders_state)
+    assert can_up is False
+    assert "Поводыри (BTC, ETH) в медвежьем тренде" in up_msg
+    print("✅ Asset Profile Uplift correctly blocked for altcoin LONG when BTC/ETH are BEARISH.")
+
+    # Case B: Altcoin SHORT with BTC BEARISH -> Allowed!
+    can_up_short, up_msg_short = pipeline.can_apply_profile_uplift("SOL-USD", "SHORT", leaders_state)
+    assert can_up_short is True
+    print("✅ Asset Profile Uplift allowed for altcoin SHORT aligned with BEARISH leaders.")
+
+    # Case C: Leader itself (BTC/ETH) or uncorrelated gold (XAUT) -> Always allowed
+    can_up_btc, _ = pipeline.can_apply_profile_uplift("BTC-USD", "LONG", leaders_state)
+    assert can_up_btc is True
+    can_up_gold, _ = pipeline.can_apply_profile_uplift("XAUT-USD", "LONG", leaders_state)
+    assert can_up_gold is True
+    print("✅ Leaders (BTC/ETH) and uncorrelated assets (XAUT) exempt from leader guard.")
+
+    print("\n=== TEST 8: Patches 1-4 Verification (Range Chop Uplift, Pre-Debate Anti-Chop, CEO Retest Memory) ===")
+    # 8.1 Uplift blocked in RANGE_CHOPPY
+    can_up_chop, chop_msg = pipeline.can_apply_profile_uplift("BTC-USD", "LONG", leaders_state, macro_regime="RANGE_CHOPPY")
+    assert can_up_chop is False
+    assert "RANGE_CHOPPY" in chop_msg
+    print("✅ Asset Profile Uplift strictly blocked in RANGE_CHOPPY macro regime.")
+
+    # 8.2 Pre-Debate Anti-Chop in StrategyRouter
+    from core.strategy_router import StrategyRouter
+    market_data_overbought = {
+        "multi_timeframe": {"mtf_alignment": "TRANSITION", "trend_1h": "BULLISH"},
+        "indicators": {"bb_position_pct": 91.5, "rsi_14": 68.0},
+        "price_data": {"current_price": 100.0}
+    }
+    router_prof = StrategyRouter.evaluate(
+        market_data=market_data_overbought,
+        valid_reports=[{"agent_name": "Trend_Agent", "signal": "BULLISH"}],
+        detected_regime="RANGE_CHOPPY",
+        symbol="HYPE-USD",
+        macro_cache={}
+    )
+    assert router_prof.has_directional_signal is False
+    assert "Анти-распил" in router_prof.reasoning
+    print(f"✅ Pre-Debate Anti-Chop blocked overextended LONG before debate: {router_prof.reasoning}")
+
+    # 8.3 CEOAgent Retest Memory and Approval of Counter-Trend Pullback
+    from agents.ceo_agent import CEOAgent
+    class LocalDummyLogger:
+        def info(self, *a, **k): pass
+        def debug(self, *a, **k): pass
+        def warning(self, *a, **k): pass
+        def error(self, *a, **k): pass
+    dummy_ceo = CEOAgent(logger=LocalDummyLogger(), primary_llm=None, escalation_llm=None)
+    # Simulate LLM returning HOLD due to 15m red pullback candle:
+    breakdown_neutral = {
+        "technical_structure_weight": 0,
+        "derivatives_flow_weight": 0,
+        "risk_penalty": 0
+    }
+    retest_ctx = {
+        "is_pullback_retest": True,
+        "pullback_retest_direction": "LONG",
+        "pullback_context": {
+            "direction": "LONG",
+            "signal_price": 1208.0,
+            "target_pullback_price": 1201.0,
+            "invalidation_price": 1192.0,
+            "directional_confidence": 86
+        }
+    }
+    score_res = dummy_ceo._validate_and_compute_score("HOLD", breakdown_neutral, market_context=retest_ctx)
+    assert score_res["decision"] == "LONG"
+    assert score_res["trade_action"] in ["ENTER", "REDUCE_SIZE"]
+    assert score_res["directional_confidence"] >= 75
+    print(f"✅ CEO Retest Memory restored LONG thesis from HOLD: Decision={score_res['decision']}, Action={score_res['trade_action']}, Conf={score_res['directional_confidence']}%.")
+
     print("\nALL TESTS PASSED SUCCESSFULLY! 🎯")
 
 if __name__ == "__main__":

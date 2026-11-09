@@ -221,7 +221,8 @@ class PartialTPCalculator:
         total_contracts: float,
         market_params: Dict[str, Any],
         created_at: Optional[float] = None,
-        preferred_mode: Optional[str] = None
+        preferred_mode: Optional[str] = None,
+        sl_price: Optional[float] = None
     ) -> PartialTPPlan:
         """
         Builds a comprehensive PartialTPPlan based on entry, final TP, exchange product parameters,
@@ -295,25 +296,53 @@ class PartialTPCalculator:
         if total_contracts <= 0:
             raise ValueError(f"Total contracts ({total_contracts}) is zero after size_increment alignment.")
 
+        # Minimum notional exchange threshold (e.g. from market_params or default $10.00 / min threshold)
+        min_notional = float(market_params.get("min_notional") or 0.0)
+
         # --- TIER SIZING & ADAPTATION LOGIC ---
         if preferred_mode == "2_TIER":
             # 2-Tier Candidate (50% / 50% with immediate Breakeven on TP1)
             q2 = cls.floor_to_step(0.50 * total_contracts, size_inc)
             rem2 = cls.floor_to_step(total_contracts - q2, size_inc)
 
+            # Check both contract size constraints and notional size constraints.
+            # For SHORT positions, TP price is lower than entry; evaluate notional at min(entry_price, tp_final_price)
+            # with an extra 5% buffer to guarantee neither tier ever falls below exchange min_notional.
+            worst_price = min(entry_price, tp_final_price)
+            notional_q2 = q2 * worst_price
+            notional_rem2 = rem2 * worst_price
+            effective_min_notional = min_notional * 1.05 if min_notional > 0 else 0.0
+
             can_do_2_tier = (
                 q2 >= min_size and
                 rem2 >= min_size and
                 q2 > 0 and
-                rem2 > 0
+                rem2 > 0 and
+                (effective_min_notional <= 0 or (notional_q2 >= effective_min_notional and notional_rem2 >= effective_min_notional))
             )
 
             if can_do_2_tier:
+                # If sl_price is provided, anchor TP1 to tp1_r_mult (default 1.0R, or tuned 0.75R) if within (0, 0.85 * delta_tp)
+                t1_target = get_price_at(0.50)
+                target_sl = sl_price if sl_price is not None else market_params.get("sl_price")
+                if target_sl is not None:
+                    try:
+                        sl_f = float(target_sl)
+                        if sl_f > 0:
+                            r_dist = abs(entry_price - sl_f)
+                            tp1_r_mult = float(market_params.get("tp1_r_mult") or 1.0)
+                            target_r_dist = tp1_r_mult * r_dist
+                            # F-08 Fix: Allow TP1 @ 0.75R-1.0R to activate even on moderate R:R setups (BALANCED 1.73R, MEAN_REVERSION 1.2R)
+                            if 0 < target_r_dist < (0.85 * delta_tp):
+                                t1_target = cls.ceil_to_tick(entry_price + target_r_dist, price_inc) if dir_clean == "LONG" else cls.floor_to_tick(entry_price - target_r_dist, price_inc)
+                    except (ValueError, TypeError):
+                        pass
+
                 tiers = [
                     TPTier(
                         tier_index=1,
                         fraction=0.50,
-                        target_price=get_price_at(0.50),
+                        target_price=t1_target,
                         close_contracts=q2,
                         cumulative_fraction=0.50,
                         is_final=False,
@@ -363,12 +392,17 @@ class PartialTPCalculator:
             # 1. Test 4-tier candidate
             q4 = cls.floor_to_step(0.25 * total_contracts, size_inc)
             rem4 = cls.floor_to_step(total_contracts - (3 * q4), size_inc)
+            worst_price = min(entry_price, tp_final_price)
+            notional_q4 = q4 * worst_price
+            notional_rem4 = rem4 * worst_price
+            effective_min_notional = min_notional * 1.05 if min_notional > 0 else 0.0
 
             can_do_4_tier = (
                 q4 >= min_size and
                 rem4 >= min_size and
                 q4 > 0 and
-                rem4 > 0
+                rem4 > 0 and
+                (effective_min_notional <= 0 or (notional_q4 >= effective_min_notional and notional_rem4 >= effective_min_notional))
             )
 
             if can_do_4_tier:

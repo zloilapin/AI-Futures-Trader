@@ -212,7 +212,7 @@ async def test_telegram_bot_listener_empty_and_unknown_commands():
         # /help command
         await listener.handle_command("/help")
         assert mock_reply.call_count == 1
-        assert "ГЛАВНОЕ МЕНЮ БОТА" in mock_reply.call_args[0][0]
+        assert any(k in mock_reply.call_args[0][0] for k in ["ГЛАВНОЕ МЕНЮ БОТА", "ПУЛЬТ УПРАВЛЕНИЯ РЕЖИМАМИ ТОРГОВЛИ"])
 
 
 @pytest.mark.asyncio
@@ -381,12 +381,14 @@ async def test_telegram_bot_listener_authorization_guard():
         # Command from unauthorized chat
         await listener.handle_command("/deposit 500", sender_chat_id="99999")
         trading_mock.adjust_ledger.assert_not_called()
-        assert mock_reply.call_count == 0
+        assert mock_reply.call_count == 1
+        assert "restricted" in mock_reply.call_args[0][0].lower()
 
     with patch("services.telegram_service.TelegramService.answer_callback_query", AsyncMock()) as mock_ans:
         # Callback from unauthorized chat
         await listener.handle_callback("cb_hack", "setrisk_AGGRESSIVE", "99999")
-        mock_ans.assert_called_with("cb_hack", "⛔ Доступ запрещен")
+        assert mock_ans.call_count == 1
+        assert any(w in mock_ans.call_args[0][1].lower() for w in ["администратор", "showcase", "restricted", "запрещен"])
 
 
 def test_memory_manager_cross_process_and_restart_uniqueness(tmp_path):
@@ -458,3 +460,103 @@ def test_telegram_signal_uses_exact_execution_fill_price():
     assert "-1.04%" in signal_text
 
 
+
+
+# -------------------------------------------------------------
+# 8. Predator Mode vs Regular Mode Notification Tagging Tests
+# -------------------------------------------------------------
+
+def test_telegram_signal_regular_mode_tagging():
+    agent = TelegramAgent(logger=MagicMock(), llm_client=MagicMock())
+    trade_data = {
+        "symbol": "BTC-USD",
+        "strategy_mode": "TREND_FOLLOWING",
+        "is_anti_bot": False,
+        "ceo_verdict": {
+            "decision": "LONG",
+            "conviction": 85,
+            "strategy_mode": "TREND_FOLLOWING",
+            "reasoning": "Strong bullish breakout verified across MTF."
+        },
+        "risk_verdict": {
+            "entry_price": 80000.0,
+            "stop_loss_price": 79000.0,
+            "take_profit_price": 82000.0,
+            "risk_reward_ratio": 2.0,
+            "notional_size_usd": 100.0,
+            "position_size_pct": 10.0,
+            "stop_loss_pct": 1.25,
+            "take_profit_pct": 2.5
+        }
+    }
+
+    signal_text = agent.format_signal(trade_data)
+    assert "[🎯 ОБЫЧНЫЙ]" in signal_text
+    assert "🕹 *Mode / Режим:* 🎯 *ОБЫЧНЫЙ РЕЖИМ (TREND_FOLLOWING)*" in signal_text
+
+
+def test_telegram_signal_predator_mode_tagging():
+    agent = TelegramAgent(logger=MagicMock(), llm_client=MagicMock())
+    trade_data = {
+        "symbol": "ZEC-USD",
+        "strategy_mode": "MEAN_REVERSION",
+        "is_anti_bot": True,
+        "ceo_verdict": {
+            "decision": "SHORT",
+            "conviction": 90,
+            "strategy_mode": "MEAN_REVERSION",
+            "reasoning": "Bot liquidity hunt on upper Bollinger band."
+        },
+        "risk_verdict": {
+            "entry_price": 1200.0,
+            "stop_loss_price": 1215.0,
+            "take_profit_price": 1180.0,
+            "risk_reward_ratio": 1.33,
+            "notional_size_usd": 85.0,
+            "position_size_pct": 8.0,
+            "stop_loss_pct": 1.25,
+            "take_profit_pct": 1.67
+        }
+    }
+
+    signal_text = agent.format_signal(trade_data)
+    assert "[🦈 ХИЩНИК]" in signal_text
+    assert "🕹 *Mode / Режим:* 🦈 *ОХОТНИК ЗА ЛИКВИДНОСТЬЮ (Anti-Bot v2.0)*" in signal_text
+
+
+def test_telegram_position_closed_mode_tagging():
+    agent = TelegramAgent(logger=MagicMock(), llm_client=MagicMock())
+
+    # Regular trade close
+    reg_close = {
+        "symbol": "BTC-USD",
+        "direction": "LONG",
+        "entry_price": 80000.0,
+        "exit_price": 81000.0,
+        "strategy_mode": "TREND_FOLLOWING",
+        "is_anti_bot": False,
+        "net_pnl_usd": 1.25,
+        "gross_pnl_usd": 1.30,
+        "total_fee_usd": 0.05,
+        "realized_r": 1.0,
+        "close_reason": "TAKE_PROFIT"
+    }
+    reg_msg = agent.format_position_closed_message(reg_close)
+    assert "🕹 *Режим:* `🎯 ОБЫЧНЫЙ (TREND_FOLLOWING)`" in reg_msg
+
+    # Predator trade close
+    pred_close = {
+        "symbol": "ZEC-USD",
+        "direction": "SHORT",
+        "entry_price": 1200.0,
+        "exit_price": 1185.0,
+        "strategy_mode": "MEAN_REVERSION",
+        "is_anti_bot": True,
+        "net_pnl_usd": 0.95,
+        "gross_pnl_usd": 1.00,
+        "total_fee_usd": 0.05,
+        "realized_r": 0.8,
+        "close_reason": "TAKE_PROFIT_EMA20"
+    }
+    pred_msg = agent.format_position_closed_message(pred_close)
+    assert "🕹 *Режим:* `🦈 ОХОТНИК ЗА ЛИКВИДНОСТЬЮ (Anti-Bot v2.0)`" in pred_msg

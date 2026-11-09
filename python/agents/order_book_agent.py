@@ -36,14 +36,23 @@ class OrderBookAgent(BaseAgent):
         if spread > 0:
             reason_parts.append(f"Спред {spread:.4f}")
             
-        if imbalance > 0.3:
+        # Refined threshold from 0.30 to 0.15 (compensating for exponential distance weighting)
+        if imbalance >= 0.15:
             signal = "BULLISH"
-            confidence = 60 + int(imbalance * 30)
-            reason_parts.append(f"Значительный перевес объема покупателей (imbalance: {imbalance:.4f}).")
-        elif imbalance < -0.3:
+            if imbalance >= 0.28:
+                confidence = min(85, 75 + int((imbalance - 0.28) * 35))
+                reason_parts.append(f"Агрессивное институциональное доминирование покупателей в стакане (imbalance: {imbalance:.4f}).")
+            else:
+                confidence = min(74, 60 + int((imbalance - 0.15) * 100))
+                reason_parts.append(f"Умеренный перевес объема покупателей в стакане (imbalance: {imbalance:.4f}).")
+        elif imbalance <= -0.15:
             signal = "BEARISH"
-            confidence = 60 + int(abs(imbalance) * 30)
-            reason_parts.append(f"Значительный перевес объема продавцов (imbalance: {imbalance:.4f}).")
+            if imbalance <= -0.28:
+                confidence = min(85, 75 + int((abs(imbalance) - 0.28) * 35))
+                reason_parts.append(f"Агрессивное институциональное доминирование продавцов в стакане (imbalance: {imbalance:.4f}).")
+            else:
+                confidence = min(74, 60 + int((abs(imbalance) - 0.15) * 100))
+                reason_parts.append(f"Умеренный перевес объема продавцов в стакане (imbalance: {imbalance:.4f}).")
         else:
             reason_parts.append(f"Баланс покупателей и продавцов нейтрален (imbalance: {imbalance:.4f})")
             

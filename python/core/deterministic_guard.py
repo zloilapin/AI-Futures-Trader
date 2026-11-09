@@ -1,9 +1,64 @@
 import math
-from typing import Dict, Any, Optional
+from typing import Tuple, Dict, Any, Optional
 from core.models import FinalTradeDecision
 from core.strategy_router import StrategyProfile
 
 class DeterministicGuard:
+    @staticmethod
+    def evaluate_price_drift(
+        symbol: str,
+        direction: str,
+        snapshot_price: float,
+        live_price: float,
+        tp_price: float,
+        sl_price: float
+    ) -> Tuple[bool, float, float, float, str]:
+        """
+        Execution Price Drift Guard & SL/TP Re-anchoring:
+        - For LONG: drift_to_tp_ratio = (live_price - snapshot_price) / (tp_price - snapshot_price)
+        - For SHORT: drift_to_tp_ratio = (snapshot_price - live_price) / (snapshot_price - tp_price)
+        - If drift_to_tp_ratio > 0.38: Cancel entry (R:R degraded)
+        - If drift <= 0.38: Re-anchor SL and TP relative to live_price
+        """
+        dir_clean = str(direction).upper().strip()
+        snapshot_price = float(snapshot_price)
+        live_price = float(live_price) if float(live_price) > 0 else snapshot_price
+        tp_price = float(tp_price)
+        sl_price = float(sl_price)
+
+        if snapshot_price <= 0 or live_price <= 0 or tp_price <= 0:
+            return True, live_price, tp_price, sl_price, f"[PriceDriftGuard] Missing prices for {symbol}, proceeding with defaults"
+
+        if dir_clean == "LONG":
+            tp_dist = tp_price - snapshot_price
+            drift_to_tp_ratio = (live_price - snapshot_price) / tp_dist if tp_dist > 0 else 0.0
+        elif dir_clean == "SHORT":
+            tp_dist = snapshot_price - tp_price
+            drift_to_tp_ratio = (snapshot_price - live_price) / tp_dist if tp_dist > 0 else 0.0
+        else:
+            return True, live_price, tp_price, sl_price, f"[PriceDriftGuard] Non-directional {direction} for {symbol}"
+
+        if drift_to_tp_ratio > 0.38:
+            msg = (
+                f"[PriceDriftGuard] 🚫 Отмена запоздалого входа {symbol} ({dir_clean}): "
+                f"цена уже прошла {drift_to_tp_ratio*100:.1f}% пути к TP пока шел анализ "
+                f"({snapshot_price} -> {live_price}). R:R деградировал."
+            )
+            return False, snapshot_price, tp_price, sl_price, msg
+
+        # Re-anchor SL and TP
+        price_delta = live_price - snapshot_price
+        new_entry = live_price
+        new_tp = round(tp_price + price_delta, 6)
+        new_sl = round(sl_price + price_delta, 6)
+
+        msg = (
+            f"[PriceDriftGuard] ✅ Вход разрешен {symbol} ({dir_clean}): "
+            f"дрейф {drift_to_tp_ratio*100:.1f}% <= 38.0%. "
+            f"SL/TP перепривязаны к live_price ({live_price}) [TP: {tp_price}->{new_tp}, SL: {sl_price}->{new_sl}]."
+        )
+        return True, new_entry, new_tp, new_sl, msg
+
     """
     Deterministic Guard:
     Centralized canonical guard enforcing the immutable trading contract:
@@ -20,6 +75,68 @@ class DeterministicGuard:
         ↓
     Execution Gate (executes strictly if approved)
     """
+
+    @staticmethod
+    def evaluate_trend_exhaustion(
+        direction: str,
+        rsi_15m: float,
+        rsi_1h: float,
+        has_opposing_divergence: bool,
+        ema_stretch_atr: float = 0.0,
+        bb_pos: Optional[float] = None,
+    ) -> dict:
+        """
+        Проверяет истощение тренда и возвращает статус:
+        - ALLOW (полный риск)
+        - SCALE_DOWN (множитель 0.5x, макс. плечо 4.0x)
+        - VETO (блокировка входа TREND_EXHAUSTION_VETO)
+        """
+        direction = str(direction or "").upper()
+
+        if direction == "SHORT":
+            # 1. Жесткое вето: экстремальное дно или бычья дивергенция в зоне перепроданности / у нижней полосы BB
+            if rsi_15m < 24.0 or (has_opposing_divergence and (rsi_15m < 32.0 or (bb_pos is not None and bb_pos <= 15.0))):
+                return {
+                    "action": "VETO",
+                    "reason": f"TREND_EXHAUSTION_VETO: SHORT into extreme oversold (RSI_15m={rsi_15m:.1f}, bb_pos={bb_pos if bb_pos is not None else 'N/A'}, div={has_opposing_divergence})",
+                    "risk_mult": 0.0,
+                    "max_leverage": 0.0,
+                }
+            # 2. Мягкое ограничение: перепроданность 15m + подтверждение зрелости тренда на 1H или по ATR
+            is_mature_downtrend = (rsi_1h < 36.0) or (ema_stretch_atr > 2.2)
+            if rsi_15m < 30.0 and is_mature_downtrend:
+                return {
+                    "action": "SCALE_DOWN",
+                    "reason": f"TREND_EXHAUSTION_SCALE: Mature SHORT (RSI_15m={rsi_15m:.1f}, RSI_1h={rsi_1h:.1f})",
+                    "risk_mult": 0.50,
+                    "max_leverage": 4.0,
+                }
+
+        elif direction == "LONG":
+            # 1. Жесткое вето: экстремальная вершина или медвежья дивергенция в зоне перекупленности / у верхней полосы BB
+            if rsi_15m > 76.0 or (has_opposing_divergence and (rsi_15m > 68.0 or (bb_pos is not None and bb_pos >= 85.0))):
+                return {
+                    "action": "VETO",
+                    "reason": f"TREND_EXHAUSTION_VETO: LONG into extreme overbought (RSI_15m={rsi_15m:.1f}, bb_pos={bb_pos if bb_pos is not None else 'N/A'}, div={has_opposing_divergence})",
+                    "risk_mult": 0.0,
+                    "max_leverage": 0.0,
+                }
+            # 2. Мягкое ограничение: перекупленность 15m + подтверждение зрелости тренда
+            is_mature_uptrend = (rsi_1h > 64.0) or (ema_stretch_atr > 2.2)
+            if rsi_15m > 70.0 and is_mature_uptrend:
+                return {
+                    "action": "SCALE_DOWN",
+                    "reason": f"TREND_EXHAUSTION_SCALE: Mature LONG (RSI_15m={rsi_15m:.1f}, RSI_1h={rsi_1h:.1f})",
+                    "risk_mult": 0.50,
+                    "max_leverage": 4.0,
+                }
+
+        return {
+            "action": "ALLOW",
+            "reason": "Trend momentum healthy",
+            "risk_mult": 1.0,
+            "max_leverage": None,
+        }
 
     @staticmethod
     def evaluate(
@@ -112,17 +229,89 @@ class DeterministicGuard:
                 breakout_reason = f"пробой Donchian Low ({donchian_low}) с объемом {vol_spike:.1f}%"
 
         if is_confirmed_breakout and trade_action == "WAIT_FOR_PULLBACK" and conviction >= min_conv and decision in ["LONG", "SHORT"]:
-            trade_action = "ENTER"
-            vm_msg = f"Подтвержденный импульс и пробой ({breakout_reason}). Вход по стратегии {strategy_mode} без ожидания отката."
-            try:
-                print(f"⚡ [Breakout Override] {symbol}: {vm_msg}")
-            except (UnicodeEncodeError, Exception):
+            # Only override WAIT_FOR_PULLBACK if entry quality is solid (>= 72%) to avoid buying the top of an overextended move
+            if entry_qual >= 72:
+                trade_action = "ENTER"
+                vm_msg = f"Подтвержденный импульс и пробой ({breakout_reason}, EntryQuality={entry_qual}% >= 72%). Вход по стратегии {strategy_mode} без ожидания отката."
                 try:
-                    print(f"[Breakout Override] {symbol}: {vm_msg.encode('ascii', errors='replace').decode('ascii')}")
+                    print(f"⚡ [Breakout Override] {symbol}: {vm_msg}")
+                except (UnicodeEncodeError, Exception):
+                    try:
+                        print(f"[Breakout Override] {symbol}: {vm_msg.encode('ascii', errors='replace').decode('ascii')}")
+                    except Exception:
+                        pass
+                if logger:
+                    logger.info(f"[System_Core] {vm_msg}")
+            else:
+                vm_msg = f"⏸️ [Breakout Guard] {symbol}: Пробой подтвержден ({breakout_reason}), но EntryQuality ({entry_qual}%) < 72%. Оставляем WAIT_FOR_PULLBACK для защиты от Bull/Bear Trap."
+                try:
+                    print(f"⏸️ [Breakout Guard] {symbol}: {vm_msg}")
                 except Exception:
                     pass
+                if logger:
+                    logger.info(f"[System_Core] {vm_msg}")
+
+        # 2.4. VOLUME_EXPLOSION Guard Rule: Volume Expansion (>=250.0%)
+        # When volume spikes >=250% on high directional confidence (>=75%) and safe RSI (<78 for LONG, >22 for SHORT),
+        # market is in explosive expansion where waiting for pullback guarantees a missed trade.
+        # Guards: Check for Climax Top / Exhaustion Wick and SL distance cap.
+        from core.config import get_tuned_param
+        tuned_reduce_floor = get_tuned_param("min_reduce_size_conv", 71.0)
+
+        has_exhaustion_wick = False
+        candles_list = (market_data.get("price_data") or {}).get("candles_20") or [] if market_data else []
+        cur_px = float((market_data.get("price_data") or {}).get("current_price") or 0.0) if market_data else 0.0
+        if cur_px <= 0 and market_data:
+            cur_px = float((market_data.get("indicators") or {}).get("current_price") or 0.0)
+
+        if candles_list and cur_px > 0:
+            latest_c = candles_list[-1]
+            try:
+                c_high = float(latest_c.get("high") or cur_px)
+                c_low = float(latest_c.get("low") or cur_px)
+                c_range = c_high - c_low
+                if c_range > 0:
+                    c_pos = (cur_px - c_low) / c_range
+                    if decision == "LONG" and c_pos < 0.65:
+                        has_exhaustion_wick = True
+                    elif decision == "SHORT" and c_pos > 0.35:
+                        has_exhaustion_wick = True
+            except (ValueError, TypeError):
+                pass
+
+        # Check structural SL distance cap (max 3.5% to prevent entering at exhausted wick tops)
+        sl_px = float(ceo_proposal.get("sl_price") or 0.0)
+        if cur_px > 0 and sl_px > 0:
+            if abs(cur_px - sl_px) / cur_px > 0.035:
+                has_exhaustion_wick = True
+
+        vol_spike_val = float((market_data.get("indicators") or {}).get("volume_spike_pct") or 0.0) if market_data else 0.0
+        rsi_val = float((market_data.get("indicators") or {}).get("rsi_14") or 50.0) if market_data else 50.0
+        is_rsi_safe = (rsi_val < 78.0) if decision == "LONG" else (rsi_val > 22.0)
+        is_volume_explosion = (
+            vol_spike_val >= 250.0
+            and dir_conf >= max(75.0, float(min_conv))
+            and is_rsi_safe
+            and not has_exhaustion_wick
+        )
+
+        volume_explosion_triggered = False
+        if is_volume_explosion and trade_action in ["WAIT_FOR_PULLBACK", "HOLD"] and decision in ["LONG", "SHORT"]:
+            trade_action = "REDUCE_SIZE"
+            entry_qual = max(float(entry_qual or 0), tuned_reduce_floor)
+            conviction = max(float(conviction or 0), tuned_reduce_floor)
+            is_actionable = True
+            guard_status = "PASSED"
+            volume_explosion_triggered = True
+            ceo_proposal["volume_explosion_override"] = True
+            ceo_proposal["action_size_mult_override"] = 0.50
+            ve_msg = (
+                f"🚀 [Volume Explosion] {symbol}: Всплеск объема {vol_spike_val:.1f}% (>=250%), "
+                f"DirConf={dir_conf}%, RSI={rsi_val:.1f}. Оверрайд WAIT_FOR_PULLBACK -> REDUCE_SIZE (0.5x по рынку)."
+            )
+            print(ve_msg)
             if logger:
-                logger.info(f"[System_Core] {vm_msg}")
+                logger.info(f"[System_Core] {ve_msg}")
 
         # 2.5. Disputed Arbitration Guard: Never allow full ENTER on disputed setups
         if ceo_proposal.get("disputed_arbitration") and trade_action == "ENTER":
@@ -131,24 +320,40 @@ class DeterministicGuard:
             if logger:
                 logger.info(f"[System_Core] {da_msg}")
 
-        # 2.6. Pullback Retest Promotion: If pullback setup reached target, promote to ENTER
+        # 2.6. Pullback Retest Promotion: If pullback setup reached target, promote to ENTER or REDUCE_SIZE
         is_pullback_retest = bool(
             ceo_proposal.get("is_pullback_retest") or 
             (market_data and market_data.get("is_pullback_retest"))
         )
-        if is_pullback_retest and trade_action == "WAIT_FOR_PULLBACK" and conviction >= min_conv and decision in ["LONG", "SHORT"] and entry_qual >= 60:
-            trade_action = "ENTER"
-            retest_msg = f"Откат к целевой зоне подтверждён (PULLBACK_RETEST). Вход по направлению {decision} без повторного ожидания."
-            print(f"🎯 [Pullback Retest Confirmed] {symbol}: {retest_msg}")
-            if logger:
-                logger.info(f"[System_Core] {retest_msg}")
+        if is_pullback_retest and trade_action == "WAIT_FOR_PULLBACK" and dir_conf >= min_conv and decision in ["LONG", "SHORT"]:
+            effective_eq = max(entry_qual, dir_conf - 10)
+            if effective_eq >= 60:
+                entry_qual = effective_eq
+                trade_action = "REDUCE_SIZE" if entry_qual < min_conv else "ENTER"
+                conviction = max(conviction, min_conv)
+                retest_msg = f"Откат к целевой зоне подтверждён (PULLBACK_RETEST). Вход по направлению {decision} ({trade_action}, EQ={entry_qual}%) без повторного ожидания."
+                print(f"🎯 [Pullback Retest Confirmed] {symbol}: {retest_msg}")
+                if logger:
+                    logger.info(f"[System_Core] {retest_msg}")
 
         # 2.7. Debate Completeness Guard: Block regular entries when analytical debate is degraded
         debate_status = ceo_proposal.get("debate_status", "COMPLETE")
         if debate_status in ["DEGRADED_BULL_FAILED", "DEGRADED_BEAR_FAILED", "FAILED"] and decision in ["LONG", "SHORT"]:
-            # If the debate is degraded due to LLM analyst failure, ordinary trades are blocked
-            # Only allowed if there is a mathematically confirmed breakout with volume spike
-            if not is_confirmed_breakout:
+            from core.config import config
+            is_anti_bot_mr = bool(getattr(config, "ANTI_BOT_MODE", False) or strategy_mode == "MEAN_REVERSION")
+            if is_confirmed_breakout:
+                bypass_msg = f"⚠️ [Debate Guard Bypass] Неполные дебаты ({debate_status}), но подтверждён механический импульсный прорыв ({breakout_reason}). Вход разрешён по правилу исключения Breakout."
+                print(bypass_msg)
+                if logger:
+                    logger.warning(f"[Pipeline] {bypass_msg}")
+                reasoning_en = f"{reasoning_en}\n\n{bypass_msg}".strip()
+            elif is_anti_bot_mr:
+                bypass_msg = f"🦈 [Debate Guard Bypass] Неполные дебаты ({debate_status}), но активен Anti-Bot Predator Mode ({strategy_mode}). Вход разрешён по правилу институционального перехвата ликвидности."
+                print(bypass_msg)
+                if logger:
+                    logger.warning(f"[Pipeline] {bypass_msg}")
+                reasoning_en = f"{reasoning_en}\n\n{bypass_msg}".strip()
+            else:
                 guard_msg = f"🛡️ [Debate Guard] Дебаты оппонентов неполные ({debate_status}). Вход заблокирован детерминированным гардом (требуется полноценный двусторонний анализ)."
                 print(guard_msg)
                 if logger:
@@ -160,12 +365,6 @@ class DeterministicGuard:
                 rejection_tag = "INCOMPLETE_DEBATE"
                 guard_reason = guard_msg
                 reasoning_en = f"{reasoning_en}\n\n{guard_msg}".strip()
-            else:
-                bypass_msg = f"⚠️ [Debate Guard Bypass] Неполные дебаты ({debate_status}), но подтверждён механический импульсный прорыв ({breakout_reason}). Вход разрешён по правилу исключения Breakout."
-                print(bypass_msg)
-                if logger:
-                    logger.warning(f"[Pipeline] {bypass_msg}")
-                reasoning_en = f"{reasoning_en}\n\n{bypass_msg}".strip()
 
         # 3. Actionability, Conviction & Pullback Checks
         is_actionable = True
@@ -175,10 +374,19 @@ class DeterministicGuard:
             rejection_tag = rejection_tag or ceo_proposal.get("hold_category", "CEO_HOLD")
             guard_reason = f"Пропущен из-за решения CEO ({decision})" if not rejection_tag or rejection_tag == "CEO_HOLD" else guard_reason
         elif trade_action == "WAIT_FOR_PULLBACK":
-            is_actionable = False
-            guard_status = "PULLBACK_WATCHLIST"
-            rejection_tag = "WAIT_FOR_PULLBACK"
-            guard_reason = f"WAIT_FOR_PULLBACK: Цена оторвана от базы (Качество входа {entry_qual}% < 70% при уверенности тренда {dir_conf}%). Сетап зарегистрирован в Pullback Watchlist для непрерывного мониторинга отката."
+            from core.config import config
+            if getattr(config, "ANTI_BOT_MODE", False) and strategy_mode == "MEAN_REVERSION":
+                trade_action = "ENTER"
+                if entry_qual < 70:
+                    entry_qual = 75.0
+                conviction = max(float(conviction or 0), float(min_conv))
+                if logger:
+                    logger.info(f"[System_Core] 🦈 [Anti-Bot] Оверрайд WAIT_FOR_PULLBACK -> ENTER: вход на пике истощения ботов.")
+            else:
+                is_actionable = False
+                guard_status = "PULLBACK_WATCHLIST"
+                rejection_tag = "WAIT_FOR_PULLBACK"
+                guard_reason = f"WAIT_FOR_PULLBACK: Цена оторвана от базы (Качество входа {entry_qual}% < 70% при уверенности тренда {dir_conf}%). Сетап зарегистрирован в Pullback Watchlist для непрерывного мониторинга отката."
         elif entry_qual < 60:
             # Rule: Не снижать порог с 60% просто ради увеличения числа сделок.
             # Если вход запоздал, правильное действие — дождаться нового сетапа или пропустить сделку, а не принудительно открыть позицию.
@@ -186,11 +394,27 @@ class DeterministicGuard:
             guard_status = "BLOCKED"
             rejection_tag = "POOR_ENTRY_QUALITY"
             guard_reason = f"Низкое качество входа: Entry Quality ({entry_qual}% < 60%). Вход запоздал или несет невыгодный Risk/Reward. Принудительное открытие запрещено."
-        elif conviction < min_conv:
-            is_actionable = False
-            guard_status = "BLOCKED"
-            rejection_tag = "LOW_CONFIDENCE"
-            guard_reason = f"Пропущен из-за фильтра CEO (Уверенность {conviction}% < {min_conv}%)"
+        else:
+            is_retest = bool(ceo_proposal.get("is_pullback_retest") or (strategy_profile and "RETEST" in getattr(strategy_profile, "reasoning", "")))
+
+            # Calibrated min_reduce_size_conv with safeguard for PullbackRadar
+            from core.config import get_tuned_param
+            tuned_min_reduce_conv = get_tuned_param("min_reduce_size_conv", 71.0)
+            # Safeguard 1: Confirmed pullbacks retain preferential corridor max(62.0, tuned - 6.0) (e.g. 65.0%)
+            effective_reduce_threshold = max(62.0, tuned_min_reduce_conv - 6.0) if is_retest else tuned_min_reduce_conv
+
+            if trade_action == "ENTER" and conviction < min_conv and conviction >= effective_reduce_threshold:
+                trade_action = "REDUCE_SIZE"
+                clamp_msg = f"Понижение с ENTER до REDUCE_SIZE: уверенность ({conviction}%) ниже min_conv ({min_conv}%), но >= {effective_reduce_threshold:.1f}%."
+                if logger:
+                    logger.info(f"[System_Core] {clamp_msg}")
+
+            effective_min_conv = min(float(min_conv), effective_reduce_threshold) if (trade_action == "REDUCE_SIZE" or is_retest) else float(min_conv)
+            if conviction < effective_min_conv:
+                is_actionable = False
+                guard_status = "BLOCKED"
+                rejection_tag = "LOW_CONFIDENCE"
+                guard_reason = f"Пропущен из-за фильтра CEO (Уверенность {conviction}% < {effective_min_conv:.0f}%)"
 
         # 4. Funding Rate Gate (Deterministic derivative protection)
         if is_actionable and market_data:
@@ -237,90 +461,233 @@ class DeterministicGuard:
             trend_1h = mtf_data.get("trend_1h", "")
             vol_spike = float(indicators.get("volume_spike_pct") or 0.0)
             algo_signals = indicators.get("algo_signals") or {}
-            rsi_div = algo_signals.get("rsi_divergence", "")
+            raw_rsi_div = str(algo_signals.get("rsi_divergence") or "").strip().lower()
+            rsi_div = raw_rsi_div.upper()
 
-            # If MTF is aligned with volume momentum, or trending strongly without contrary divergence,
-            # it is legitimate trend continuation (NOT a chop whipsaw).
-            is_trend_continuation_short = (
-                (mtf_alignment == "FULL_ALIGNMENT" or (trend_1h == "BEARISH" and vol_spike >= 100.0))
-                and rsi_div != "BULLISH"
-                and (rsi is None or rsi >= 20.0)  # Allow trend short unless it is a catastrophic panic climax (RSI < 20)
-            )
+            trend_15m = mtf_data.get("trend_15m", "")
 
-            is_trend_continuation_long = (
-                (mtf_alignment == "FULL_ALIGNMENT" or (trend_1h == "BULLISH" and vol_spike >= 100.0))
-                and rsi_div != "BEARISH"
-                and (rsi is None or rsi <= 80.0)  # Allow trend long unless it is a blow-off top climax (RSI > 80)
-            )
-            
-            if decision == "SHORT":
-                is_extended = (rsi is not None and rsi < 35.0) or (bb_pos is not None and bb_pos < 10.0)
-                if is_extended and not is_trend_continuation_short:
+            # 1H RSI extraction (from mtf_data or nested tf_1h if present)
+            raw_rsi_1h = None
+            if "rsi_1h" in mtf_data:
+                raw_rsi_1h = mtf_data.get("rsi_1h")
+            elif "indicators_1h" in mtf_data and isinstance(mtf_data["indicators_1h"], dict):
+                raw_rsi_1h = mtf_data["indicators_1h"].get("rsi_14")
+            elif "tf_1h" in mtf_data and isinstance(mtf_data["tf_1h"], dict):
+                raw_rsi_1h = mtf_data["tf_1h"].get("rsi_14")
+            rsi_1h = float(raw_rsi_1h) if raw_rsi_1h is not None else None
+
+            # Price stretch from EMA-20 measured in ATR units
+            price_data = market_data.get("price_data") or {}
+            curr_px = float(price_data.get("current_price") or indicators.get("current_price") or 0.0)
+            ema_20 = float(indicators.get("ema_20") or 0.0)
+            atr_14 = float(indicators.get("atr_14") or 0.0)
+            ema_stretch_atr = (abs(curr_px - ema_20) / atr_14) if (atr_14 > 0 and ema_20 > 0 and curr_px > 0) else 0.0
+
+            # 5.1 Deterministic Trend Exhaustion Evaluation (Two-Zone Model)
+            if rsi is not None and decision in ["LONG", "SHORT"]:
+                has_opposing_div = (decision == "SHORT" and raw_rsi_div == "bullish") or (decision == "LONG" and raw_rsi_div == "bearish")
+                exhaustion = DeterministicGuard.evaluate_trend_exhaustion(
+                    direction=decision,
+                    rsi_15m=rsi,
+                    rsi_1h=rsi_1h if rsi_1h is not None else (30.0 if (decision == "SHORT" and trend_1h == "BEARISH") else (70.0 if (decision == "LONG" and trend_1h == "BULLISH") else 50.0)),
+                    has_opposing_divergence=has_opposing_div,
+                    ema_stretch_atr=ema_stretch_atr,
+                    bb_pos=bb_pos
+                )
+
+                if exhaustion["action"] == "VETO":
                     is_actionable = False
                     guard_status = "BLOCKED"
-                    rejection_tag = "EXTREME_EXTENSION_VETO"
-                    rsi_str = f"RSI={rsi:.1f}" if rsi is not None else "RSI=N/A"
-                    bb_str = f"bb_pos={bb_pos:.1f}%" if bb_pos is not None else "bb_pos=N/A"
-                    guard_reason = f"Анти-распил: Запрет SHORT в перепроданный рынок без подтверждения тренда ({rsi_str}, {bb_str}). Риск отскока слишком высок."
+                    rejection_tag = "TREND_EXHAUSTION_VETO"
+                    guard_reason = exhaustion["reason"]
                     try:
                         print(f"⏸️ Пропуск {symbol}. {guard_reason}")
                     except UnicodeEncodeError:
                         pass
                     if logger:
                         logger.info(f"[System_Core] {guard_reason}")
-                        
-            elif decision == "LONG":
-                is_extended = (rsi is not None and rsi > 65.0) or (bb_pos is not None and bb_pos > 90.0)
-                if is_extended and not is_trend_continuation_long:
-                    is_actionable = False
-                    guard_status = "BLOCKED"
-                    rejection_tag = "EXTREME_EXTENSION_VETO"
-                    rsi_str = f"RSI={rsi:.1f}" if rsi is not None else "RSI=N/A"
-                    bb_str = f"bb_pos={bb_pos:.1f}%" if bb_pos is not None else "bb_pos=N/A"
-                    guard_reason = f"Анти-распил: Запрет LONG в перекупленный рынок без подтверждения тренда ({rsi_str}, {bb_str}). Риск коррекции слишком высок."
-                    try:
-                        print(f"⏸️ Пропуск {symbol}. {guard_reason}")
-                    except UnicodeEncodeError:
-                        pass
-                    if logger:
-                        logger.info(f"[System_Core] {guard_reason}")
 
-        # 5.2. Climatic Breakout Protection: Avoid buying the absolute tip of a wick when RSI is parabolic
-        if is_actionable and market_data and strategy_mode == "BREAKOUT":
+                elif exhaustion["action"] == "SCALE_DOWN" and is_actionable:
+                    # Soft Exhaustion: Enforce REDUCE_SIZE and 4x leverage cap without double-penalizing risk
+                    trade_action = "REDUCE_SIZE"
+                    ceo_proposal["exhaustion_scale"] = True
+                    ceo_proposal["max_leverage_override"] = exhaustion.get("max_leverage", 4.0)
+                    ceo_proposal["risk_mult_override"] = exhaustion.get("risk_mult", 0.50)
+                    if logger:
+                        logger.info(f"[System_Core] ⚠️ {exhaustion['reason']} -> Clamped trade_action=REDUCE_SIZE, max_leverage=4.0x")
+
+            # 5.2 Classic Anti-Whipsaw Extension Guard (Prevent counter-trend chops / extreme extensions)
+            from core.config import config
+            is_anti_bot_mr = bool(getattr(config, "ANTI_BOT_MODE", False) and strategy_mode == "MEAN_REVERSION")
+            if is_actionable and not is_anti_bot_mr:
+                has_macro_trend = (mtf_alignment == "FULL_ALIGNMENT") or (
+                    (mtf_alignment not in ["MIXED_CHOP", "TRANSITION"]) and (dir_conf >= 80)
+                )
+                is_trend_continuation_short = (
+                    (
+                        has_macro_trend
+                        or (trend_1h == "BEARISH" and vol_spike >= 100.0)
+                        or (trend_15m == "BEARISH" and vol_spike >= 150.0)
+                    )
+                    and (rsi is None or rsi >= 24.0 or (has_macro_trend and rsi >= 20.0))
+                )
+
+                is_trend_continuation_long = (
+                    (
+                        has_macro_trend
+                        or (trend_1h == "BULLISH" and vol_spike >= 100.0)
+                        or (trend_15m == "BULLISH" and vol_spike >= 150.0)
+                    )
+                    and (rsi is None or rsi <= 76.0 or (has_macro_trend and rsi <= 80.0))
+                )
+                
+                if decision == "SHORT":
+                    # Hard veto on true extreme extension (RSI < 24.0 or (RSI < 32.0 with opposing bullish divergence))
+                    is_extreme_short = (rsi is not None and rsi < 24.0) or (rsi is not None and rsi < 32.0 and rsi_div == "BULLISH")
+                    is_extended = (rsi is not None and rsi < 35.0) or (bb_pos is not None and bb_pos < 10.0)
+                    if (is_extreme_short and not (has_macro_trend and rsi >= 20.0)) or (is_extended and not is_trend_continuation_short and exhaustion.get("action") != "SCALE_DOWN"):
+                        is_actionable = False
+                        guard_status = "BLOCKED"
+                        rejection_tag = "EXTREME_EXTENSION_VETO"
+                        rsi_str = f"RSI={rsi:.1f}" if rsi is not None else "RSI=N/A"
+                        bb_str = f"bb_pos={bb_pos:.1f}%" if bb_pos is not None else "bb_pos=N/A"
+                        guard_reason = f"Анти-распил: Запрет SHORT в перепроданный рынок без подтверждения тренда ({rsi_str}, {bb_str}). Риск отскока слишком высок."
+                        try:
+                            print(f"⏸️ Пропуск {symbol}. {guard_reason}")
+                        except UnicodeEncodeError:
+                            pass
+                        if logger:
+                            logger.info(f"[System_Core] {guard_reason}")
+                            
+                elif decision == "LONG":
+                    # Hard veto on true extreme extension (RSI > 76.0 or (RSI > 68.0 with opposing bearish divergence))
+                    is_extreme_long = (rsi is not None and rsi > 76.0) or (rsi is not None and rsi > 68.0 and rsi_div == "BEARISH")
+                    is_extended = (rsi is not None and rsi > 65.0) or (bb_pos is not None and bb_pos > 90.0)
+                    if (is_extreme_long and not (has_macro_trend and rsi <= 80.0)) or (is_extended and not is_trend_continuation_long and exhaustion.get("action") != "SCALE_DOWN"):
+                        is_actionable = False
+                        guard_status = "BLOCKED"
+                        rejection_tag = "EXTREME_EXTENSION_VETO"
+                        rsi_str = f"RSI={rsi:.1f}" if rsi is not None else "RSI=N/A"
+                        bb_str = f"bb_pos={bb_pos:.1f}%" if bb_pos is not None else "bb_pos=N/A"
+                        guard_reason = f"Анти-распил: Запрет LONG в перекупленный рынок без подтверждения тренда ({rsi_str}, {bb_str}). Риск коррекции слишком высок."
+                        try:
+                            print(f"⏸️ Пропуск {symbol}. {guard_reason}")
+                        except UnicodeEncodeError:
+                            pass
+                        if logger:
+                            logger.info(f"[System_Core] {guard_reason}")
+
+        # 5.2. Climatic Breakout & Overextension Protection: Avoid buying the tip of an overextended wave
+        if is_actionable and market_data and strategy_mode in ["BREAKOUT", "VOLATILITY_MOMENTUM"]:
             indicators = market_data.get("indicators") or {}
             raw_rsi = indicators.get("rsi_14")
             rsi = float(raw_rsi) if raw_rsi is not None else None
-            if rsi is not None:
-                if decision == "LONG" and rsi > 80.0:
+            ema_20 = float(indicators.get("ema_20") or 0.0)
+            atr_14 = float(indicators.get("atr_14") or indicators.get("atr") or 0.0)
+            bb_pos = float(indicators.get("bb_position_pct", indicators.get("bb_pos", 50.0)) or 50.0)
+            cur_px = float((market_data.get("price_data") or {}).get("current_price") or indicators.get("current_price") or 0.0)
+            ema_stretch_atr = (abs(cur_px - ema_20) / atr_14) if (atr_14 > 0 and ema_20 > 0 and cur_px > 0) else 0.0
+
+            if decision == "LONG":
+                if rsi is not None and rsi > 80.0:
                     trade_action = "WAIT_FOR_PULLBACK"
                     is_actionable = False
                     guard_status = "PULLBACK_WATCHLIST"
                     rejection_tag = "WAIT_FOR_PULLBACK"
-                    guard_reason = f"Климатический пробой: RSI={rsi:.1f} > 80. Покупка вершины свечи запрещена. Переведено в WAIT_FOR_PULLBACK для входа на ретесте уровня."
-                    if logger:
-                        logger.info(f"[System_Core] {guard_reason}")
-                elif decision == "SHORT" and rsi < 20.0:
+                    guard_reason = f"Климатический пробой: RSI={rsi:.1f} > 80. Покупка вершины свечи запрещена. Переведено в WAIT_FOR_PULLBACK."
+                elif ema_stretch_atr > 3.2 and (bb_pos > 130.0 or (rsi is not None and rsi > 74.0)):
                     trade_action = "WAIT_FOR_PULLBACK"
                     is_actionable = False
                     guard_status = "PULLBACK_WATCHLIST"
                     rejection_tag = "WAIT_FOR_PULLBACK"
-                    guard_reason = f"Климатический пробой: RSI={rsi:.1f} < 20. Продажа дна паники запрещена. Переведено в WAIT_FOR_PULLBACK для входа на ретесте уровня."
-                    if logger:
-                        logger.info(f"[System_Core] {guard_reason}")
+                    guard_reason = (
+                        f"Запоздалый пробой (Overextended Breakout): Цена оторвалась от EMA-20 на {ema_stretch_atr:.1f}x ATR (>3.2x) "
+                        f"при bb_pos={bb_pos:.1f}%, RSI={(rsi if rsi is not None else 0.0):.1f}. Вход вдогонку запрещен -> WAIT_FOR_PULLBACK."
+                    )
+                if not is_actionable and logger:
+                    logger.info(f"[System_Core] {guard_reason}")
+            elif decision == "SHORT":
+                if rsi is not None and rsi < 20.0:
+                    trade_action = "WAIT_FOR_PULLBACK"
+                    is_actionable = False
+                    guard_status = "PULLBACK_WATCHLIST"
+                    rejection_tag = "WAIT_FOR_PULLBACK"
+                    guard_reason = f"Климатический пробой: RSI={rsi:.1f} < 20. Продажа дна паники запрещена. Переведено в WAIT_FOR_PULLBACK."
+                elif ema_stretch_atr > 3.2 and (bb_pos < -30.0 or (rsi is not None and rsi < 26.0)):
+                    trade_action = "WAIT_FOR_PULLBACK"
+                    is_actionable = False
+                    guard_status = "PULLBACK_WATCHLIST"
+                    rejection_tag = "WAIT_FOR_PULLBACK"
+                    guard_reason = (
+                        f"Запоздалый пробой (Overextended Breakdown): Цена оторвалась от EMA-20 на {ema_stretch_atr:.1f}x ATR (>3.2x) "
+                        f"при bb_pos={bb_pos:.1f}%, RSI={(rsi if rsi is not None else 0.0):.1f}. Вход вдогонку запрещен -> WAIT_FOR_PULLBACK."
+                    )
+                if not is_actionable and logger:
+                    logger.info(f"[System_Core] {guard_reason}")
+
+        # 5.3. Anti-Chase Guard for TREND_FOLLOWING: Prohibit market ENTER on outer third of Bollinger Band
+        if is_actionable and market_data and strategy_mode == "TREND_FOLLOWING" and trade_action in ["ENTER", "REDUCE_SIZE"]:
+            indicators = market_data.get("indicators") or {}
+            raw_rsi = indicators.get("rsi_14", indicators.get("rsi"))
+            rsi_val = float(raw_rsi) if raw_rsi is not None else None
+            bb_pos_val = float(indicators.get("bb_position_pct", indicators.get("bb_pos", 50.0)) or 50.0)
+
+            if decision == "SHORT" and bb_pos_val < 30.0 and (rsi_val is not None and rsi_val < 40.0):
+                trade_action = "WAIT_FOR_PULLBACK"
+                is_actionable = False
+                guard_status = "PULLBACK_WATCHLIST"
+                rejection_tag = "WAIT_FOR_PULLBACK"
+                guard_reason = (
+                    f"Anti-Chase Guard: TREND_FOLLOWING SHORT в нижней трети канала Боллинджера "
+                    f"(bb_pos={bb_pos_val:.1f}% < 30.0%, RSI={rsi_val:.1f} < 40.0). Вход по рынку запрещен -> WAIT_FOR_PULLBACK к EMA-20."
+                )
+                if logger:
+                    logger.info(f"[System_Core] {guard_reason}")
+            elif decision == "LONG" and bb_pos_val > 70.0 and (rsi_val is not None and rsi_val > 60.0):
+                trade_action = "WAIT_FOR_PULLBACK"
+                is_actionable = False
+                guard_status = "PULLBACK_WATCHLIST"
+                rejection_tag = "WAIT_FOR_PULLBACK"
+                guard_reason = (
+                    f"Anti-Chase Guard: TREND_FOLLOWING LONG в верхней трети канала Боллинджера "
+                    f"(bb_pos={bb_pos_val:.1f}% > 70.0%, RSI={rsi_val:.1f} > 60.0). Вход по рынку запрещен -> WAIT_FOR_PULLBACK к EMA-20."
+                )
+                if logger:
+                    logger.info(f"[System_Core] {guard_reason}")
+
+        # Anti-Bot Predator Mode: Bypass ANALYST_DISAGREEMENT and COUNTER_ANALYST_VETO for MEAN_REVERSION
+        from core.config import config
+        is_anti_bot_mr = bool(getattr(config, "ANTI_BOT_MODE", False) or strategy_mode == "MEAN_REVERSION")
+        if is_anti_bot_mr:
+            if rejection_tag in ["ANALYST_DISAGREEMENT", "COUNTER_ANALYST_VETO"] or ceo_proposal.get("hold_category") in ["ANALYST_DISAGREEMENT", "COUNTER_ANALYST_VETO"]:
+                rejection_tag = None
+                if decision in ["LONG", "SHORT"]:
+                    is_actionable = True
+                    guard_status = "PASSED"
+                    guard_reason = "Passed deterministic guard (Anti-Bot Predator bypass of analyst disagreement)."
 
         # Synchronize back to ceo_proposal dict for backward compatibility
         if symbol:
             ceo_proposal["symbol"] = symbol
         ceo_proposal["decision"] = decision
         ceo_proposal["conviction"] = conviction
+        ceo_proposal["entry_quality"] = entry_qual
+        ceo_proposal["directional_confidence"] = dir_conf
         ceo_proposal["trade_action"] = trade_action
         ceo_proposal["is_actionable"] = is_actionable
         ceo_proposal["guard_status"] = guard_status
         ceo_proposal["reasoning_en"] = reasoning_en
         if rejection_tag:
             ceo_proposal["rejection_tag"] = rejection_tag
-            if decision == "HOLD":
-                ceo_proposal["hold_category"] = rejection_tag
+        if decision == "HOLD":
+            if raw_decision == "HOLD":
+                guard_status = "HOLD"
+                guard_reason = "CEO decided HOLD (No actionable edge)"
+                if not rejection_tag:
+                    rejection_tag = "CEO_HOLD"
+            else:
+                guard_status = "BLOCKED"
+            ceo_proposal["hold_category"] = rejection_tag or "CEO_HOLD"
 
         return FinalTradeDecision(
             symbol=symbol,
@@ -339,5 +706,10 @@ class DeterministicGuard:
             reasoning_en=reasoning_en,
             reasoning_ru=reasoning_ru,
             raw_ceo_verdict=ceo_proposal,
-            conviction_for_risk=float(ceo_proposal.get("conviction_for_risk", conviction) or conviction)
+            conviction_for_risk=float(ceo_proposal.get("conviction_for_risk", conviction) or conviction),
+            volume_explosion_override=volume_explosion_triggered,
+            action_size_mult_override=0.50 if volume_explosion_triggered else None
         )
+
+
+DeterministicGuard.validate = DeterministicGuard.evaluate

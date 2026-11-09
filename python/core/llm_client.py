@@ -56,12 +56,12 @@ class LLMClient:
         
         # If an explicit provider is requested, put it first in the queue
         if provider == "openrouter" and self.openrouter_key and not self.openrouter_key.startswith("your_"):
-            self._available_providers.append({"provider": "openrouter", "model": model_name or os.getenv("OPENROUTER_MODEL", "poolside/laguna-s-2.1:free")})
+            self._available_providers.append({"provider": "openrouter", "model": model_name or os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-chat")})
             # Fallback на модели из конфигурации
             fallback_free_models = [
-                os.getenv("OPENROUTER_MODEL_CEO", "qwen/qwen3.8-flash"),
-                os.getenv("OPENROUTER_MODEL_CHEAP", "deepseek/deepseek-v4.1-flash"),
-                os.getenv("OPENROUTER_MODEL_ESCALATION", "z-ai/glm-5.3")
+                os.getenv("OPENROUTER_MODEL_CEO", "deepseek/deepseek-chat"),
+                os.getenv("OPENROUTER_MODEL_CHEAP", "google/gemini-2.5-flash-lite"),
+                os.getenv("OPENROUTER_MODEL_ESCALATION", "meta-llama/llama-3.3-70b-instruct")
             ]
             for fb_m in fallback_free_models:
                 if fb_m != (model_name or ""):
@@ -72,7 +72,7 @@ class LLMClient:
         # Add remaining fallback providers only if provider was not explicitly restricted to openrouter
         if provider != "openrouter":
             if self.openrouter_key and not self.openrouter_key.startswith("your_"):
-                self._available_providers.append({"provider": "openrouter", "model": os.getenv("OPENROUTER_MODEL", "poolside/laguna-s-2.1:free")})
+                self._available_providers.append({"provider": "openrouter", "model": os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-chat")})
             if provider != "groq" and self.groq_key and not self.groq_key.startswith("your_"):
                 self._available_providers.append({"provider": "groq", "model": "llama-3.1-70b-versatile"})
             if self.gemini_key and not self.gemini_key.startswith("your_"):
@@ -96,15 +96,19 @@ class LLMClient:
         if self.provider == "openrouter":
             models_chain = [self.model_name]
             if "qwen" in self.model_name:
-                for alt in ["qwen/qwen-2.5-72b-instruct", "qwen/qwen-plus", "qwen/qwen-turbo"]:
+                for alt in ["deepseek/deepseek-chat"]:
                     if alt not in models_chain:
                         models_chain.append(alt)
             elif "llama" in self.model_name:
-                for alt in ["meta-llama/llama-3.1-8b-instruct", "meta-llama/llama-3.3-70b-instruct"]:
+                for alt in ["meta-llama/llama-3.3-70b-instruct"]:
                     if alt not in models_chain:
                         models_chain.append(alt)
             elif "deepseek" in self.model_name:
                 for alt in ["deepseek/deepseek-chat"]:
+                    if alt not in models_chain:
+                        models_chain.append(alt)
+            elif "gemini" in self.model_name:
+                for alt in ["google/gemini-2.5-flash-lite"]:
                     if alt not in models_chain:
                         models_chain.append(alt)
             self.or_models = models_chain
@@ -269,7 +273,7 @@ class LLMClient:
                     payload = {
                         "model": model_to_try if not is_cerebras else self.model_name,
                         "messages": messages,
-                        "max_tokens": 3500,
+                        "max_tokens": 900,
                         "temperature": 0.0
                     }
                     
@@ -291,15 +295,12 @@ class LLMClient:
                     try:
                         import aiohttp
                         session = await self._get_session()
-                        async with session.post(api_url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                        async with session.post(api_url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=25)) as resp:
                             if resp.status == 200:
                                 data = await resp.json()
+                                # F-23 Fix: Transient fallback must NOT permanently downgrade primary model or reorder chain
                                 if self.model_name != model_to_try and not is_kie:
-                                    print(f"✅ [LLMClient OpenRouter] Найдена рабочая модель: {model_to_try}")
-                                    self.model_name = model_to_try
-                                    if hasattr(self, "or_models") and model_to_try in self.or_models:
-                                        self.or_models.remove(model_to_try)
-                                        self.or_models.insert(0, model_to_try)
+                                    print(f"ℹ️ [LLMClient OpenRouter] Временный ответ от резервной модели: {model_to_try} (основная модель: {self.model_name})")
                                 
                                 usage = data.get("usage", {})
                                 p_tok = int(usage.get("prompt_tokens", 0) or 0)
