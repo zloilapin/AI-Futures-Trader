@@ -251,21 +251,49 @@
 
     <div class="card">
       <div class="field-row" style="display:flex; justify-content:space-between; align-items:center;">
-        <span class="field-label" style="margin:0;">Target Network</span>
+        <span class="field-label" style="margin:0;">Сеть блокчейна</span>
         <span class="network-badge">🟣 Ink L2 Mainnet (57073)</span>
       </div>
       <hr style="border:none; border-top:1px solid var(--border-color); margin:10px 0;">
       <div class="field-row">
-        <span class="field-label">Agent Session Key (Signer):</span>
+        <span class="field-label">🔑 Сессионный торговый ключ (Signer):</span>
         <div class="field-value" id="signerDisplay">Loading...</div>
+        <div style="font-size: 11px; color: var(--hint-color); margin-top: 4px; line-height: 1.4;">
+          Временный сессионный ключ бота. Имеет права <b>только на отправку сделок</b>. Права на вывод средств жестко заблокированы смарт-контрактом Nado.
+        </div>
       </div>
+      <hr style="border:none; border-top:1px solid var(--border-color); margin:10px 0;">
       <div class="field-row">
-        <span class="field-label">Nado Subaccount:</span>
+        <span class="field-label">📂 Суб-аккаунт Nado DEX:</span>
         <div class="field-value" id="subaccountDisplay">default</div>
+        <div style="font-size: 11px; color: var(--hint-color); margin-top: 4px; line-height: 1.4;">
+          <b>«default»</b> — это основной торговый суб-аккаунт вашего кошелька на бирже Nado, к которому подключается копи-трейдинг.
+        </div>
       </div>
-      <div class="field-row" id="walletRow" style="display:none;">
-        <span class="field-label">Connected Wallet (Owner):</span>
+      <div class="field-row" id="walletRow" style="display:none; margin-top: 10px;">
+        <span class="field-label">Подключенный кошелек (Владелец):</span>
         <div class="field-value" id="ownerDisplay" style="color:var(--link-color); font-weight:600;">-</div>
+      </div>
+    </div>
+
+    <!-- Mobile Web3 Notice Card (Shown if opened in standard Telegram in-app browser without Web3 injection) -->
+    <div id="mobileWalletCard" class="card" style="display:none; background: linear-gradient(135deg, rgba(255,152,0,0.12), rgba(33,150,243,0.12)); border: 1px solid rgba(255,152,0,0.35);">
+      <div style="font-weight:700; color:#ffb74d; margin-bottom:6px; font-size:13px; display:flex; align-items:center; gap:6px;">
+        <span>📱 Подключение с телефона:</span>
+      </div>
+      <p style="font-size:12px; color:var(--text-color); margin-bottom:12px; line-height:1.4;">
+        Встроенный браузер Telegram не имеет расширений Web3. Откройте эту страницу в 1 клик прямо в вашем кошельке MetaMask или Trust Wallet:
+      </p>
+      <div style="display:flex; flex-direction:column; gap:8px;">
+        <button class="btn" style="background:#f6851b; color:#ffffff; font-weight:700; margin:0;" onclick="openInMetaMask()">
+          🦊 Открыть в приложении MetaMask
+        </button>
+        <button class="btn" style="background:#0500ff; color:#ffffff; font-weight:700; margin:0;" onclick="openInTrustWallet()">
+          🛡️ Открыть в Trust Wallet
+        </button>
+        <button class="btn btn-secondary" style="font-size:12px; margin:0;" onclick="copyCurrentLink()">
+          📋 Скопировать ссылку для Web3-браузера
+        </button>
       </div>
     </div>
 
@@ -273,11 +301,11 @@
 
     <div style="margin-top: 16px;">
       <button id="btnConnect" class="btn btn-primary" onclick="connectWallet()">
-        🦊 1. Connect EVM Wallet
+        🦊 1. Подключить EVM-кошелек
       </button>
 
-      <button id="btnSign" class="btn btn-primary" style="display:none;" onclick="signLinkSigner()">
-        ✍️ 2. Sign EIP-712 LinkSigner
+      <button id="btnSign" class="btn btn-primary" style="display:none; background: #238636;" onclick="signLinkSigner()">
+        ✍️ 2. Подписать LinkSigner (Без права на вывод)
       </button>
     </div>
 
@@ -484,6 +512,46 @@
         showStatus('⚠️ Выдели и скопируй команду вручную.', 'error');
       });
     }
+
+    function openInMetaMask() {
+      const dappUrl = window.location.href.replace(/^https?:\/\//, '');
+      const mmUrl = 'https://metamask.app.link/dapp/' + dappUrl;
+      if (tg && tg.openLink) {
+        tg.openLink(mmUrl);
+      } else {
+        window.location.href = mmUrl;
+      }
+    }
+
+    function openInTrustWallet() {
+      const twUrl = 'https://link.trustwallet.com/open_url?coin_id=60&url=' + encodeURIComponent(window.location.href);
+      if (tg && tg.openLink) {
+        tg.openLink(twUrl);
+      } else {
+        window.location.href = twUrl;
+      }
+    }
+
+    function copyCurrentLink() {
+      navigator.clipboard.writeText(window.location.href).then(() => {
+        showStatus('📋 Ссылка скопирована! Откройте её во встроенном браузере MetaMask или Trust Wallet.', 'success');
+      }).catch(() => {
+        showStatus('⚠️ Выделите и скопируйте адрес страницы вручную.', 'error');
+      });
+    }
+
+    function checkWalletProvider() {
+      if (window.ethereum) {
+        document.getElementById('mobileWalletCard').style.display = 'none';
+        document.getElementById('btnConnect').style.display = 'flex';
+      } else {
+        document.getElementById('mobileWalletCard').style.display = 'block';
+        document.getElementById('btnConnect').style.display = 'flex';
+      }
+    }
+
+    window.addEventListener('DOMContentLoaded', checkWalletProvider);
+    setTimeout(checkWalletProvider, 400);
   </script>
 </body>
 </html>
