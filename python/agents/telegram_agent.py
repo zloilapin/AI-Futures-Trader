@@ -132,8 +132,12 @@ class TelegramAgent(BaseAgent):
         if 0 < notional_usd < 100:
             small_size_warning = "\n⚠️ *Защита:* Программный TP/SL (Fast Monitor 5с + Sentinel). На бирже Nado триггеры требуют объем ≥ $100.\n"
 
+        is_shadow = bool(getattr(config, "SHADOW_MODE", False) or final_trade_data.get("is_shadow", False))
+        header_title = f"👻 *SHADOW SIGNAL (СИМУЛЯЦИЯ) | NADO DEX{net_badge}*" if is_shadow else f"🚀 *TRADE SIGNAL | NADO DEX{net_badge}*"
+        shadow_warning = "\n👻 *Внимание:* Сделка виртуальная (Shadow Mode активен в настройках, ончейн-ордер на биржу не отправлялся).\n" if is_shadow else ""
+
         message = (
-            f"🚀 *TRADE SIGNAL | NADO DEX{net_badge}*{mode_header_tag}\n\n"
+            f"{header_title}{mode_header_tag}\n\n"
             f"🪙 *Asset / Монета:* `{symbol}`\n"
             f"🕹 *Mode / Режим:* {mode_badge}\n"
             f"📊 *Direction / Направление:* {dir_emoji}\n"
@@ -143,6 +147,7 @@ class TelegramAgent(BaseAgent):
             f"🟢 *Take Profit (TP):* `${self._format_price(tp_price)}` (+{tp_pct}%)\n"
             f"🔴 *Stop Loss (SL):* `${self._format_price(sl_price)}` (-{sl_pct}%)\n"
             f"⚖️ *Risk/Reward:* `{rr_ratio:.2f}`\n"
+            f"{shadow_warning}"
             f"{small_size_warning}\n"
             f"📝 *Analysis / Аналитика:*\n{reasoning}"
         )
