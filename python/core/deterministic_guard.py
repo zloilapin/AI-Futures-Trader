@@ -666,6 +666,27 @@ class DeterministicGuard:
                     guard_status = "PASSED"
                     guard_reason = "Passed deterministic guard (Anti-Bot Predator bypass of analyst disagreement)."
 
+        # ── Step 3: Hard ban on immediate market entry for REDUCE_SIZE / weak conviction / poor quality ──
+        # Only signals with ENTER (conviction >= 75%, entry_quality >= 73%) are allowed for immediate market execution.
+        if is_actionable and decision in ["LONG", "SHORT"]:
+            is_anti_bot_override = bool(getattr(config, "ANTI_BOT_MODE", False) and strategy_mode == "MEAN_REVERSION")
+            is_disputed = bool(ceo_proposal.get("disputed_arbitration", False))
+            if not is_anti_bot_override and not is_disputed:
+                if trade_action == "REDUCE_SIZE" or (entry_qual < 73.0 and conviction < 75.0):
+                    is_actionable = False
+                    guard_status = "PULLBACK_WATCHLIST"
+                    trade_action = "WAIT_FOR_PULLBACK"
+                    rejection_tag = "WAIT_FOR_PULLBACK"
+                    guard_reason = (
+                        f"WAIT_FOR_PULLBACK: Сигнал {decision} требует подтверждения отката "
+                        f"(Conviction={conviction:.0f}% {'< 75%' if conviction < 75.0 else 'OK'}, "
+                        f"EntryQuality={entry_qual:.1f}% {'< 73%' if entry_qual < 73.0 else 'OK'}, "
+                        f"Action={trade_action}). Немедленный рыночный вход запрещен во избежание открытия на дне/вершине импульса. "
+                        f"Сетап зарегистрирован в Pullback Watchlist."
+                    )
+                    if logger:
+                        logger.info(f"[System_Core] ⏸️ {guard_reason}")
+
         # Synchronize back to ceo_proposal dict for backward compatibility
         if symbol:
             ceo_proposal["symbol"] = symbol

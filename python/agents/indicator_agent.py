@@ -38,6 +38,46 @@ class IndicatorAgent(BaseAgent):
         is_macro_bearish = (trend_1h == "BEARISH" or trend_4h == "BEARISH")
         is_macro_bullish = (trend_1h == "BULLISH" or trend_4h == "BULLISH")
 
+        # 48h Macro Box & 15m Structural Extremes (Audit Step 1)
+        c_1h = (mtf.get("tf_1h") or {}).get("candles_20", []) if isinstance(mtf, dict) else []
+        c_15m = (price_data.get("candles_20") or price_data.get("candles") or []) if isinstance(price_data, dict) else []
+
+        high_48h = float(indicators.get("high_48h") or 0.0)
+        low_48h = float(indicators.get("low_48h") or 0.0)
+        macro_box_pos_pct = float(indicators.get("macro_box_pos_pct") or 50.0)
+
+        if c_1h:
+            h_48_list = [float(c.get("high", current_price)) for c in c_1h[-48:] if isinstance(c, dict)]
+            l_48_list = [float(c.get("low", current_price)) for c in c_1h[-48:] if isinstance(c, dict)]
+            if h_48_list and l_48_list:
+                high_48h = max(h_48_list)
+                low_48h = min(l_48_list)
+                if current_price > 0 and (high_48h - low_48h) > 0:
+                    macro_box_pos_pct = round((current_price - low_48h) / max(high_48h - low_48h, 1e-9) * 100.0, 2)
+
+        swing_high_15m = float(indicators.get("swing_high_15m") or current_price)
+        swing_low_15m = float(indicators.get("swing_low_15m") or current_price)
+        if c_15m:
+            h_16_list = [float(c.get("high", current_price)) for c in c_15m[-16:] if isinstance(c, dict)]
+            l_16_list = [float(c.get("low", current_price)) for c in c_15m[-16:] if isinstance(c, dict)]
+            if h_16_list: swing_high_15m = round(max(h_16_list), 6)
+            if l_16_list: swing_low_15m = round(min(l_16_list), 6)
+
+        # Inject into market_data indicators for router and risk manager
+        if isinstance(indicators, dict):
+            indicators["high_48h"] = high_48h
+            indicators["low_48h"] = low_48h
+            indicators["macro_box_pos_pct"] = macro_box_pos_pct
+            indicators["swing_high_15m"] = swing_high_15m
+            indicators["swing_low_15m"] = swing_low_15m
+
+        if macro_box_pos_pct < 32.0:
+            reason_parts.append(f"Цена в нижней трети 48h коробки ({macro_box_pos_pct:.1f}%)")
+        elif macro_box_pos_pct > 68.0:
+            reason_parts.append(f"Цена в верхней трети 48h коробки ({macro_box_pos_pct:.1f}%)")
+        else:
+            reason_parts.append(f"Положение в 48h коробке: {macro_box_pos_pct:.1f}%")
+
         if rsi is not None:
             if rsi < 30:
                 if is_macro_bearish and not is_macro_bullish:
@@ -187,5 +227,10 @@ class IndicatorAgent(BaseAgent):
         return {
             "signal": signal,
             "confidence": min(confidence, 95),
-            "reasoning": ". ".join(reason_parts)
+            "reasoning": ". ".join(reason_parts),
+            "macro_box_pos_pct": macro_box_pos_pct,
+            "swing_high_15m": swing_high_15m,
+            "swing_low_15m": swing_low_15m,
+            "high_48h": high_48h,
+            "low_48h": low_48h
         }

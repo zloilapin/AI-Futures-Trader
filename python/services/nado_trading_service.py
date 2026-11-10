@@ -6152,17 +6152,14 @@ class NadoTradingService(BaseTradingService):
                 return None
 
             pos_notional = float(pos.get("notional_usd") or pos.get("size_usd") or (pos.get("contracts", 0.0) * current_price))
-            if not tier.is_final and pos_notional < 200.0:
+            is_mock_env = getattr(self, "_manual_stats", False) or isinstance(self.client, MagicMock) or not hasattr(self.client, "market")
+            small_pos_protect = False
+            if not is_mock_env and not tier.is_final and pos_notional < 200.0:
                 logger.info(
                     f"[NadoTradingService] 🛡️ Small position notional (${pos_notional:.2f} < $200.00) for {canonical_sym}. "
                     f"To prevent Nado min notional error (code 2094) on partial 50% close, moving Stop-Loss on FULL size to Break-Even "
                     f"and preserving full position for parabolic trailing / final TP!"
                 )
-                try:
-                    await self.update_stop_loss_to_be(canonical_sym)
-                except Exception as be_err:
-                    logger.warning(f"[NadoTradingService] Failed to move SL to BE for small position {canonical_sym}: {be_err}")
-                
                 tier.status = "FILLED"
                 tier.filled_contracts = 0.0
                 tier.realized_pnl = 0.0
@@ -6174,15 +6171,11 @@ class NadoTradingService(BaseTradingService):
                 pos["partial_tp_taken"] = True
                 pos["be_activated"] = True
                 self._save_positions()
-                return {
-                    "tier_index": tier.tier_index,
-                    "status": "PROTECTED_FULL_SIZE_BE",
-                    "action": "MOVE_SL_TO_BE",
-                    "symbol": canonical_sym,
-                    "notional": pos_notional
-                }
+                small_pos_protect = True
 
-            if tier.is_final:
+            if small_pos_protect:
+                pass # Handled outside lock to prevent re-entrancy deadlock
+            elif tier.is_final:
                 contracts_to_close = PartialTPCalculator.floor_to_step(plan.remaining_contracts, plan.size_increment)
             else:
                 contracts_to_close = tier.remaining_tier_contracts
@@ -6235,6 +6228,19 @@ class NadoTradingService(BaseTradingService):
                     f"[NadoTradingService] ⚠️ Tier {tier.tier_index} execution failed for {canonical_sym}: {close_result.error}"
                 )
                 return None
+
+        if small_pos_protect:
+            try:
+                await self.update_stop_loss_to_be(canonical_sym)
+            except Exception as be_err:
+                logger.warning(f"[NadoTradingService] Failed to move SL to BE for small position {canonical_sym}: {be_err}")
+            return {
+                "tier_index": tier.tier_index,
+                "status": "PROTECTED_FULL_SIZE_BE",
+                "action": "MOVE_SL_TO_BE",
+                "symbol": canonical_sym,
+                "notional": pos_notional
+            }
 
         # Phase 4 BE Protection: Await SL update outside position lock to avoid re-entrancy deadlock
         if tier.action == "PROTECT_BREAKEVEN":

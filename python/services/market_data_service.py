@@ -223,8 +223,9 @@ class MarketDataService:
 
     async def _fetch_ohlc_interval(self, symbol: str, interval_min: int) -> dict:
         if getattr(self, "is_nado", False) or True: # Force Nado
-            # Fetch at least 50 candles (or 200 for 15m) so EMA can properly converge
-            candles = await self._fetch_nado_candles(symbol, interval_min, 50)
+            # Fetch at least 60 candles for 1H (for 48h macro box) and 200 for 15m
+            limit_req = 60 if interval_min == 60 else (200 if interval_min == 15 else 50)
+            candles = await self._fetch_nado_candles(symbol, interval_min, limit_req)
             if candles:
                 closes = [c["close"] for c in candles]
                 highs = [c["high"] for c in candles]
@@ -1051,6 +1052,26 @@ class MarketDataService:
                 if isinstance(oi, dict) and current_price > 0:
                     oi_val = oi.get("open_interest")
                     oi["open_interest_usd"] = (oi_val * current_price) if oi_val is not None else None
+
+                # 48h Box & 15m Structural Extremes (Step 1)
+                try:
+                    c_1h = (mtf.get("tf_1h") or {}).get("candles_20", []) if isinstance(mtf, dict) else []
+                    if c_1h:
+                        h_48 = max(float(c.get("high", current_price)) for c in c_1h[-48:] if isinstance(c, dict))
+                        l_48 = min(float(c.get("low", current_price)) for c in c_1h[-48:] if isinstance(c, dict))
+                        box_pos = ((current_price - l_48) / max(h_48 - l_48, 1e-9) * 100.0) if current_price > 0 else 50.0
+                        if isinstance(indicators, dict):
+                            indicators["high_48h"] = round(h_48, 6)
+                            indicators["low_48h"] = round(l_48, 6)
+                            indicators["macro_box_pos_pct"] = round(box_pos, 2)
+                    c_15m = (ohlcv.get("candles_20") or []) if isinstance(ohlcv, dict) else []
+                    if c_15m and isinstance(indicators, dict):
+                        h_16 = [float(c.get("high", current_price)) for c in c_15m[-16:] if isinstance(c, dict)]
+                        l_16 = [float(c.get("low", current_price)) for c in c_15m[-16:] if isinstance(c, dict)]
+                        if h_16: indicators["swing_high_15m"] = round(max(h_16), 6)
+                        if l_16: indicators["swing_low_15m"] = round(min(l_16), 6)
+                except Exception as box_err:
+                    self._log(f"⚠️ [MarketDataService] Error computing 48h box: {box_err}", level="debug")
 
                 return {
                     "exchange": self.exchange_name,

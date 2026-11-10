@@ -22,16 +22,22 @@ class StrategyRouter:
         current_price: float,
         eval_atr: float,
         bb_position_pct: float,
+        low_48h: float = 0.0,
+        high_48h: float = 0.0,
+        rvol: float = 1.0,
         max_age_seconds: float = 14400.0,
         journal_path: str = "data/memory/trade_journal.json"
     ):
         """
-        Anti-Chase Re-Entry Guard (Same-Direction Re-Entry Cooldown):
-        Prevents serial re-entering at the exact bottom/top of an exhausted momentum impulse.
-        If the latest closed trade for `symbol` in trade_journal was in the same direction
-        and profitable within max_age_seconds (default 240 minutes / 4 hours):
-          - For SHORT: forbidden if current_price < (last_exit_price + 0.5 * ATR) OR bb_pos < 45.0%
-          - For LONG: forbidden if current_price > (last_exit_price - 0.5 * ATR) OR bb_pos > 55.0%
+        Anti-Chase Re-Entry & Wave Exhaustion Guard (Same-Direction Re-Entry Cooldown):
+        1. Wave Exhaustion Guard:
+           Prevents opening a second/subsequent trade in the same direction at a worse price
+           (current_price < last_entry for SHORT, or current_price > last_entry for LONG)
+           within max_age_seconds (default 6 hours / 360 minutes), unless price has pulled back into
+           the upper/lower half of the channel (bb_pos >= 55% for SHORT, bb_pos <= 45% for LONG)
+           or a high-volume true breakout of 48h extremes is taking place (rvol >= 1.5).
+        2. Profitable Exit Cooldown:
+           Prevents re-entering right after a profitable exit without at least 0.5 ATR pullback or BB mean return.
         Returns: (is_allowed: bool, reason: str)
         """
         if not symbol or current_price <= 0:
@@ -66,19 +72,48 @@ class StrategyRouter:
         if last_dir != target_dir:
             return True, f"Direction changed (last was {last_dir}, target is {target_dir})"
 
+        import time
+        now_ts = time.time()
+        trade_ts = float(last_trade.get("timestamp", 0.0) or 0.0)
+        age_sec = now_ts - trade_ts if trade_ts > 0 else 0.0
+        if trade_ts > 0 and age_sec > max_age_seconds:
+            return True, f"Cooldown expired ({age_sec / 60.0:.1f}m > {max_age_seconds / 60.0:.1f}m)"
+
+        last_entry = float(last_trade.get("entry_price", 0.0) or 0.0)
+        age_min = (age_sec / 60.0) if trade_ts > 0 else 0.0
+
+        # ── 0. True 48h Breakout Exception: allow continuation if breaking 48h high/low with RVOL >= 1.5 ──
+        if target_dir == "SHORT" and low_48h > 0 and current_price <= low_48h * 1.002 and rvol >= 1.5:
+            return True, f"Anti-chase 48h breakout exception satisfied: пробой минимума 48ч (${low_48h:.4f}) с RVOL={rvol:.2f} >= 1.5"
+        if target_dir == "LONG" and high_48h > 0 and current_price >= high_48h * 0.998 and rvol >= 1.5:
+            return True, f"Anti-chase 48h breakout exception satisfied: пробой максимума 48ч (${high_48h:.4f}) с RVOL={rvol:.2f} >= 1.5"
+
+        # ── 1. Wave Exhaustion Guard: forbid repeat trade at price beyond prior entry ──
+        if last_entry > 0:
+            if target_dir == "SHORT" and current_price < last_entry:
+                has_pulled_back = bb_position_pct >= 50.0
+                if not has_pulled_back:
+                    return False, (
+                        f"Anti-Chase Guard (Wave Exhaustion Guard): Запрет повторного SHORT по {symbol} по цене ${current_price:.4f} < ${last_entry:.4f} (ниже предыдущего входа) "
+                        f"через {age_min:.0f}м без отката в верхнюю половину BB (не вернулась к средней EMA-20, BB={bb_position_pct:.1f}% < 50.0%) "
+                        f"или истинного пробоя 48h минимума (${low_48h:.4f}, rvol={rvol:.2f} < 1.5). Требуется WAIT_FOR_PULLBACK."
+                    )
+            elif target_dir == "LONG" and current_price > last_entry:
+                has_pulled_back = bb_position_pct <= 50.0
+                if not has_pulled_back:
+                    return False, (
+                        f"Anti-Chase Guard (Wave Exhaustion Guard): Запрет повторного LONG по {symbol} по цене ${current_price:.4f} > ${last_entry:.4f} (выше предыдущего входа) "
+                        f"через {age_min:.0f}м без отката в нижнюю половину BB (не вернулась к средней EMA-20, BB={bb_position_pct:.1f}% > 50.0%) "
+                        f"или истинного пробоя 48h максимума (${high_48h:.4f}, rvol={rvol:.2f} < 1.5). Требуется WAIT_FOR_PULLBACK."
+                    )
+
+        # ── 2. Profitable Exit Cooldown Guard ──
         net_pnl = float(last_trade.get("net_pnl_usd", 0.0) or 0.0)
         realized_r = float(last_trade.get("realized_r", 0.0) or 0.0)
         is_profitable = (net_pnl > 0.0) or (realized_r > 0.0)
 
         if not is_profitable:
             return True, f"Last trade for {symbol} was not profitable (PnL={net_pnl:.2f}, R={realized_r:.2f})"
-
-        import time
-        now_ts = time.time()
-        trade_ts = float(last_trade.get("timestamp", 0.0) or 0.0)
-        age_sec = now_ts - trade_ts
-        if trade_ts > 0 and age_sec > max_age_seconds:
-            return True, f"Cooldown expired ({age_sec / 60.0:.1f}m > {max_age_seconds / 60.0:.1f}m)"
 
         last_exit = float(last_trade.get("exit_price", 0.0) or 0.0)
         if last_exit <= 0:
@@ -96,7 +131,6 @@ class StrategyRouter:
                 if is_bb_low:
                     viol_reasons.append(f"BB={bb_position_pct:.1f}% < 45.0% (не вернулась к средней EMA-20)")
                 detail = " и ".join(viol_reasons)
-                age_min = (age_sec / 60.0) if trade_ts > 0 else 0.0
                 return False, (
                     f"Anti-Chase Guard: Запрет повторного SHORT по {symbol} через {age_min:.0f}м после прибыльного выхода: "
                     f"{detail}. Требуется полноценный откат вверх (WAIT_FOR_PULLBACK)."
@@ -112,7 +146,6 @@ class StrategyRouter:
                 if is_bb_high:
                     viol_reasons.append(f"BB={bb_position_pct:.1f}% > 55.0% (не вернулась к средней EMA-20)")
                 detail = " и ".join(viol_reasons)
-                age_min = (age_sec / 60.0) if trade_ts > 0 else 0.0
                 return False, (
                     f"Anti-Chase Guard: Запрет повторного LONG по {symbol} через {age_min:.0f}м после прибыльного выхода: "
                     f"{detail}. Требуется полноценный откат вниз (WAIT_FOR_PULLBACK)."
@@ -168,13 +201,21 @@ class StrategyRouter:
             eval_atr = float(indicators.get("atr_14", indicators.get("atr", 0.0)) or 0.0)
             current_price = float((market_data.get("price_data") or {}).get("current_price", 0.0) or 0.0)
             bb_pos = float(indicators.get("bb_position_pct", indicators.get("bb_pos", 50.0)) or 50.0)
+            low_48h = float(indicators.get("low_48h", 0.0) or 0.0)
+            high_48h = float(indicators.get("high_48h", 0.0) or 0.0)
+            rvol = float(indicators.get("rvol", indicators.get("volume_spike_pct", 100.0) / 100.0) or 1.0)
+            
+            # 1. Anti-Chase & Wave Exhaustion Guard (6 hours / 360m window)
             can_reenter, anti_chase_reason = StrategyRouter.check_anti_chase_reentry(
                 symbol=symbol,
                 target_direction=profile_res.direction_bias,
                 current_price=current_price,
                 eval_atr=eval_atr,
                 bb_position_pct=bb_pos,
-                max_age_seconds=14400.0
+                low_48h=low_48h,
+                high_48h=high_48h,
+                rvol=rvol,
+                max_age_seconds=21600.0
             )
             if not can_reenter:
                 return StrategyProfile(
@@ -183,6 +224,26 @@ class StrategyRouter:
                     "NEUTRAL",
                     f"ОТКЛОНЕН ({anti_chase_reason})"
                 )
+
+            # 2. Multi-day box floor/ceiling filter (Macro Floor/Ceiling Guard - Step 2)
+            if profile_res.strategy_mode == "TREND_FOLLOWING":
+                macro_box_pos = float(indicators.get("macro_box_pos_pct", 50.0) or 50.0)
+                if profile_res.direction_bias == "SHORT":
+                    if macro_box_pos < 32.0 and bb_pos < 38.0 and rvol < 1.6:
+                        return StrategyProfile(
+                            False,
+                            "MACRO_BOX_FLOOR_VETO",
+                            "NEUTRAL",
+                            f"ОТКЛОНЕН (Macro Floor Guard: SHORT в нижней трети 48h коробки (Box={macro_box_pos:.1f}% < 32.0%, BB={bb_pos:.1f}% < 38.0%, rvol={rvol:.2f} < 1.6). Вход по рынку запрещен -> WAIT_FOR_PULLBACK в верхнюю половину коробки)."
+                        )
+                elif profile_res.direction_bias == "LONG":
+                    if macro_box_pos > 68.0 and bb_pos > 62.0 and rvol < 1.6:
+                        return StrategyProfile(
+                            False,
+                            "MACRO_BOX_CEILING_VETO",
+                            "NEUTRAL",
+                            f"ОТКЛОНЕН (Macro Ceiling Guard: LONG в верхней трети 48h коробки (Box={macro_box_pos:.1f}% > 68.0%, BB={bb_pos:.1f}% > 62.0%, rvol={rvol:.2f} < 1.6). Вход по рынку запрещен -> WAIT_FOR_PULLBACK в нижнюю половину коробки)."
+                        )
 
             # Anti-Chase BB/RSI Guard for TREND_FOLLOWING:
             if profile_res.strategy_mode == "TREND_FOLLOWING":
@@ -586,6 +647,41 @@ class StrategyRouter:
                     return StrategyProfile(True, "VOLATILITY_MOMENTUM", "SHORT", f"VOLATILITY_MOMENTUM SHORT: Волатильность {bb_width_pct}% (ATR={atr_pct}%), Vol={volume_spike_pct}%, OI={oi_trend}")
 
         # 4. Macro Regimes Logic
+        # 4.0. Retest Priority: Entry on pullback peak / rejection in senior 1H+4H trend (Step 2.3)
+        trend_4h = str(mtf_data.get("trend_4h") or indicators.get("trend_4h") or "").upper()
+        if trend_1h == "BEARISH" and trend_4h == "BEARISH":
+            if 50.0 <= bb_position_pct <= 80.0 and isinstance(last_candle, dict):
+                o_c = _safe_float(last_candle.get("open"), current_price)
+                c_c = _safe_float(last_candle.get("close"), current_price)
+                h_c = _safe_float(last_candle.get("high"), current_price)
+                l_c = _safe_float(last_candle.get("low"), current_price)
+                tot_rng = h_c - l_c
+                u_shad = h_c - max(o_c, c_c)
+                is_bear_rejection = (c_c <= o_c) or (tot_rng > 0 and (u_shad / tot_rng) >= 0.30)
+                if is_bear_rejection and not trend_exhaustion_short and not both_leaders_bullish:
+                    return StrategyProfile(
+                        True,
+                        "TREND_FOLLOWING",
+                        "SHORT",
+                        f"RETEST_PRIORITY SHORT: 1H и 4H сонаправлены (BEARISH), откат на 15m в зону ретеста (BB={bb_position_pct:.1f}%), подтверждено отторжение сверху (close={c_c:.4f} <= open={o_c:.4f} или тень {u_shad:.4f})."
+                    )
+        elif trend_1h == "BULLISH" and trend_4h == "BULLISH":
+            if 20.0 <= bb_position_pct <= 50.0 and isinstance(last_candle, dict):
+                o_c = _safe_float(last_candle.get("open"), current_price)
+                c_c = _safe_float(last_candle.get("close"), current_price)
+                h_c = _safe_float(last_candle.get("high"), current_price)
+                l_c = _safe_float(last_candle.get("low"), current_price)
+                tot_rng = h_c - l_c
+                l_shad = min(o_c, c_c) - l_c
+                is_bull_rejection = (c_c >= o_c) or (tot_rng > 0 and (l_shad / tot_rng) >= 0.30)
+                if is_bull_rejection and not trend_exhaustion_long and not both_leaders_bearish:
+                    return StrategyProfile(
+                        True,
+                        "TREND_FOLLOWING",
+                        "LONG",
+                        f"RETEST_PRIORITY LONG: 1H и 4H сонаправлены (BULLISH), откат на 15m в зону ретеста (BB={bb_position_pct:.1f}%), подтверждено отторжение снизу (close={c_c:.4f} >= open={o_c:.4f} или тень {l_shad:.4f})."
+                    )
+
         if mtf_alignment == "COUNTER_TREND_WARNING":
             # Pre-Debate Anti-Chop Gate:
             # Rejection of counter-trend overextension before launching expensive LLM debate

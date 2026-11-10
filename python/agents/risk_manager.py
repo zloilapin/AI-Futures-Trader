@@ -1015,7 +1015,7 @@ class RiskManager(BaseAgent):
             sl_dist_base = max(atr_14 * sl_mult, current_price * min_sl_ratio)
             tp_dist_base = max(atr_14 * tp_mult, current_price * min_tp_ratio)
         else:
-            # Lever 5: Volatility-Adaptive Stop Loss Clamp with Structural Anchor
+            # Lever 5: Volatility-Adaptive Stop Loss Clamp with Structural Anchor (Step 4)
             is_major = base_asset in ["BTC", "ETH"]
             min_sl_dist = current_price * (0.008 if is_major else 0.010)  # 0.8% floor for majors, 1.0% for altcoins
             max_sl_dist = current_price * (0.022 if is_major else 0.055)  # 2.2% ceiling for majors, 5.5% for volatile altcoins
@@ -1028,34 +1028,55 @@ class RiskManager(BaseAgent):
             else:
                 sl_dist_clamped = raw_sl_dist
 
-            # Structural anchor behind recent 3-candle swing extreme
+            # Structural anchor behind recent 16-candle swing extreme (Step 4)
+            indicators = market_data.get("indicators") or {}
+            swing_high_15m = float(indicators.get("swing_high_15m") or 0.0)
+            swing_low_15m = float(indicators.get("swing_low_15m") or 0.0)
+
             c_list = price_data.get("candles") or market_data.get("multi_timeframe", {}).get("tf_15m", {}).get("candles_20", [])
-            if isinstance(c_list, list) and len(c_list) >= 3:
-                recent_candles = c_list[-3:]
+            if (swing_high_15m <= 0.0 or swing_low_15m <= 0.0) and isinstance(c_list, list) and c_list:
                 try:
-                    if decision == "LONG":
-                        swing_low = min(float(c.get("low", current_price)) for c in recent_candles if isinstance(c, dict))
-                        structural_sl = swing_low - (0.10 * (atr_14 if atr_14 > 0 else current_price * 0.01))
-                        structural_dist = current_price - structural_sl
-                        if min_sl_dist <= structural_dist <= max_sl_dist:
-                            sl_dist_base = structural_dist
-                        else:
-                            sl_dist_base = sl_dist_clamped
-                    else: # SHORT
-                        swing_high = max(float(c.get("high", current_price)) for c in recent_candles if isinstance(c, dict))
-                        structural_sl = swing_high + (0.10 * (atr_14 if atr_14 > 0 else current_price * 0.01))
-                        structural_dist = structural_sl - current_price
-                        if min_sl_dist <= structural_dist <= max_sl_dist:
-                            sl_dist_base = structural_dist
-                        else:
-                            sl_dist_base = sl_dist_clamped
+                    h_16 = [float(c.get("high", current_price)) for c in c_list[-16:] if isinstance(c, dict)]
+                    l_16 = [float(c.get("low", current_price)) for c in c_list[-16:] if isinstance(c, dict)]
+                    if h_16: swing_high_15m = max(h_16)
+                    if l_16: swing_low_15m = min(l_16)
                 except Exception:
-                    sl_dist_base = sl_dist_clamped
+                    pass
+
+            atr_buffer = 0.25 * (atr_14 if atr_14 > 0 else current_price * 0.01)
+
+            has_structure = (decision == "SHORT" and swing_high_15m > 0) or (decision == "LONG" and swing_low_15m > 0)
+            if has_structure:
+                if decision == "SHORT":
+                    atr_based_sl = current_price + sl_dist_clamped
+                    structural_sl = swing_high_15m + atr_buffer
+                    sl_price = max(atr_based_sl, structural_sl)
+                    sl_dist_base = sl_price - current_price
+                else: # LONG
+                    atr_based_sl = current_price - sl_dist_clamped
+                    structural_sl = swing_low_15m - atr_buffer
+                    sl_price = min(atr_based_sl, structural_sl)
+                    sl_dist_base = current_price - sl_price
+
+                # Distance-to-Structure Gate (Step 4):
+                # If distance to structural SL > 1.95%, do NOT compress stop into noise zone!
+                # Reject immediate market entry and route to WAIT_FOR_PULLBACK.
+                if current_price > 0:
+                    dist_pct = (sl_dist_base / current_price) * 100.0
+                    if dist_pct > 1.95:
+                        lvl_ref = swing_high_15m if decision == "SHORT" else swing_low_15m
+                        msg = (
+                            f"Distance-to-Structure Gate: Расстояние до структурного стопа ({dist_pct:.2f}% > 1.95%) "
+                            f"слишком велико из-за позднего входа (структурный SL={sl_price:.4f} за уровнем {lvl_ref:.4f}). "
+                            f"Сжатие стопа внутрь зоны шума запрещено. Рекомендуется WAIT_FOR_PULLBACK ближе к уровню ретеста."
+                        )
+                        self.logger.warning(f"[{self.name}] ❌ DISTANCE_TO_STRUCTURE_VETO: {msg}")
+                        return self._build_veto_result("DISTANCE_TO_STRUCTURE_VETO", msg, "WAIT_FOR_PULLBACK")
             else:
                 sl_dist_base = sl_dist_clamped
 
-            # Target Take Profit preserves or improves standard R:R
-            target_rr = (tp_mult / sl_mult) if sl_mult > 0 else 1.5
+            # Target Take Profit preserves or improves standard R:R >= 1.8
+            target_rr = max(1.8, (tp_mult / sl_mult) if sl_mult > 0 else 1.8)
             tp_dist_base = max(atr_14 * tp_mult, sl_dist_base * target_rr, current_price * config.MIN_TP_PCT)
 
         if decision == "LONG":
@@ -1156,9 +1177,9 @@ class RiskManager(BaseAgent):
                    f"{min_rr_required:.2f}:1 for {profile_name} profile "
                    f"(after slippage and fees). "
                    f"TP dist={distance_to_tp:.4f}, SL dist={distance_to_sl:.4f}, "
-                   f"fees={unit_entry_fee + unit_tp_exit_fee:.4f}, funding={unit_funding_cost:.4f}")
+                   f"fees={unit_entry_fee + unit_tp_exit_fee:.4f}, funding={unit_funding_cost:.4f}. Routed to WAIT_FOR_PULLBACK.")
             self.logger.warning(f"[{self.name}] ❌ POOR_RISK_REWARD VETO: {msg}")
-            return self._build_veto_result("POOR_RISK_REWARD", msg, trade_action)
+            return self._build_veto_result("POOR_RISK_REWARD", msg, "WAIT_FOR_PULLBACK")
 
         # Pre-compute Bayesian Strategy Multiplier before Expectancy Gate
         strat_tag = str(strategy_mode or "TREND_FOLLOWING").upper()
