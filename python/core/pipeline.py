@@ -102,6 +102,7 @@ class TradingPipeline:
         self._cycle_running = False
         self._fast_radar_cooldowns: Dict[str, float] = {}
         self._pullback_watchlist: Dict[str, Dict[str, Any]] = {}
+        self._load_pullback_watchlist()
         self._priority_symbol: Optional[str] = None
         self._priority_direction: Optional[str] = None
         self._effective_profile = getattr(config, "TRADING_PROFILE", "BALANCED")
@@ -112,6 +113,33 @@ class TradingPipeline:
         self._pullback_context: Dict[str, Dict[str, Any]] = {}
         self._execution_lock = asyncio.Lock()
         self._candidate_semaphore = asyncio.Semaphore(3)
+
+    def _load_pullback_watchlist(self):
+        """Loads active unexpired pullback candidates from persistent disk store."""
+        try:
+            from core.state_store import StateStore
+            data = StateStore.load("data/memory/pullback_watchlist.json", default={})
+            if isinstance(data, dict):
+                now = time.time()
+                valid = {
+                    k: v for k, v in data.items()
+                    if isinstance(v, dict) and float(v.get("expires_at", 0.0) or 0.0) > now
+                }
+                self._pullback_watchlist = valid
+                if len(valid) != len(data):
+                    StateStore.save("data/memory/pullback_watchlist.json", self._pullback_watchlist)
+        except Exception as e:
+            if hasattr(self, "services") and hasattr(self.services, "logger") and self.services.logger:
+                self.services.logger.warning(f"[Pipeline] Could not load pullback_watchlist.json: {e}")
+
+    def _save_pullback_watchlist(self):
+        """Persists pullback watchlist atomically to disk for UI and restart resilience."""
+        try:
+            from core.state_store import StateStore
+            StateStore.save("data/memory/pullback_watchlist.json", self._pullback_watchlist)
+        except Exception as e:
+            if hasattr(self, "services") and hasattr(self.services, "logger") and self.services.logger:
+                self.services.logger.warning(f"[Pipeline] Could not save pullback_watchlist.json: {e}")
 
     async def fetch_live_price(self, symbol: str, fallback_price: float = 0.0) -> float:
         """
@@ -409,6 +437,11 @@ class TradingPipeline:
 
                     if is_retest:
                         market_data["is_pullback_retest"] = True
+                        pb_ctx = getattr(self, "_pullback_context", {}).get(symbol, {})
+                        if pb_ctx:
+                            market_data["invalidation_price"] = pb_ctx.get("invalidation_price", 0.0)
+                            market_data["target_pullback_price"] = pb_ctx.get("target_pullback_price", 0.0)
+                            market_data["signal_price"] = pb_ctx.get("signal_price", 0.0)
                         if retest_direction:
                             market_data["pullback_retest_direction"] = retest_direction
                             market_data["retest_direction"] = retest_direction
@@ -615,9 +648,31 @@ class TradingPipeline:
 
                     scanner_status = "⚠️ ЗАБЛОКИРОВАН СКАНЕРОМ" if scanner_blocked else "✅ OK"
                     is_anti_chase = (strategy_profile.strategy_mode == "ANTI_CHASE_REENTRY_VETO")
-                    status_text = "⏳ ОЖИДАНИЕ ОТКАТА" if is_anti_chase else "⏸️ НЕТ СИГНАЛА"
-                    rejection_tag = "ANTI_CHASE_REENTRY_VETO" if is_anti_chase else "NO_SIGNAL"
-                    risk_reason = "Pre-CEO Filter: Anti-Chase Re-Entry Cooldown (WAIT_FOR_PULLBACK)" if is_anti_chase else "Pre-CEO Filter: нет направленного консенсуса аналитиков (боковик)"
+                    is_macro_box = strategy_profile.strategy_mode in ["MACRO_BOX_FLOOR_VETO", "MACRO_BOX_CEILING_VETO"]
+                    is_pullback_route = is_anti_chase or is_macro_box or ("WAIT_FOR_PULLBACK" in str(strategy_profile.reasoning))
+                    target_pb_dir = str(strategy_profile.direction_bias or "").upper()
+
+                    if (
+                        is_pullback_route
+                        and target_pb_dir in ["LONG", "SHORT"]
+                        and not getattr(config, "ANTI_BOT_MODE", False)
+                    ):
+                        self.register_pullback_candidate(
+                            symbol=symbol,
+                            decision=target_pb_dir,
+                            current_price=current_price,
+                            directional_conf=75,
+                            conviction=75,
+                            strategy_mode="TREND_FOLLOWING",
+                            market_data=market_data,
+                            ceo_verdict={"reasoning": strategy_profile.reasoning},
+                            strategy_profile=strategy_profile,
+                            reason=strategy_profile.reasoning
+                        )
+
+                    status_text = "⏳ ОЖИДАНИЕ ОТКАТА" if is_pullback_route else "⏸️ НЕТ СИГНАЛА"
+                    rejection_tag = strategy_profile.strategy_mode if is_pullback_route else "NO_SIGNAL"
+                    risk_reason = f"Pre-CEO Filter: {strategy_profile.reasoning}" if is_pullback_route else "Pre-CEO Filter: нет направленного консенсуса аналитиков (боковик)"
 
                     scan_summaries.append({
                         "symbol": symbol,
@@ -961,7 +1016,8 @@ class TradingPipeline:
                             strategy_mode=strategy_mode,
                             market_data=market_data,
                             ceo_verdict=ceo_verdict,
-                            strategy_profile=strategy_profile
+                            strategy_profile=strategy_profile,
+                            reason=final_trade_decision.guard_reason
                         )
 
                     print(f"⏸️ Пропуск {symbol}. {final_trade_decision.guard_reason}")
@@ -1389,6 +1445,28 @@ class TradingPipeline:
                         self.services.logger.error(f"❌ Status: VETOED BY RISK MANAGER ({risk_verdict.get('reasoning')})")
                         veto_cat = risk_verdict.get("veto_category") or "RISK_VETO"
                         tracker.record_rejection(veto_cat)
+
+                        # Register in Pullback Watchlist if Risk Manager routed to WAIT_FOR_PULLBACK
+                        # (e.g. DISTANCE_TO_STRUCTURE_VETO or POOR_RISK_REWARD)
+                        if (
+                            risk_verdict.get("trade_action") == "WAIT_FOR_PULLBACK"
+                            and final_trade_decision.decision in ["LONG", "SHORT"]
+                            and strategy_mode != "MEAN_REVERSION"
+                            and not getattr(config, "ANTI_BOT_MODE", False)
+                        ):
+                            self.register_pullback_candidate(
+                                symbol=symbol,
+                                decision=final_trade_decision.decision,
+                                current_price=current_price,
+                                directional_conf=directional_conf,
+                                conviction=conviction,
+                                strategy_mode=strategy_mode,
+                                market_data=market_data,
+                                ceo_verdict=ceo_verdict,
+                                strategy_profile=strategy_profile,
+                                reason=risk_verdict.get("reasoning", "")
+                            )
+
                         execution_result = ExecutionResult(
                             symbol=symbol,
                             status="SKIPPED",
@@ -1430,7 +1508,7 @@ class TradingPipeline:
                         summary_status = "❌ ОШИБКА БИРЖИ"
                         summary_risk_reason = f"Ордер отклонён биржей ({execution_status})"
                 else:
-                    summary_status = "⏸️ VETO"
+                    summary_status = "⏳ ОЖИДАНИЕ ОТКАТА" if risk_verdict.get("trade_action") == "WAIT_FOR_PULLBACK" else "⏸️ VETO"
                     summary_risk_reason = risk_verdict.get("reasoning", "")
 
                 asset_summary = {
@@ -2370,6 +2448,7 @@ class TradingPipeline:
         market_data: Dict[str, Any],
         ceo_verdict: Dict[str, Any],
         strategy_profile: Any,
+        reason: str = "",
         ttl_seconds: int = 2700  # 45 minutes
     ):
         """
@@ -2386,35 +2465,42 @@ class TradingPipeline:
         min_pullback_dist = max(0.5 * atr_14, current_price * 0.003) if atr_14 > 0 else (current_price * 0.008)
         inval_dist = 1.2 * atr_14 if atr_14 > 0 else (current_price * 0.015)
 
-        # Dynamic pullback target calculation tied to asset volatility (ATR)
+        # Dynamic pullback target calculation tied to 15m EMA-20
         if decision == "LONG":
-            if ema_20 > 0 and ema_20 < (current_price - min_pullback_dist):
+            if ema_20 > 0 and ema_20 < current_price:
                 target_pullback_price = ema_20
             else:
                 target_pullback_price = round(current_price - min_pullback_dist, 4)
             invalidation_price = round(target_pullback_price - inval_dist, 4)
         else:  # SHORT
-            if ema_20 > 0 and ema_20 > (current_price + min_pullback_dist):
+            if ema_20 > current_price:
                 target_pullback_price = ema_20
             else:
                 target_pullback_price = round(current_price + min_pullback_dist, 4)
             invalidation_price = round(target_pullback_price + inval_dist, 4)
 
         now_ts = time.time()
+        import datetime
+        added_str = datetime.datetime.fromtimestamp(now_ts).strftime("%Y-%m-%d %H:%M:%S")
+        cand_reason = reason or (ceo_verdict.get("reasoning", "") if isinstance(ceo_verdict, dict) else "")
         self._pullback_watchlist[symbol] = {
             "symbol": symbol,
             "direction": decision,
             "signal_price": current_price,
             "target_pullback_price": target_pullback_price,
+            "target_entry": target_pullback_price,
             "invalidation_price": invalidation_price,
             "directional_conf": directional_conf,
             "conviction": conviction,
             "strategy_mode": strategy_mode,
+            "reason": cand_reason,
             "created_at": now_ts,
+            "added_at": added_str,
             "expires_at": now_ts + ttl_seconds,
             "ttl_seconds": ttl_seconds,
             "status": "WATCHING"
         }
+        self._save_pullback_watchlist()
 
         print(f"👁️ [Pullback Watchlist] {symbol} добавлен в мониторинг отката ({decision}): "
               f"Сигнальная цена ${current_price:,.2f} -> Цель отката ~${target_pullback_price:,.2f} "
@@ -2439,6 +2525,8 @@ class TradingPipeline:
             self._pullback_watchlist.pop(k, None)
             self.services.logger.info(f"[PullbackWatchlist] 🧹 {k} удален из мониторинга отката ({reason}).")
 
+        if keys_to_remove:
+            self._save_pullback_watchlist()
         return bool(keys_to_remove)
 
     async def check_pullback_watchlist(self) -> Tuple[bool, str, str]:
@@ -2567,9 +2655,12 @@ class TradingPipeline:
                 }
                 for s in symbols_to_delete:
                     self._pullback_watchlist.pop(s, None)
+                self._save_pullback_watchlist()
                 return True, symbol, f"PULLBACK_RETEST ({direction} at ${current_price:,.2f}, target was ${target_price:,.2f})"
 
-        for s in symbols_to_delete:
-            self._pullback_watchlist.pop(s, None)
+        if symbols_to_delete:
+            for s in symbols_to_delete:
+                self._pullback_watchlist.pop(s, None)
+            self._save_pullback_watchlist()
 
         return False, "", ""

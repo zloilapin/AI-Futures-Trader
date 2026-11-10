@@ -399,6 +399,15 @@ class StrategyRouter:
 
         # 0. Priority Pass for Confirmed Pullback Watchlist Retests (Protected Retests)
         if market_data.get("is_pullback_retest"):
+            # Regime Veto: Prohibit TREND_FOLLOWING pullback retest in TRANSITION regime
+            if str(detected_regime or "").upper() == "TRANSITION":
+                return StrategyProfile(
+                    False,
+                    "TRANSITION_RETEST_VETO",
+                    "NEUTRAL",
+                    "ОТКЛОНЕН (Макро-режим TRANSITION: трендовый ретест заблокирован из-за смены рыночной структуры)."
+                )
+
             retest_dir = str(
                 market_data.get("pullback_retest_direction")
                 or market_data.get("retest_direction")

@@ -1058,15 +1058,22 @@ class RiskManager(BaseAgent):
                     sl_price = min(atr_based_sl, structural_sl)
                     sl_dist_base = current_price - sl_price
 
+                is_retest = bool(
+                    _extract_cand_field(ceo_decision, "is_pullback_retest")
+                    or (market_data.get("is_pullback_retest") if market_data else False)
+                )
                 # Distance-to-Structure Gate (Step 4):
                 # If distance to structural SL > 1.95%, do NOT compress stop into noise zone!
                 # Reject immediate market entry and route to WAIT_FOR_PULLBACK.
+                # On confirmed pullback retest (which already waited for pullback to EMA-20),
+                # allow up to 2.50% so minor market noise doesn't trap the trade in a loop.
                 if current_price > 0:
                     dist_pct = (sl_dist_base / current_price) * 100.0
-                    if dist_pct > 1.95:
+                    max_sl_dist_allowed = 2.50 if is_retest else 1.95
+                    if dist_pct > max_sl_dist_allowed:
                         lvl_ref = swing_high_15m if decision == "SHORT" else swing_low_15m
                         msg = (
-                            f"Distance-to-Structure Gate: Расстояние до структурного стопа ({dist_pct:.2f}% > 1.95%) "
+                            f"Distance-to-Structure Gate: Расстояние до структурного стопа ({dist_pct:.2f}% > {max_sl_dist_allowed:.2f}%) "
                             f"слишком велико из-за позднего входа (структурный SL={sl_price:.4f} за уровнем {lvl_ref:.4f}). "
                             f"Сжатие стопа внутрь зоны шума запрещено. Рекомендуется WAIT_FOR_PULLBACK ближе к уровню ретеста."
                         )

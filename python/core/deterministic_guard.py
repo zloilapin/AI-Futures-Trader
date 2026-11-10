@@ -626,7 +626,7 @@ class DeterministicGuard:
                     logger.info(f"[System_Core] {guard_reason}")
 
         # 5.3. Anti-Chase Guard for TREND_FOLLOWING: Prohibit market ENTER on outer third of Bollinger Band
-        if is_actionable and market_data and strategy_mode == "TREND_FOLLOWING" and trade_action in ["ENTER", "REDUCE_SIZE"]:
+        if is_actionable and market_data and strategy_mode == "TREND_FOLLOWING" and trade_action in ["ENTER", "REDUCE_SIZE"] and not is_pullback_retest:
             indicators = market_data.get("indicators") or {}
             raw_rsi = indicators.get("rsi_14", indicators.get("rsi"))
             rsi_val = float(raw_rsi) if raw_rsi is not None else None
@@ -671,7 +671,7 @@ class DeterministicGuard:
         if is_actionable and decision in ["LONG", "SHORT"]:
             is_anti_bot_override = bool(getattr(config, "ANTI_BOT_MODE", False) and strategy_mode == "MEAN_REVERSION")
             is_disputed = bool(ceo_proposal.get("disputed_arbitration", False))
-            if not is_anti_bot_override and not is_disputed:
+            if not is_anti_bot_override and not is_disputed and not is_pullback_retest:
                 if trade_action == "REDUCE_SIZE" or (entry_qual < 73.0 and conviction < 75.0):
                     is_actionable = False
                     guard_status = "PULLBACK_WATCHLIST"
