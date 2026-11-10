@@ -171,3 +171,90 @@ async def test_wallet_watch_only_registration(mock_trading):
     # Clean up test trader
     trader_registry.disconnect_trader(guest_id)
 
+
+@pytest.mark.asyncio
+async def test_edit_reply_direct_behavior(mock_trading):
+    """Verifies _edit_reply method behavior: edit success, fallback to send_reply, and message_not_modified handling."""
+    listener = TelegramBotListener(trading_service=mock_trading)
+    listener.bot_token = "123456:FAKE_TOKEN"
+    listener.chat_id = "999888"
+
+    # Case 1: _edit_message succeeds -> returns result
+    listener._edit_message = AsyncMock(return_value=True)
+    listener._send_reply = AsyncMock(return_value=True)
+
+    res = await listener._edit_reply("Test Message", reply_markup={"inline_keyboard": []}, message_id=101)
+    assert res is True
+    assert listener._edit_message.call_count == 1
+    assert listener._send_reply.call_count == 0
+
+    # Case 2: _edit_message returns False -> falls back to _send_reply
+    listener._edit_message.reset_mock()
+    listener._send_reply.reset_mock()
+    listener._edit_message.return_value = False
+
+    await listener._edit_reply("Fallback Message", reply_markup={"inline_keyboard": []}, message_id=102)
+    assert listener._edit_message.call_count == 1
+    assert listener._send_reply.call_count == 1
+
+    # Case 3: message is not modified exception in _edit_message -> returns True gracefully
+    listener._edit_message.reset_mock()
+    listener._send_reply.reset_mock()
+    listener._edit_message.side_effect = Exception("Bad Request: message is not modified")
+
+    res_unmodified = await listener._edit_reply("Unmodified Message", message_id=103)
+    assert res_unmodified is True
+    assert listener._send_reply.call_count == 0
+
+    # Case 4: message_id is None -> calls _send_reply directly
+    listener._edit_message.reset_mock()
+    listener._send_reply.reset_mock()
+
+    await listener._edit_reply("Direct Send Message", message_id=None)
+    assert listener._edit_message.call_count == 0
+    assert listener._send_reply.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_all_inline_callbacks_execute_without_attribute_error(mock_trading):
+    """
+    Exercises all inline callbacks using the REAL _edit_reply implementation
+    (with mocked _edit_message network call) to ensure NO AttributeError: '_edit_reply' can occur.
+    """
+    listener = TelegramBotListener(trading_service=mock_trading)
+    listener.bot_token = "123456:FAKE_TOKEN"
+    admin_id = str(config.TELEGRAM_CHAT_ID or "12345")
+    listener.chat_id = admin_id
+    listener._edit_message = AsyncMock(return_value=True)
+    listener._send_reply = AsyncMock(return_value=True)
+
+    callbacks_to_test = [
+        "dash_main",
+        "dash_main_ref",
+        "dash_positions",
+        "dash_radar",
+        "dash_wallet",
+        "dash_journal",
+        "dash_debates",
+        "radar_table",
+        "radar_pullback",
+        "radar_verdicts",
+        "wallet_watch_only",
+        "wallet_manual_sig",
+        "wallet_web3",
+        "wallet_disconnect",
+        "wallet_toggle_copy",
+        "risk_menu",
+        "dash_pause_entries",
+        "dash_resume_entries",
+    ]
+
+    for cb in callbacks_to_test:
+        listener._edit_message.reset_mock()
+        # Ensure answerCallbackQuery doesn't attempt real network request
+        with patch("services.telegram_service.TelegramService.answer_callback_query", new_callable=AsyncMock):
+            await listener.handle_callback(f"cb_{cb}", cb, chat_id=admin_id, message_id=999)
+            # Must invoke _edit_reply -> _edit_message without crashing
+            assert listener._edit_message.call_count >= 1, f"Callback {cb} did not trigger _edit_reply / _edit_message"
+
+

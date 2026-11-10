@@ -2,8 +2,11 @@ import os
 import sys
 import aiohttp
 import asyncio
+import logging
 import traceback
 from typing import Callable, Awaitable, Dict, Any, Optional, Tuple
+
+logger = logging.getLogger("TelegramListener")
 
 from services.trader_registry import trader_registry
 
@@ -909,7 +912,7 @@ class TelegramBotListener:
         }
         return text, reply_markup
 
-    async def _send_reply(self, text: str, reply_markup: dict = None, target_chat_id: str = None):
+    async def _send_reply(self, text: str, reply_markup: dict = None, target_chat_id: str = None, parse_mode: str = "Markdown"):
         dest_chat_id = target_chat_id or getattr(self, "_current_sender_chat_id", None) or self.chat_id
         if not self.send_url or not dest_chat_id:
             print(f"⚠️ [TelegramListener] _send_reply: send_url или chat_id не задан! send_url={bool(self.send_url)}, chat_id={bool(dest_chat_id)}")
@@ -918,9 +921,10 @@ class TelegramBotListener:
         payload = {
             "chat_id": dest_chat_id,
             "text": safe_text,
-            "parse_mode": "Markdown",
             "disable_web_page_preview": True
         }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         # If no specific reply_markup is provided, attach appropriate persistent Reply Keyboard
         if reply_markup is None:
             from core.config import config
@@ -959,31 +963,105 @@ class TelegramBotListener:
         except Exception as e:
             print(f"❌ [TelegramListener] Ошибка отправки ответа: {e}")
 
-    async def _edit_message_text(self, text: str, reply_markup: dict = None, message_id: int = None, chat_id: str = None):
+    async def _edit_message_text(
+        self,
+        text: str,
+        reply_markup: dict = None,
+        message_id: int = None,
+        chat_id: str = None,
+        parse_mode: str = "Markdown"
+    ) -> bool:
         dest_chat_id = chat_id or getattr(self, "_current_sender_chat_id", None) or self.chat_id
         if not self.bot_token or not dest_chat_id or not message_id:
-            return
+            return False
         edit_url = f"https://api.telegram.org/bot{self.bot_token}/editMessageText"
         safe_text = text[:3980] + "\n...[TRUNCATED]" if text and len(text) > 4000 else (text or "")
         payload = {
             "chat_id": dest_chat_id,
             "message_id": message_id,
             "text": safe_text,
-            "parse_mode": "Markdown",
             "disable_web_page_preview": True
         }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         if reply_markup:
             payload["reply_markup"] = reply_markup
         try:
             from core.session import SessionManager
             session = await SessionManager.get()
             async with session.post(edit_url, json=payload) as resp:
-                if resp.status != 200:
-                    payload.pop("parse_mode", None)
-                    async with session.post(edit_url, json=payload) as resp2:
-                        pass
+                if resp.status == 200:
+                    return True
+                resp_text = await resp.text()
+                if "message is not modified" in resp_text.lower():
+                    return True
+                payload.pop("parse_mode", None)
+                async with session.post(edit_url, json=payload) as resp2:
+                    if resp2.status == 200:
+                        return True
+                    resp2_text = await resp2.text()
+                    if "message is not modified" in resp2_text.lower():
+                        return True
+                    return False
         except Exception as e:
+            err_str = str(e).lower()
+            if "message is not modified" in err_str:
+                return True
             print(f"⚠️ [TelegramListener] Ошибка editMessageText: {e}")
+            return False
+
+    async def _edit_message(
+        self,
+        chat_id: str | int,
+        message_id: int,
+        text: str,
+        reply_markup: dict | None = None,
+        parse_mode: str = "Markdown"
+    ) -> bool:
+        """Alias for _edit_message_text with standard chat_id/message_id signature."""
+        return await self._edit_message_text(
+            text=text,
+            reply_markup=reply_markup,
+            message_id=message_id,
+            chat_id=str(chat_id),
+            parse_mode=parse_mode
+        )
+
+    async def _edit_reply(
+        self,
+        text: str,
+        reply_markup: dict | None = None,
+        target_chat_id: str | int | None = None,
+        message_id: int | None = None,
+        parse_mode: str = "Markdown",
+    ):
+        """
+        Universal reply editor: edits the existing message in-place to avoid chat spam,
+        falling back to sending a new reply if message_id is absent or editing fails.
+        """
+        chat_id = str(target_chat_id or getattr(self, "_current_sender_chat_id", None) or self.chat_id)
+        if message_id:
+            try:
+                res = await self._edit_message(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode=parse_mode,
+                )
+                if res:
+                    return res
+            except Exception as e:
+                err_str = str(e).lower()
+                if "message is not modified" in err_str:
+                    return True
+                logger.debug(f"[TelegramListener] _edit_reply fallback to _send_reply: {e}")
+        return await self._send_reply(
+            text,
+            reply_markup=reply_markup,
+            target_chat_id=chat_id,
+            parse_mode=parse_mode,
+        )
 
     async def handle_web_app_data(self, web_app_data_str: str, sender_chat_id: str):
         """Processes LinkSigner data received from Telegram Mini App via sendData."""
