@@ -6,6 +6,8 @@
 *.key
 *connected_traders*
 data/memory/connected_traders.json
+*subscriber_positions*
+data/memory/subscriber_positions.json
 .agents/plugins/project-mcps/mcp_config.json
 
 # =========================
