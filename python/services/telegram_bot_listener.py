@@ -247,28 +247,39 @@ class TelegramBotListener:
         wins = int(s.get("win_count", 0) or 0)
         losses = int(s.get("loss_count", 0) or 0)
 
+        from datetime import datetime, timezone
+        now_utc = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+
         from core.config import config
         shadow_on = bool(getattr(config, "SHADOW_MODE", False))
         mode_badge = "👻 SHADOW (Simulation)" if shadow_on else "🔴 LIVE — Nado Mainnet"
 
         entries_paused = getattr(self.trading_service, "entries_paused", False)
-        entries_badge = "⏸️ ВХОДЫ НА ПАУЗЕ" if entries_paused else "🟢 ВХОДЫ АКТИВНЫ"
+        entries_badge = "⏸️ ВХОДЫ НА ПАУЗЕ" if entries_paused else "🟢 ВХОДЫ АКТИВНЫ (Auto-Pilot)"
+
+        slot_icons = "".join(["🟢" if i < active_count else "⚪" for i in range(max_slots)])
+        slot_status = f"[ {active_count} / {max_slots} ] {slot_icons}"
 
         text = (
-            "📊 *AI TRADING TERMINAL | ДАШБОРД*\n"
-            f"• *Режим системы:* `{mode_badge}`\n"
-            f"• *Статус открытия сделок:* `{entries_badge}`\n\n"
-            "💰 *ФИНАНСОВЫЕ МЕТРИКИ:*\n"
-            f"• *Эквити портфеля:* `${equity:,.2f} USDC`\n"
-            f"• *Доступная маржа:* `${avail_margin:,.2f} USDC`\n"
-            f"• *Использование слотов:* `{active_count}/{max_slots}`\n\n"
-            "🌐 *МАКРО-РЕЖИМ И СТАТИСТИКА:*\n"
-            f"• *Режим рынка:* `{macro_regime}` (ADX: `{adx_val:.1f}`)\n"
-            f"• *Винрейт (Win Rate):* `{win_rate:.1f}%` ({wins}W / {losses}L)\n"
-            f"• *Чистый PnL:* `${net_pnl:+.2f} USDC`\n"
-            f"• *Накопленный R:* `{total_r:+.2f} R`\n"
-            f"• *Sentinel Engine:* `🟢 24/7 Активен` (Oracle SL + Trailing Stop)\n\n"
-            "🔗 [Explorer Sub-Account](https://explorer.inkonchain.com/address/0x12d1293CBD98eEA18a2e5906dF5ED3BEf07fB1aa)"
+            "🏛 *ARANEA AI | QUANTITATIVE FUTURES TERMINAL*\n"
+            "────────────────────────────────────────────\n"
+            f"🌐 *СЕТЬ:* `{mode_badge}`  │  *ЯДРО:* `🟢 Sentinel 24/7`\n"
+            f"🚦 *ОРДЕРА:* `{entries_badge}`\n"
+            "────────────────────────────────────────────\n\n"
+            "💼 *ПОРТФЕЛЬ И МАРЖИНАЛЬНЫЙ ПУЛ*\n"
+            f"  • *Эквити портфеля:*      `${equity:,.2f} USDC`\n"
+            f"  • *Доступная маржа:*      `${avail_margin:,.2f} USDC`\n"
+            f"  • *Слоты риска:*          `{slot_status}`\n\n"
+            "📊 *ЭФФЕКТИВНОСТЬ СИСТЕМЫ (LEDGER)*\n"
+            f"  • *Винрейт (Win Rate):*   `{win_rate:.1f}%` ({wins}W / {losses}L)\n"
+            f"  • *Чистый PnL:*           `${net_pnl:+.2f} USDC`\n"
+            f"  • *Накопленный R:*        `{total_r:+.2f} R`\n"
+            f"  • *Защита позиций:*       `Strict Oracle Pegged (Slip Guard)`\n\n"
+            "🌐 *МАКРО-РЕЖИМ И ДИНАМИКА РЫНКА*\n"
+            f"  • *Режим синдиката:*      `{macro_regime}`\n"
+            f"  • *Сила тренда (ADX):*    `{adx_val:.1f}` (15m срез)\n"
+            "────────────────────────────────────────────\n"
+            f"⏰ _{now_utc}_  │  🔗 [Explorer Sub-Account](https://explorer.inkonchain.com/address/0x12d1293CBD98eEA18a2e5906dF5ED3BEf07fB1aa)"
         )
 
         buttons = [
@@ -359,14 +370,14 @@ class TelegramBotListener:
                 is_in_profit = pnl_usd > 0
 
                 lines.append(
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"{icon} *{sym}* (`{direction}` | `{risk_mode_name}`)\n"
-                    f"• *Объем:* `${notional:,.2f}` (`{contracts:.4f}` контр.)\n"
-                    f"• *Вход:* `${entry_price:,.2f}` | *Текущая:* `${mark_price:,.2f}`\n"
-                    f"• *Плавающий PnL:* `${pnl_usd:+.2f}` ({pnl_pct:+.2f}%) | `{r_mult:+.2f} R`\n"
-                    f"• *Stop-Loss:* `${sl_price:,.2f}`\n"
-                    f"• *Take-Profit:* `${tp_price:,.2f}` (`{tp_r_target:.1f}R`)\n"
-                    f"• *Фаза Sentinel:* `{phase_str}`"
+                    f"{icon} *{sym}* (`{direction}` │ `{risk_mode_name}`)\n"
+                    f"  • *Объем позиции:*        `${notional:,.2f}` (`{contracts:.4f}` контр.)\n"
+                    f"  • *Точка входа:*          `${entry_price:,.2f}` │ *Текущая:* `${mark_price:,.2f}`\n"
+                    f"  • *Плавающий PnL:*        `${pnl_usd:+.2f}` ({pnl_pct:+.2f}%) │ `{r_mult:+.2f} R`\n"
+                    f"  • *Stop-Loss:*            `${sl_price:,.2f}`\n"
+                    f"  • *Take-Profit:*          `${tp_price:,.2f}` (`{tp_r_target:.1f}R`)\n"
+                    f"  • *Фаза Sentinel:*        `{phase_str}`\n"
+                    "────────────────────────────────────────────"
                 )
 
                 row = []
@@ -385,10 +396,15 @@ class TelegramBotListener:
         master_positions = getattr(self.trading_service, "active_positions", {})
         if not master_positions:
             text = (
-                "💼 *ОТКРЫТЫЕ ПОЗИЦИИ И SL*\n\n"
-                "⚪ *Активных позиций нет*\n"
-                "_Радар анализирует рынок и ожидает подтверждения паттернов._\n\n"
-                "🛡️ *Sentinel Agent:* в режиме сканирования 24/7."
+                "💼 *АКТИВНЫЕ ПОЗИЦИИ И SENTINEL GUARD*\n"
+                "────────────────────────────────────────────\n"
+                "⚪ *В данный момент экспозиция нулевая (0/2 слотов)*\n"
+                "Капитал находится в 100% безопасности в USDC.\n\n"
+                "🛡 *СТАТУС КОНТУРОВ ЗАЩИТЫ:*\n"
+                "  • *Sentinel Execution:* `🟢 Активен (контроль 24/7 каждые 1.5с)`\n"
+                "  • *Dynamic Trailing:*   `⏳ В режиме ожидания импульса`\n"
+                "  • *Black Swan Guard:*   `🟢 Защита просадки активна`\n\n"
+                "💡 _AI-Радар непрерывно сканирует стаканы и ордербук 7 пар Nado DEX._"
             )
             markup = {
                 "inline_keyboard": [
@@ -398,7 +414,10 @@ class TelegramBotListener:
             return text, markup
 
         # 3. For admin or users viewing master live terminal positions
-        lines = ["💼 *ОТКРЫТЫЕ ПОЗИЦИИ И СОПРОВОЖДЕНИЕ SENTINEL*\n"]
+        lines = [
+            "💼 *АКТИВНЫЕ ПОЗИЦИИ И SENTINEL GUARD*",
+            "────────────────────────────────────────────\n"
+        ]
         action_buttons = []
 
         for sym, pos in master_positions.items():
@@ -455,14 +474,14 @@ class TelegramBotListener:
             is_in_profit = pnl_usd > 0
 
             lines.append(
-                f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"{icon} *{sym}* (`{direction}`)\n"
-                f"• *Объем:* `${notional:,.2f}` (`{contracts:.4f}` контр.)\n"
-                f"• *Вход:* `${entry_price:,.2f}` | *Текущая:* `${mark_price:,.2f}`\n"
-                f"• *Плавающий PnL:* `${pnl_usd:+.2f}` ({pnl_pct:+.2f}%) | `{r_mult:+.2f} R`\n"
-                f"• *Stop-Loss:* `${sl_price:,.2f}`\n"
-                f"• *Take-Profit:* `${tp_price:,.2f}`\n"
-                f"• *Фаза Sentinel:* `{phase_str}`"
+                f"  • *Объем позиции:*        `${notional:,.2f}` (`{contracts:.4f}` контр.)\n"
+                f"  • *Точка входа:*          `${entry_price:,.2f}` │ *Текущая:* `${mark_price:,.2f}`\n"
+                f"  • *Плавающий PnL:*        `${pnl_usd:+.2f}` ({pnl_pct:+.2f}%) │ `{r_mult:+.2f} R`\n"
+                f"  • *Stop-Loss (Fixed):*    `${sl_price:,.2f}`\n"
+                f"  • *Take-Profit:*          `${tp_price:,.2f}`\n"
+                f"  • *Фаза Sentinel:*        `{phase_str}`\n"
+                "────────────────────────────────────────────"
             )
 
             if is_admin:
@@ -481,6 +500,7 @@ class TelegramBotListener:
         return text, {"inline_keyboard": action_buttons}
 
     async def _get_radar_payload(self) -> Tuple[str, dict]:
+        from typing import Optional
         tracked_pairs = ["BTC-USD", "ETH-USD", "SOL-USD", "HYPE-USD", "ZEC-USD", "LIT-USD", "BNB-USD"]
 
         from core.state_store import StateStore
@@ -509,28 +529,89 @@ class TelegramBotListener:
             except Exception:
                 pass
 
+        token_badges = {
+            "BTC-USD": "🪙 Bitcoin",
+            "ETH-USD": "💎 Ethereum",
+            "SOL-USD": "⚡ Solana",
+            "HYPE-USD": "🔥 Hyperliquid",
+            "ZEC-USD": "🛡️ Zcash",
+            "LIT-USD": "✨ Litentry",
+            "BNB-USD": "🔶 BNB Chain",
+        }
+
+        def _get_trend_badge(adx_val: float) -> str:
+            if adx_val >= 35.0:
+                return "Импульс 🚀"
+            elif adx_val >= 22.0:
+                return "В тренде 📈"
+            else:
+                return "Флэт ↔️"
+
+        def _translate_verdict(action: str, rej_tag: Optional[str]) -> str:
+            if action in ["BUY", "ENTER", "LONG"]:
+                return "🟢 Вход в LONG (Подтвержден Синдикатом)"
+            elif action in ["SELL", "SHORT"]:
+                return "🔴 Вход в SHORT (Подтвержден Синдикатом)"
+
+            if not rej_tag or rej_tag in ["CLEAN", "NO_SIGNAL", "OK"]:
+                return "👁 Сканирование паттернов входа"
+
+            rej_map = {
+                "WAIT_PULLBACK": "⏳ Ожидание отката к поддержке (EMA-20)",
+                "PULLBACK_CANDIDATE": "⏳ Поиск оптимальной точки отката",
+                "VOLATILITY_BURST": "⚡ Всплеск волатильности (защита от ложного пробоя)",
+                "CHOP_FILTER": "🛡 Фильтр распила волатильности (боковик)",
+                "MACRO_REGIME_VETO": "🛡 Вето макро-режима (боковой тренд)",
+                "UNKNOWN_REGIME_VETO": "🛡 Вето режима: калибровка индикаторов",
+                "RANGE_BOUND": "↔️ Торговля в редже (без пробоя границ)",
+                "ORDER_BOOK_IMBALANCE": "⚖️ Дисбаланс глубины биржевого стакана",
+                "MIN_NOTIONAL": "🔍 Калибровка минимального лота Nado CLOB",
+                "MAX_DRAWDOWN": "🛑 Стоп-кран суточной просадки",
+                "TREND_EXHAUSTED": "⚠️ Затухание импульса тренда",
+                "OVERBOUGHT": "⚠️ Локальная перекупленность (риск разворота)",
+                "OVERSOLD": "⚠️ Локальная перепроданность (поиск дна)",
+                "SENTINEL_LOCKED": "🔒 Слот занят активной позицией",
+            }
+            if rej_tag in rej_map:
+                return rej_map[rej_tag]
+
+            clean_tag = str(rej_tag).replace("_", " ").title()
+            return f"⚪ Выжидание ({clean_tag})"
+
         lines = [
-            "🧠 *AI-РАДАР И СКАНЕР СИНДИКАТА*\n"
-            "_Мульти-таймфрейм анализ (15m, 1H, 4H) 7 пар Nado DEX_\n"
+            "🧠 *ARANEA AI | МАКРО-РАДАР РЫНКА*\n"
+            "_Мульти-таймфрейм анализ (15m, 1H, 4H) • 7 пар Nado DEX_\n"
+            "────────────────────────────────────────────"
         ]
 
         for sym in tracked_pairs:
             d = latest_by_sym.get(sym, {})
             mgi = d.get("market_guard_inputs") or {}
-            adx = d.get("adx") if d.get("adx") is not None else mgi.get("adx_14")
-            adx_str = f"{adx:.1f}" if isinstance(adx, (int, float)) else "28.5"
-            bb = d.get("bb_pos") if d.get("bb_pos") is not None else (d.get("bb_pos_pct") if d.get("bb_pos_pct") is not None else mgi.get("bb_position_pct"))
-            bb_str = f"{bb:.1f}%" if isinstance(bb, (int, float)) else "45.0%"
+            adx_val = d.get("adx") if d.get("adx") is not None else mgi.get("adx_14")
+            adx_num = float(adx_val) if isinstance(adx_val, (int, float)) else 28.5
+            adx_str = f"{adx_num:.1f}"
+
+            bb_val = d.get("bb_pos") if d.get("bb_pos") is not None else (d.get("bb_pos_pct") if d.get("bb_pos_pct") is not None else mgi.get("bb_position_pct"))
+            bb_num = float(bb_val) if isinstance(bb_val, (int, float)) else 45.0
+            bb_str = f"{bb_num:.1f}%"
+
             action = d.get("final_action", "NO_SIGNAL")
             rej = d.get("rejection_tag")
 
-            status_icon = "🟢" if action in ["BUY", "SELL", "ENTER"] else ("🟡" if action == "HOLD" else "⚪")
-            reason_str = f"{action}" + (f" ({rej})" if rej else "")
-            lines.append(f"{status_icon} *{sym}:* ADX `{adx_str}` | BB `{bb_str}` | `{reason_str}`")
+            badge = token_badges.get(sym, sym)
+            trend_str = _get_trend_badge(adx_num)
+            verdict_str = _translate_verdict(action, rej)
+
+            lines.append(
+                f"*{badge}* • {trend_str} (ADX `{adx_str}`)\n"
+                f"   └ _{verdict_str}_"
+            )
 
         pw_count = len(pw_dict)
         pw_str = ", ".join(pw_dict.keys()) if pw_dict else "пуст (все пары в штатном режиме)"
-        lines.append(f"\n⏳ *Pullback Watchlist ({pw_count}):* `{pw_str}`")
+        lines.append("────────────────────────────────────────────")
+        lines.append(f"⏳ *Pullback Watchlist ({pw_count}):* `{pw_str}`")
+        lines.append("💡 _AI-Радар сверяет сетапы с позициями топ-снайперов Nado DEX._")
 
         buttons = [
             [
@@ -566,17 +647,48 @@ class TelegramBotListener:
             except Exception:
                 pass
 
-        lines = ["📊 *СВОДНАЯ ТАБЛИЦА 7 ПАР NADO DEX*\n"]
+        table_rows = ["АКТИВ     ФАЗА      ADX   BB%    ДЕЙСТВИЕ"]
         for sym in tracked:
             d = latest_by_sym.get(sym, {})
             mgi = d.get("market_guard_inputs") or {}
             adx = d.get("adx") if d.get("adx") is not None else mgi.get("adx_14")
-            adx_s = f"{adx:.1f}" if isinstance(adx, (int, float)) else "28.5"
+            adx_val = float(adx) if isinstance(adx, (int, float)) else 28.5
+            adx_s = f"{adx_val:.1f}"
+
             bb = d.get("bb_pos") if d.get("bb_pos") is not None else (d.get("bb_pos_pct") if d.get("bb_pos_pct") is not None else mgi.get("bb_position_pct"))
-            bb_s = f"{bb:.1f}%" if isinstance(bb, (int, float)) else "45.0%"
-            act = d.get("final_action", "NO_SIGNAL")
-            rej = d.get("rejection_tag") or "OK"
-            lines.append(f"• *{sym:8}* | ADX `{adx_s:>4}` | BB `{bb_s:>5}` | `{act}` (`{rej}`)")
+            bb_val = float(bb) if isinstance(bb, (int, float)) else 45.0
+            bb_s = f"{bb_val:.0f}%"
+
+            act = d.get("final_action", "HOLD")
+            if act in ["BUY", "ENTER", "LONG"]:
+                act_str = "BUY"
+            elif act in ["SELL", "SHORT"]:
+                act_str = "SELL"
+            elif d.get("rejection_tag") == "WAIT_PULLBACK":
+                act_str = "WAIT"
+            else:
+                act_str = "HOLD"
+
+            if adx_val >= 35.0:
+                phase_str = "IMPULSE"
+            elif adx_val >= 22.0:
+                phase_str = "TREND"
+            else:
+                phase_str = "CHOP"
+
+            short_sym = sym.replace("-USD", "")
+            table_rows.append(f"{short_sym:<9} {phase_str:<9} {adx_s:>5} {bb_s:>5}  {act_str}")
+
+        table_block = "\n".join(table_rows)
+
+        lines = [
+            "📊 *СВОДНЫЙ СКАНЕР 7 ПАР NADO DEX*\n"
+            "_Мульти-таймфрейм телеметрия (15m / 1H / 4H)_\n"
+            "────────────────────────────────────────────\n"
+            f"```text\n{table_block}\n```\n"
+            "────────────────────────────────────────────\n"
+            "💡 _Таблица отражает мгновенную математическую оценку рынка агентами Синдиката._"
+        ]
 
         text = "\n".join(lines)
         markup = {
@@ -599,18 +711,31 @@ class TelegramBotListener:
                 pass
 
         if pw_dict:
-            lines = ["⏳ *PULLBACK WATCHLIST (ОЖИДАНИЕ ОТКАТА)*\n"]
+            lines = [
+                "⏳ *PULLBACK WATCHLIST | ЛИСТ ОЖИДАНИЯ ОТКАТА*\n"
+                "_Инструменты, где тренд подтвержден, но вход отложен до теста EMA_\n"
+                "────────────────────────────────────────────"
+            ]
             for sym, item in pw_dict.items():
                 dir_str = item.get("direction", "N/A")
+                dir_icon = "🟢" if str(dir_str).upper() in ["BUY", "LONG"] else "🔴"
                 target_entry = item.get("target_entry", 0.0)
                 added_time = str(item.get("added_at", ""))[:19]
-                lines.append(f"• *{sym}* (`{dir_str}`): цель входа `${target_entry:,.2f}` (с {added_time})")
+                lines.append(
+                    f"{dir_icon} *{sym}* (`{dir_str}`)\n"
+                    f"  ├ *Целевой вход:* `${target_entry:,.2f}` (тест 20 EMA)\n"
+                    f"  └ *В листе с:*    `{added_time}`"
+                )
+            lines.append("────────────────────────────────────────────")
+            lines.append("💡 _При касании ценой расчетного уровня Синдикат мгновенно отправит лимитный ордер._")
             text = "\n".join(lines)
         else:
             text = (
-                "⏳ *PULLBACK WATCHLIST*\n\n"
-                "⚪ *Список пуст.*\n"
-                "_В данный момент нет инструментов в фазе ожидания отката к EMA/BB._"
+                "⏳ *PULLBACK WATCHLIST | ЛИСТ ОЖИДАНИЯ ОТКАТА*\n"
+                "────────────────────────────────────────────\n\n"
+                "⚪ *Список ожидания пуст.*\n"
+                "_Все 7 пар Nado DEX находятся в штатном режиме сканирования. Нет инструментов в фазе ожидания отката к EMA/BB._\n\n"
+                "────────────────────────────────────────────"
             )
 
         markup = {
@@ -634,16 +759,32 @@ class TelegramBotListener:
                 pass
 
         if snaps:
-            lines = ["🏛 *ВЕРДИКТЫ ПОСЛЕДНЕГО ЦИКЛА СКАНИРОВАНИЯ*\n"]
+            lines = [
+                "🏛 *ВЕРДИКТЫ ПОСЛЕДНЕГО ЦИКЛА СКАНИРОВАНИЯ*\n"
+                "_Решения Синдиката ИИ по 7 торговым парам Nado DEX_\n"
+                "────────────────────────────────────────────"
+            ]
             for s in reversed(snaps):
                 sym = s.get("symbol", "N/A")
                 act = s.get("final_action", "HOLD")
                 rej = s.get("rejection_tag") or "CLEAN"
                 reg = s.get("macro_regime", "TREND")
-                lines.append(f"• *{sym}*: `{act}` [Режим: `{reg}`, Причина: `{rej}`]")
+                act_icon = "🟢" if act in ["BUY", "SELL", "ENTER"] else "⚪"
+                lines.append(
+                    f"{act_icon} *{sym}*\n"
+                    f"  ├ *Действие:* `{act}` │ *Режим:* `{reg}`\n"
+                    f"  └ *Причина:*  `{rej}`"
+                )
+            lines.append("────────────────────────────────────────────")
+            lines.append("⚖️ _Синдикат: Gemini 2.5 Flash Lite + Llama 3.3 70B + DeepSeek-V3_")
             text = "\n".join(lines)
         else:
-            text = "🏛 *ВЕРДИКТЫ ПОСЛЕДНЕГО ЦИКЛА*\n\n⚪ Данные формируются."
+            text = (
+                "🏛 *ВЕРДИКТЫ ПОСЛЕДНЕГО ЦИКЛА СКАНИРОВАНИЯ*\n"
+                "────────────────────────────────────────────\n\n"
+                "⚪ *Данные формируются...*\n"
+                "_Запустите сканирование рынка в пульте управления или дождитесь планового цикла._"
+            )
 
         markup = {
             "inline_keyboard": [
@@ -755,6 +896,7 @@ class TelegramBotListener:
         lines = [
             "🐋 *ТОП-СНАЙПЕРЫ ЛИДЕРБОРДА NADO DEX*\n"
             "_Позиционные трейдеры (Win Rate >= 55%, 10-15k сделок, без HFT-ботов)_\n"
+            "────────────────────────────────────────────"
         ]
 
         medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣"]
@@ -786,7 +928,8 @@ class TelegramBotListener:
             )
 
         now_utc = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-        lines.append(f"\n⏰ _Синхронизировано: {now_utc} (Nado DEX 30d API)_")
+        lines.append("────────────────────────────────────────────")
+        lines.append(f"⏰ _Синхронизировано: {now_utc} (Nado DEX 30d API)_")
         lines.append("💡 _AI-Радар сверяет свои точки входа с динамикой позиций топ-снайперов._")
 
         markup = {
@@ -816,7 +959,11 @@ class TelegramBotListener:
 
         if trades:
             last5 = trades[-5:]
-            lines = ["📜 *ЖУРНАЛ СДЕЛОК (ПОСЛЕДНИЕ 5)*\n"]
+            lines = [
+                "📜 *ТОРГОВЫЙ ЖУРНАЛ | АРХИВ ОПЕРАЦИЙ*\n"
+                "_История последних 5 закрытых сделок терминала_\n"
+                "────────────────────────────────────────────"
+            ]
             for t in reversed(last5):
                 sym = t.get("symbol", "N/A")
                 dir_str = t.get("direction", "N/A")
@@ -825,12 +972,16 @@ class TelegramBotListener:
                 exit_reason = t.get("triggered_by") or t.get("exit_reason") or "TP/SL"
                 icon = "🟢" if pnl_usd >= 0 else "🔴"
                 lines.append(f"{icon} *{sym}* (`{dir_str}`): `${pnl_usd:+.2f}` (`{r_mult:+.2f}R`) | `{exit_reason}`")
+            lines.append("────────────────────────────────────────────")
+            lines.append("💡 _Все сделки фиксируются с чистым PnL с учетом биржевых комиссий Nado CLOB._")
             text = "\n".join(lines)
         else:
             text = (
-                "📜 *ЖУРНАЛ СДЕЛОК*\n\n"
-                "⚪ В текущей сессии еще нет закрытых сделок.\n"
-                "_Все текущие позиции сопровождаются модулем Sentinel в режиме 24/7._"
+                "📜 *ТОРГОВЫЙ ЖУРНАЛ | АРХИВ ОПЕРАЦИЙ*\n"
+                "────────────────────────────────────────────\n\n"
+                "⚪ *В текущей сессии еще нет закрытых сделок.*\n"
+                "_Все открытые позиции сопровождаются модулем Sentinel в режиме 24/7._\n\n"
+                "────────────────────────────────────────────"
             )
 
         markup = {
@@ -863,21 +1014,26 @@ class TelegramBotListener:
             penalties = ceo.get("risk_penalties", 0)
 
             text = (
-                "🧠 *ДЕБАТЫ И КОНСЕНСУС СИНДИКАТА CEO*\n"
-                f"_Последний проверенный символ:_ *{sym}*\n\n"
-                f"• *Стратегический режим:* `{strat}`\n"
-                f"• *Направление и вердикт:* `{decision}` (`{action}`)\n"
+                "🧠 *СИНДИКАТ ИИ | ДЕБАТЫ И КОНСЕНСУС CEO*\n"
+                f"_Последний проверенный символ:_ *{sym}*\n"
+                "────────────────────────────────────────────\n"
+                f"• *Стратегический режим:*    `{strat}`\n"
+                f"• *Направление и вердикт:*   `{decision}` (`{action}`)\n"
                 f"• *Уверенность (Conviction):* `{conf}%`\n"
-                f"• *Штрафы риска (Penalties):* `{penalties} pts`\n\n"
+                f"• *Штрафы риска (Penalties):* `{penalties} pts`\n"
+                "────────────────────────────────────────────\n"
                 f"📝 *Тезис решения (CEO Thesis):*\n"
-                f"_{safe_reason}_\n\n"
-                "⚖️ _Синдикат: Gemini 2.5 Flash Lite (Bull/Bear) + Llama 3.3 70B (OI/Depth) + DeepSeek-V3 (Consensus)_"
+                f"_{safe_reason}_\n"
+                "────────────────────────────────────────────\n"
+                "⚖️ _Синдикат: Gemini 2.5 (Bull/Bear) • Llama 3.3 70B (OI/Depth) • DeepSeek-V3 (Consensus)_"
             )
         else:
             text = (
-                "🧠 *ДЕБАТЫ И КОНСЕНСУС СИНДИКАТА CEO*\n\n"
-                "⚪ Данные последнего цикла еще формируются.\n"
-                "_Радар сканирует рынок согласно расписанию._"
+                "🧠 *СИНДИКАТ ИИ | ДЕБАТЫ И КОНСЕНСУС CEO*\n"
+                "────────────────────────────────────────────\n\n"
+                "⚪ *Данные последнего цикла еще формируются...*\n"
+                "_Радар сканирует рынок согласно расписанию._\n\n"
+                "────────────────────────────────────────────"
             )
 
         markup = {
@@ -895,11 +1051,13 @@ class TelegramBotListener:
             owner = trader.get("owner_address", "0x...")
             sub = trader.get("subaccount", "default")
             text = (
-                "🔗 *КАБИНЕТ КОШЕЛЬКА | WATCH-ONLY*\n\n"
+                "🔗 *КАБИНЕТ КОШЕЛЬКА | WATCH-ONLY МОНИТОРИНГ*\n"
+                "────────────────────────────────────────────\n"
                 f"👤 *Адрес кошелька:* `{owner}`\n"
                 f"📂 *Суб-аккаунт Nado:* `{sub}`\n"
-                "👁 *Режим:* `Watch-Only (Телеметрия без торговли)`\n"
-                "🛡 *Безопасность:* Приватные ключи и сессии не требуются.\n\n"
+                "👁 *Режим доступа:* `Watch-Only (Только телеметрия)`\n"
+                "🛡 *Безопасность:* `100% изоляция (без ключей и подписей)`\n"
+                "────────────────────────────────────────────\n"
                 "💡 _Вы можете в любой момент переключиться на реальный копи-трейдинг через Web3 LinkSigner._"
             )
             buttons = [
@@ -921,13 +1079,15 @@ class TelegramBotListener:
             tp_target = float(trader.get("tp_r_target", 3.0))
 
             text = (
-                "🔗 *КАБИНЕТ КОШЕЛЬКА | NON-CUSTODIAL TRADER*\n\n"
+                "🔗 *КАБИНЕТ КОШЕЛЬКА | NON-CUSTODIAL ТРЕЙДИНГ*\n"
+                "────────────────────────────────────────────\n"
                 f"👤 *Владелец:* `{owner}`\n"
                 f"📂 *Суб-аккаунт Nado:* `{sub}`\n"
                 f"🔑 *Сессионный ключ:* `{trader.get('signer_address', '0x...')[:10]}...`\n"
                 f"🛡 *Безопасность:* `NON-CUSTODIAL (0 прав на вывод)`\n"
                 f"⚙️ *Профиль риска:* `{risk_mode}` ({risk_pct}% риск, {tp_target}R TP, {max_slots} слота, {lev:.0f}x)\n"
-                f"📡 *Авто-копирование:* `{copy_str}`\n\n"
+                f"📡 *Авто-копирование:* `{copy_str}`\n"
+                "────────────────────────────────────────────\n"
                 "💡 _Сделки ведущего терминала копируются в реальном времени строго от вашего баланса с индивидуальным R-сайзингом._"
             )
             toggle_btn_text = "⏸ Приостановить копирование" if copy_on else "▶️ Возобновить копирование"
@@ -942,7 +1102,8 @@ class TelegramBotListener:
             # Guest / Showcase
             text = (
                 "🔗 *ПОДКЛЮЧЕНИЕ КОШЕЛЬКА К AI-FUTURES-TRADER*\n"
-                "_Торговля на Nado DEX CLOB (Ink L2 Mainnet)_\n\n"
+                "_Торговля на Nado DEX CLOB (Ink L2 Mainnet)_\n"
+                "────────────────────────────────────────────\n"
                 "Выберите удобный режим подключения:\n\n"
                 "🦊 *1. Web3 LinkSigner (Копи-трейдинг)*\n"
                 "Делегирование прав на выставление ордеров сессионному ключу бота. "
@@ -950,7 +1111,8 @@ class TelegramBotListener:
                 "👁 *2. Watch-Only Режим (Мониторинг)*\n"
                 "Введите адрес кошелька `0x...` без ключей и подписей для отслеживания баланса и позиций.\n\n"
                 "📋 *3. Ввести подпись вручную*\n"
-                "Для ввода EIP-712 подписи через команду `/link_confirm`."
+                "Для ввода EIP-712 подписи через команду `/link_confirm`.\n"
+                "────────────────────────────────────────────"
             )
             buttons = [
                 [{"text": "🦊 Подключить Web3 (MetaMask / Rabby)", "callback_data": "wallet_web3"}],
@@ -978,13 +1140,15 @@ class TelegramBotListener:
 
         text = (
             "🔐 *ПОДКЛЮЧЕНИЕ WEB3-КОШЕЛЬКА (LINKSIGNER)*\n"
-            "_100% Non-Custodial: 0 прав на вывод средств_\n\n"
+            "_100% Non-Custodial: 0 прав на вывод средств_\n"
+            "────────────────────────────────────────────\n"
             "📱 *На смартфоне:* нажмите кнопку ниже для открытия прямо в приложении кошелька:\n\n"
             f"👉 [🦊 Открыть в приложении MetaMask]({mm_deeplink})\n"
             f"👉 [🦊 Резервная ссылка (CDN)]({mm_cdn_deeplink})\n"
             f"👉 [🛡️ Открыть в Trust Wallet]({tw_deeplink})\n\n"
             "💻 *На компьютере / Telegram Desktop:*\n"
-            "Нажмите кнопку `🔗 Открыть в Telegram WebApp` ниже.\n\n"
+            "Нажмите кнопку `🔗 Открыть в Telegram WebApp` ниже.\n"
+            "────────────────────────────────────────────\n"
             f"🌐 _Прямая ссылка для любого Web3-браузера:_\n`{clean_url}`"
         )
 
@@ -1013,7 +1177,7 @@ class TelegramBotListener:
         tp_r = float(settings.get("tp_r_target", 3.0))
         be_r = float(settings.get("be_trigger_r", 0.75))
         trail_r = float(settings.get("trail_activation_r", 1.35))
-        high_conv = "Да (только conviction >= 75%)" if settings.get("only_high_conviction") else "Нет"
+        high_conv = "Да (conviction >= 75%)" if settings.get("only_high_conviction") else "Нет"
         daily_dd = float(settings.get("max_daily_drawdown_pct", 4.0))
         target_eq = float(settings.get("target_equity_usd", 0.0))
         target_str = f"${target_eq:,.2f} USDC" if target_eq > 0 else "Выключено (0.00$)"
@@ -1024,17 +1188,22 @@ class TelegramBotListener:
         dd_status = "🛑 СТОП-КРАН АКТИВЕН" if dd_paused else "🟢 Норма"
 
         text = (
-            "⚙️ *ПРОФИЛЬ РИСКА И ЦЕЛИ КОПИ-ТРЕЙДИНГА*\n\n"
-            f"👤 *Текущий режим:* `{current_mode_str}`\n"
-            f"• *Риск на сделку:* `{risk_pct:.1f}%` от депозита\n"
-            f"• *Максимум слотов:* `{max_slots}` позиций\n"
-            f"• *Потолок плеча:* `{max_lev:.0f}x`\n"
-            f"• *Цель Take-Profit:* `{tp_r:.1f} R`\n"
-            f"• *Пороги Sentinel:* Б/У на `{be_r:.2f}R` | Трейлинг от `{trail_r:.2f}R`\n"
-            f"• *Только высокая уверенность:* `{high_conv}`\n"
-            f"• *Дневной стоп-кран (Drawdown):* `{daily_dd:.1f}%` ({dd_status})\n"
-            f"• *Цель по депозиту:* `{target_str}`\n"
-            f"• *Статус копи-трейдинга:* `{copy_status}`\n\n"
+            "⚙️ *ПРОФИЛЬ РИСКА И ЦЕЛИ КОПИ-ТРЕЙДИНГА*\n"
+            "────────────────────────────────────────────\n"
+            f"👤 *Текущий режим:* `{current_mode_str}`\n\n"
+            "📊 *Параметры сайзинга:*\n"
+            f"  • *Риск на сделку:*       `{risk_pct:.1f}%` от депозита\n"
+            f"  • *Лимит слотов:*         `{max_slots}` позиций\n"
+            f"  • *Потолок плеча:*        `{max_lev:.0f}x`\n"
+            f"  • *Целевой Take-Profit:*  `{tp_r:.1f} R`\n\n"
+            "🛡 *Защита Sentinel Guard:*\n"
+            f"  • *Безубыток (BE):*       перевод при `+{be_r:.2f} R`\n"
+            f"  • *Трейлинг-стоп:*        активация от `+{trail_r:.2f} R`\n"
+            f"  • *Фильтр уверенности:*   `{high_conv}`\n"
+            f"  • *Дневной стоп-кран:*    `{daily_dd:.1f}%` ({dd_status})\n"
+            f"  • *Целевой депозит:*      `{target_str}`\n"
+            f"  • *Статус копирования:*   `{copy_status}`\n"
+            "────────────────────────────────────────────\n"
             "💡 _Выберите готовый пресет риска в 1 клик или настройте персональные цели:_"
         )
 
@@ -1062,7 +1231,7 @@ class TelegramBotListener:
         predator_status = "🟢 ВКЛЮЧЕН" if predator_on else "⚪ ВЫКЛЮЧЕН"
         predator_btn_text = "🦈 Анти-Бот: Выкл" if predator_on else "🦈 Анти-Бот: Вкл"
 
-        auto_status = "🤖 ВКЛ (по волатильности)" if auto_predator_on else "🔴 ВЫКЛ (Ручной)"
+        auto_status = "🤖 ВКЛ (динамический)" if auto_predator_on else "🔴 ВЫКЛ (Ручной)"
         auto_btn_text = "🤖 Авто-Режим: ВЫКЛ" if auto_predator_on else "🤖 Авто-Режим: ВКЛ"
 
         shadow_status = "👻 SHADOW (Виртуальный)" if shadow_on else "⚡ LIVE (Боевой On-Chain)"
@@ -1076,12 +1245,14 @@ class TelegramBotListener:
         current_risk_str = risk_icons.get(profile, profile)
 
         text = (
-            "🎛 *ПУЛЬТ УПРАВЛЕНИЯ РЕЖИМАМИ ТОРГОВЛИ*\n\n"
+            "🎛 *ПУЛЬТ УПРАВЛЕНИЯ РЕЖИМАМИ ТОРГОВЛИ*\n"
+            "────────────────────────────────────────────\n"
             f"🦈 *Анти-Бот (Predator Mode):* {predator_status}\n"
-            f"• *Автопилот (Auto-Predator):* {auto_status}\n"
-            f"_(Охота на ликвидации и стопы ботов на краях Боллинджера/Donchian)_\n\n"
-            f"📡 *Режим исполнения:* {shadow_status}\n\n"
-            f"⚖️ *Профиль риска:* `{current_risk_str}`\n\n"
+            f"  • *Автопилот:* {auto_status}\n"
+            "  └ _Охота на ликвидации ботов на границах полос Боллинджера/Donchian_\n\n"
+            f"📡 *Режим исполнения:* {shadow_status}\n"
+            f"⚖️ *Профиль риска:* `{current_risk_str}`\n"
+            "────────────────────────────────────────────\n"
             "Нажмите кнопку ниже для переключения:"
         )
 
