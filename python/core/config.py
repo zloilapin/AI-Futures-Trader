@@ -48,6 +48,10 @@ class Settings(BaseSettings):
         default=35.0,
         description="Minimum order notional in USD before auto-bumping to exchange CLOB min_size ($104.00). Orders below this are vetoed as micro-dust."
     )
+    MIN_NOTIONAL_MAX_BUMP_RISK_PCT: float = Field(
+        default=0.038,
+        description="Maximum risk as fraction of deposit allowed when bumping small notional to exchange CLOB min_size ($104.00). Defaults to 3.8% (allowing standard SL on small deposits)."
+    )
     
     LIVE_TRADING_ENABLED: bool = Field(default=False)
     NADO_LIVE_TRADING_ENABLED: bool = Field(default=False)

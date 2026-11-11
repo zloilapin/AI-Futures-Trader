@@ -6320,9 +6320,8 @@ class NadoTradingService(BaseTradingService):
                 return None
 
             pos_notional = float(pos.get("notional_usd") or pos.get("size_usd") or (pos.get("contracts", 0.0) * current_price))
-            is_mock_env = getattr(self, "_manual_stats", False) or isinstance(self.client, MagicMock) or not hasattr(self.client, "market")
             small_pos_protect = False
-            if not is_mock_env and not tier.is_final and pos_notional < 200.0:
+            if not tier.is_final and pos_notional < 200.0:
                 logger.info(
                     f"[NadoTradingService] 🛡️ Small position notional (${pos_notional:.2f} < $200.00) for {canonical_sym}. "
                     f"To prevent Nado min notional error (code 2094) on partial 50% close, moving Stop-Loss on FULL size to Break-Even "
@@ -6341,61 +6340,60 @@ class NadoTradingService(BaseTradingService):
                 self._save_positions()
                 small_pos_protect = True
 
-            if small_pos_protect:
-                pass # Handled outside lock to prevent re-entrancy deadlock
-            elif tier.is_final:
-                contracts_to_close = PartialTPCalculator.floor_to_step(plan.remaining_contracts, plan.size_increment)
-            else:
-                contracts_to_close = tier.remaining_tier_contracts
-
-            if contracts_to_close < plan.min_size:
+            if not small_pos_protect:
                 if tier.is_final:
-                    tier.status = "DUST_REMAINDER"
-                    pos["is_dust"] = True
-                    pos["dust_contracts"] = plan.remaining_contracts
-                    pos["partial_tp_plan"] = plan.to_dict()
-                    self._save_positions()
+                    contracts_to_close = PartialTPCalculator.floor_to_step(plan.remaining_contracts, plan.size_increment)
                 else:
-                    tier.status = "FILLED"
-                    final_tier = next((t for t in plan.tiers if t.is_final), None)
-                    if final_tier and final_tier != tier:
-                        final_tier.close_contracts = round(final_tier.close_contracts + contracts_to_close, 8)
-                    pos["partial_tp_plan"] = plan.to_dict()
-                    self._save_positions()
-                return None
+                    contracts_to_close = tier.remaining_tier_contracts
 
-            tier.status = "SUBMITTING"
-            tier.last_attempt_time = time.time()
-            pos["partial_tp_plan"] = plan.to_dict()
-            self._save_positions()
+                if contracts_to_close < plan.min_size:
+                    if tier.is_final:
+                        tier.status = "DUST_REMAINDER"
+                        pos["is_dust"] = True
+                        pos["dust_contracts"] = plan.remaining_contracts
+                        pos["partial_tp_plan"] = plan.to_dict()
+                        self._save_positions()
+                    else:
+                        tier.status = "FILLED"
+                        final_tier = next((t for t in plan.tiers if t.is_final), None)
+                        if final_tier and final_tier != tier:
+                            final_tier.close_contracts = round(final_tier.close_contracts + contracts_to_close, 8)
+                        pos["partial_tp_plan"] = plan.to_dict()
+                        self._save_positions()
+                    return None
 
-            logger.info(
-                f"[NadoTradingService] 🎯 Fast Price Monitor: Tier {tier.tier_index} ({tier.status}) target hit for {canonical_sym}! "
-                f"Target: {target_price:.4f}, Current: {current_price:.4f}. Contracts to close: {contracts_to_close:.4f}."
-            )
+                tier.status = "SUBMITTING"
+                tier.last_attempt_time = time.time()
+                pos["partial_tp_plan"] = plan.to_dict()
+                self._save_positions()
 
-            # Execute partial close with reduce_only=True
-            close_result = await self.execute_partial_close(
-                symbol=canonical_sym,
-                contracts_to_close=contracts_to_close,
-                current_price=current_price
-            )
+                logger.info(
+                    f"[NadoTradingService] 🎯 Fast Price Monitor: Tier {tier.tier_index} ({tier.status}) target hit for {canonical_sym}! "
+                    f"Target: {target_price:.4f}, Current: {current_price:.4f}. Contracts to close: {contracts_to_close:.4f}."
+                )
 
-            self._in_fast_monitor_tp = True
-            try:
-                applied = self.apply_partial_close_to_position(
+                # Execute partial close with reduce_only=True
+                close_result = await self.execute_partial_close(
                     symbol=canonical_sym,
-                    tier_index=tier.tier_index,
-                    result=close_result
+                    contracts_to_close=contracts_to_close,
+                    current_price=current_price
                 )
-            finally:
-                self._in_fast_monitor_tp = False
 
-            if not close_result.success or not applied:
-                logger.warning(
-                    f"[NadoTradingService] ⚠️ Tier {tier.tier_index} execution failed for {canonical_sym}: {close_result.error}"
-                )
-                return None
+                self._in_fast_monitor_tp = True
+                try:
+                    applied = self.apply_partial_close_to_position(
+                        symbol=canonical_sym,
+                        tier_index=tier.tier_index,
+                        result=close_result
+                    )
+                finally:
+                    self._in_fast_monitor_tp = False
+
+                if not close_result.success or not applied:
+                    logger.warning(
+                        f"[NadoTradingService] ⚠️ Tier {tier.tier_index} execution failed for {canonical_sym}: {close_result.error}"
+                    )
+                    return None
 
         if small_pos_protect:
             try:

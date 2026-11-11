@@ -1555,10 +1555,12 @@ class RiskManager(BaseAgent):
             # Nado DEX CLOB & Native Trigger Optimization ($104.00 Exchange Safe Bump):
             # If notional is below the exchange CLOB threshold ($35.00 <= notional_usd < 103.50),
             # conditionally bump notional to $104.00 to pass exchange limit (avoiding error 2094),
-            # provided the resulting risk does not exceed max(risk_amount_usd * 1.45, total_balance * 0.026).
-            min_bump_threshold = 35.0
+            # provided the resulting risk does not exceed max(risk_amount_usd * 1.85, total_balance * bump_risk_cap_pct).
+            min_bump_threshold = float(getattr(config, "MIN_NOTIONAL_FLOOR_USD", 35.0) or 35.0)
+            bump_risk_cap_pct = float(getattr(config, "MIN_NOTIONAL_MAX_BUMP_RISK_PCT", 0.038) or 0.038)
             target_bump_notional = 104.0
             is_trigger_bumped = False
+            max_allowed_risk_budget = max(risk_amount_usd * 1.85, total_balance * bump_risk_cap_pct) if total_balance > 0 else (risk_amount_usd * 1.85)
             is_production_mode = getattr(config, "SHADOW_MODE", False) or getattr(config, "NADO_LIVE_TRADING_ENABLED", False) or getattr(config, "LIVE_TRADING_ENABLED", False)
             raw_mn = derivatives_data.get("min_notional")
             needs_bump = (is_production_mode or raw_mn is None or float(raw_mn or 0.0) >= 100.0)
@@ -1566,7 +1568,7 @@ class RiskManager(BaseAgent):
                 bumped_notional = target_bump_notional
                 bumped_contracts = bumped_notional / execution_entry if execution_entry > 0 else contracts
                 bumped_risk = bumped_contracts * effective_loss_per_contract
-                max_allowed_bump_risk = max(risk_amount_usd * 1.45, total_balance * 0.026) if total_balance > 0 else (risk_amount_usd * 1.45)
+                max_allowed_bump_risk = max_allowed_risk_budget
                 can_bump = (bumped_notional <= max_notional_usd) and (bumped_risk <= max_allowed_bump_risk)
                 if bumped_notional <= max_notional_usd and total_balance > 0 and can_bump:
                     self.logger.info(
@@ -1843,9 +1845,10 @@ class RiskManager(BaseAgent):
             bump_risk = bump_contracts * effective_loss_per_contract
             bump_margin = round(bump_notional / effective_leverage if effective_leverage > 0 else bump_notional, 2)
 
-            max_allowed_risk_budget = max(risk_amount_usd * 1.45, total_balance * 0.026) if total_balance > 0 else (risk_amount_usd * 1.45)
+            bump_risk_cap_pct = float(getattr(config, "MIN_NOTIONAL_MAX_BUMP_RISK_PCT", 0.038) or 0.038)
+            max_allowed_risk_budget = max(risk_amount_usd * 1.85, total_balance * bump_risk_cap_pct) if total_balance > 0 else (risk_amount_usd * 1.85)
             can_safely_bump = (
-                notional_usd >= 35.0
+                notional_usd >= min_bump_threshold
                 and bump_notional >= 101.0
                 and bump_notional <= max_notional_usd
                 and bump_margin <= (usable_margin * 1.05)
@@ -1888,7 +1891,7 @@ class RiskManager(BaseAgent):
 
         # Re-anchor risk_amount_usd to actual rounded contracts
         actual_planned_risk_usd = contracts * effective_loss_per_contract
-        if is_trigger_bumped:
+        if is_trigger_bumped and max_allowed_risk_budget > 0:
             risk_amount_usd = round(min(actual_planned_risk_usd, max_allowed_risk_budget), 2)
         else:
             risk_amount_usd = round(actual_planned_risk_usd, 2)
