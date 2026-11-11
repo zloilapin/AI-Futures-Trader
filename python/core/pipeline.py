@@ -1454,7 +1454,7 @@ class TradingPipeline:
                             min_conviction=min_conv
                         )
                     else:
-                        self.services.logger.error(f"❌ Status: VETOED BY RISK MANAGER ({risk_verdict.get('reasoning')})")
+                        self.services.logger.log_decision("RiskManager", f"🛡️ Status: VETOED BY RISK MANAGER ({risk_verdict.get('reasoning')})", level="warning")
                         veto_cat = risk_verdict.get("veto_category") or "RISK_VETO"
                         tracker.record_rejection(veto_cat)
 
