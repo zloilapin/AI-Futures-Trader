@@ -1731,10 +1731,10 @@ class TelegramBotListener:
                 else:
                     await self._send_reply("Использование: `/withdraw <сумма>`")
                     
-            elif cmd == "/reset_ledger":
+            elif cmd in ["/reset_ledger", "/reset_stats", "/resetstats", "/resetall", "/reset_all"]:
                 if hasattr(self.trading_service, "reset_ledger"):
                     self.trading_service.reset_ledger()
-                    await self._send_reply("🔄 Ledger сброшен! Текущий баланс стал новой стартовой точкой для подсчета ROI.")
+                    await self._send_reply("🔄 *Ledger и торговая статистика сброшены!*\n• Стартовый баланс обновлен до текущего эквити ($0.00 PnL)\n• Винрейт сброшен: `0.0% (0W / 0L)`\n• Пик баланса и просадка обнулены.")
                 else:
                     await self._send_reply("Сброс Ledger не поддерживается текущим режимом торговли.")
 

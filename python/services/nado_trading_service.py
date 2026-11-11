@@ -2043,7 +2043,7 @@ class NadoTradingService(BaseTradingService):
         logger.info(f"[NadoTradingService] 💰 Ledger adjusted by ${amount:+.2f}. New initial balance: ${self._initial_balance:.2f}")
 
     def reset_ledger(self):
-        """Resets the initial balance to the current equity/spot balance."""
+        """Resets the initial balance to the current equity/spot balance and zeroes historical win/loss stats."""
         self._load_state(force=True)
         spot_usdc = 100.0
         if hasattr(self, "_last_equity") and self._last_equity:
@@ -2061,8 +2061,17 @@ class NadoTradingService(BaseTradingService):
         self._initial_balance = spot_usdc
         self._daily_start_balance = spot_usdc
         self._peak_balance = spot_usdc
+        self.win_count = 0
+        self.loss_count = 0
+        self.recent_streak = []
+        self._daily_start_total_trades = 0
+        self.cooldown_until = 0.0
+        self._last_cooldown_processed_len = 0
+        self._portfolio_summary_cache_time = 0
+        if hasattr(self, "_portfolio_summary_cache"):
+            delattr(self, "_portfolio_summary_cache")
         self._save_state()
-        logger.info(f"[NadoTradingService] 🔄 Ledger reset. Initial balance re-anchored to ${self._initial_balance:.2f}")
+        logger.info(f"[NadoTradingService] 🔄 Ledger reset. Initial balance re-anchored to ${self._initial_balance:.2f}. Win/Loss counters reset to 0W / 0L.")
 
     def reset_peak(self) -> float:
         """Synchronizes peak_balance with current balance and saves state."""
