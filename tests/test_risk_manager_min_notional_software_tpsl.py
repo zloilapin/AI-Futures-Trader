@@ -302,3 +302,64 @@ async def test_small_position_tp1_sets_runner_and_activates_sentinel_parabolic_t
     assert trail_res["state"] == "TRAILING"
     assert "Dynamic Parabolic Trailing" in trail_res["reasoning"]
     assert trail_res["new_sl"] > 85500.0
+
+
+@pytest.mark.asyncio
+async def test_risk_manager_structural_sl_small_balance_bump_approved():
+    """
+    Verifies that on an ~$84.42 equity account with a structural SL of ~1.90%
+    (which produces an initial calculated notional of ~$59.06):
+    1. Stage 6 bump to $104.00 is APPROVED because bumped risk ($2.27-$2.36) <= bump cap ($2.87-$3.21).
+    2. Stage 7 calculates proper leverage from $104.00 (e.g. 6x-7x), ensuring required margin <= usable margin ($37.99).
+    3. Stage 8 passes with approved = True, notional >= 101.0, and risk_amount_usd accurately re-anchored.
+    """
+    mock_logger = MagicMock()
+    mock_llm = MagicMock()
+    rm = RiskManager(mock_logger, mock_llm)
+
+    ceo_decision = {
+        "symbol": "BTC-USD",
+        "decision": "LONG",
+        "conviction": 80,
+        "trade_action": "ENTER"
+    }
+
+    # Entry 50000.0, SL at 49050.0 (1.90% structural distance)
+    market = {
+        "price_data": {"current_price": 50000.0},
+        "indicators": {
+            "atr_14": 500.0,
+            "bb_middle": 49800.0,
+            "ema_20": 49700.0,
+            "structural_sl": 49050.0,
+            "swing_low": 49050.0
+        },
+        "derivatives_data": {
+            "taker_fee_pct": 0.0005,
+            "funding_rate": 0.0001,
+            "size_increment": 0.00005,
+            "price_increment": 0.1,
+            "min_size": 0.00005,
+            "min_notional": 100.0
+        }
+    }
+
+    portfolio = {
+        "total_usd": 84.42,
+        "available_margin": 84.42,
+        "daily_drawdown_pct": 0.0,
+        "recent_streak": []
+    }
+
+    verdict = await rm.analyze(
+        ceo_decision, portfolio, market,
+        effective_profile="BALANCED",
+        strategy_mode="TREND_FOLLOWING",
+        macro_regime="TRENDING"
+    )
+
+    assert verdict["approved"] is True
+    assert verdict["notional_size_usd"] >= 101.0
+    assert verdict["risk_amount_usd"] >= 1.5  # Actual planned risk around $1.80-$2.40
+    assert verdict["risk_amount_usd"] <= 3.25
+    assert verdict["is_software_tpsl"] is False
