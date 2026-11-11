@@ -97,22 +97,16 @@ class LLMClient:
         self.or_models = [self.model_name]
         if self.provider == "openrouter":
             models_chain = [self.model_name]
-            if "qwen" in self.model_name:
-                for alt in ["deepseek/deepseek-chat"]:
-                    if alt not in models_chain:
-                        models_chain.append(alt)
-            elif "llama" in self.model_name:
-                for alt in ["meta-llama/llama-3.3-70b-instruct"]:
-                    if alt not in models_chain:
-                        models_chain.append(alt)
-            elif "deepseek" in self.model_name:
-                for alt in ["deepseek/deepseek-chat"]:
-                    if alt not in models_chain:
-                        models_chain.append(alt)
-            elif "gemini" in self.model_name:
-                for alt in ["google/gemini-2.5-flash-lite"]:
-                    if alt not in models_chain:
-                        models_chain.append(alt)
+            fallback_candidates = [
+                os.getenv("OPENROUTER_MODEL_CEO", "deepseek/deepseek-chat"),
+                os.getenv("OPENROUTER_MODEL_CHEAP", "google/gemini-2.5-flash-lite"),
+                os.getenv("OPENROUTER_MODEL_ESCALATION", "meta-llama/llama-3.3-70b-instruct"),
+                "deepseek/deepseek-chat",
+                "meta-llama/llama-3.3-70b-instruct"
+            ]
+            for cand in fallback_candidates:
+                if cand and cand not in models_chain:
+                    models_chain.append(cand)
             self.or_models = models_chain
         print(f"[LLMClient] Инициализирован провайдер {self.provider.capitalize()} ({self.model_name})")
         if self.provider == "groq":
@@ -362,6 +356,9 @@ class LLMClient:
                                     print(f"❌ [LLMClient {self.provider.upper()}] Ошибка 402 (Payment Required). Закончились кредиты. Переключаемся на другого провайдера...")
                                     break
                                 elif "429" in err_msg or "rate limit" in err_msg.lower() or "500" in err_msg or "503" in err_msg:
+                                    if len(self.or_models) > 1 and attempt >= 1:
+                                        print(f"⚠️ [LLMClient {self.provider.upper()}] Модель {model_to_try} перегружена ({resp.status} Rate Limit). Быстрое переключение на резервную модель...")
+                                        break
                                     wait_time = min(60, (2 ** attempt) + random.uniform(0, 1))
                                     print(f"⚠️ [LLMClient {self.provider.upper()}] Ошибка {resp.status} для {model_to_try}. Повтор через {wait_time:.2f}s...")
                                     await asyncio.sleep(wait_time)
