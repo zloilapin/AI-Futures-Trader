@@ -1837,11 +1837,15 @@ class RiskManager(BaseAgent):
 
             step_str = f"{effective_inc:.10f}".rstrip("0")
             decimals = len(step_str.split(".")[1]) if "." in step_str else 0
-            target_bump = 104.0
-            raw_bump_cntr = target_bump / execution_entry if execution_entry > 0 else 0.0
+            target_min_clob = 101.20
+            raw_bump_cntr = target_min_clob / execution_entry if execution_entry > 0 else 0.0
             bump_steps = math.ceil(round(raw_bump_cntr / effective_inc, 8))
             bump_contracts = round(bump_steps * effective_inc, min(decimals, 8))
             bump_notional = round(bump_contracts * execution_entry, 2)
+            if bump_notional < 101.00:
+                bump_steps += 1
+                bump_contracts = round(bump_steps * effective_inc, min(decimals, 8))
+                bump_notional = round(bump_contracts * execution_entry, 2)
             bump_risk = bump_contracts * effective_loss_per_contract
             bump_margin = round(bump_notional / effective_leverage if effective_leverage > 0 else bump_notional, 2)
 

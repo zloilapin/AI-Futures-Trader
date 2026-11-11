@@ -46,19 +46,13 @@ class DeterministicGuard:
             )
             return False, snapshot_price, tp_price, sl_price, msg
 
-        # Re-anchor SL and TP
+        # Re-anchor SL and TP relative to live_price:
+        # Both SL and TP shift by price_delta so the risk distance abs(new_entry - new_sl)
+        # remains identical to the approved risk distance, preserving R:R and approved risk budget.
         price_delta = live_price - snapshot_price
         new_entry = live_price
         new_tp = round(tp_price + price_delta, 6)
-
-        # One-way structural stop protection:
-        # Never pull the structural stop closer to market price when entry drifts in the trade's favor.
-        if dir_clean == "SHORT":
-            new_sl = round(sl_price + price_delta, 6) if price_delta > 0 else sl_price
-        elif dir_clean == "LONG":
-            new_sl = round(sl_price + price_delta, 6) if price_delta < 0 else sl_price
-        else:
-            new_sl = round(sl_price + price_delta, 6)
+        new_sl = round(sl_price + price_delta, 6)
 
         msg = (
             f"[PriceDriftGuard] ✅ Вход разрешен {symbol} ({dir_clean}): "

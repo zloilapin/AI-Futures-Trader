@@ -1133,6 +1133,13 @@ class TradingPipeline:
                             return False
 
                     self.services.logger.info(f"[Stage 5] Risk Manager (Macro Profile: {profile}, Candidate Profile: {effective_asset_profile}, Regime: {detected_regime}) проверяет параметры сделки для {symbol}...")
+                    try:
+                        fresh_summary = await self.services.trading_service.get_portfolio_summary()
+                        if isinstance(fresh_summary, dict) and fresh_summary:
+                            portfolio_data.update(fresh_summary)
+                    except Exception as summary_err:
+                        self.services.logger.debug(f"[Pipeline] Portfolio summary refresh inside execution lock failed: {summary_err}")
+
                     portfolio_data["active_positions"] = self.services.trading_service.active_positions
                     portfolio_data["pending_reconciliations"] = getattr(self.services.trading_service, "pending_reconciliations", {})
                     portfolio_data["strict_portfolio_health"] = True
@@ -1200,10 +1207,16 @@ class TradingPipeline:
                             return False
 
                         # Apply re-anchored entry, TP, and SL
+                        snapshot_entry = float(risk_verdict.get("entry_price") or current_price)
                         current_price = re_entry
                         risk_verdict["entry_price"] = re_entry
                         risk_verdict["take_profit_price"] = re_tp
                         risk_verdict["stop_loss_price"] = re_sl
+                        if risk_verdict.get("limit_price") is not None:
+                            old_limit = float(risk_verdict["limit_price"])
+                            risk_verdict["limit_price"] = round(old_limit + (re_entry - snapshot_entry), 6)
+                        if risk_verdict.get("contracts"):
+                            risk_verdict["notional_size_usd"] = round(float(risk_verdict["contracts"]) * re_entry, 2)
                         self.services.logger.info(f"✅ Status: APPROVED BY RISK MANAGER")
                         print(f"💰 Position Amount: ${risk_verdict.get('notional_size_usd', 0):,.2f} ({risk_verdict.get('position_size_pct', 0)}% of portfolio)")
                         print(f"🟢 Take Profit (TP): ${risk_verdict.get('take_profit_price', 0):,.2f} (+{risk_verdict.get('take_profit_pct', 0)}%)")
