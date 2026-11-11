@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str = Field(default="", validation_alias="GROQ_API_KEY")
     OPENROUTER_API_KEY: str = Field(default="", validation_alias="OPENROUTER_API_KEY")
     OPENROUTER_MODEL: str = Field(default="deepseek/deepseek-chat")
-    OPENROUTER_MODEL_CHEAP: str = Field(default="google/gemini-2.5-flash-lite")
+    OPENROUTER_MODEL_CHEAP: str = Field(default="deepseek/deepseek-chat")
     OPENROUTER_MODEL_CEO: str = Field(default="deepseek/deepseek-chat")
     OPENROUTER_MODEL_ESCALATION: str = Field(default="meta-llama/llama-3.3-70b-instruct")
     ESCALATE_WAIT_FOR_PULLBACK: bool = Field(default=False)
