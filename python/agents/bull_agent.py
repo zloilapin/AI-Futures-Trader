@@ -30,9 +30,35 @@ class BullAgent(BaseAgent):
             if tf_k in clean_mtf and isinstance(clean_mtf[tf_k], dict):
                 clean_mtf[tf_k] = {k: v for k, v in clean_mtf[tf_k].items() if k != "candles_20"}
 
+        # Enrich key_levels with precomputed structural and ATR levels
+        raw_key_levels = dict(data.get("key_levels", {}))
+        indicators_dict = data.get("indicators", {}) or {}
+        curr_px = float(raw_key_levels.get("current_price") or indicators_dict.get("current_price") or 0.0)
+        atr_14 = float(raw_key_levels.get("atr_14") or indicators_dict.get("atr_14") or (curr_px * 0.015))
+        swing_h = float(raw_key_levels.get("swing_high_15m") or indicators_dict.get("swing_high_15m") or 0.0)
+        swing_l = float(raw_key_levels.get("swing_low_15m") or indicators_dict.get("swing_low_15m") or 0.0)
+        h_48h = float(raw_key_levels.get("high_48h") or indicators_dict.get("high_48h") or 0.0)
+        l_48h = float(raw_key_levels.get("low_48h") or indicators_dict.get("low_48h") or 0.0)
+        macro_box = float(raw_key_levels.get("macro_box_pos_pct") or indicators_dict.get("macro_box_pos_pct") or 50.0)
+
+        key_levels = {
+            **raw_key_levels,
+            "current_price": curr_px,
+            "atr_14": atr_14,
+            "swing_high_15m": swing_h,
+            "swing_low_15m": swing_l,
+            "high_48h": h_48h,
+            "low_48h": l_48h,
+            "macro_box_pos_pct": macro_box,
+            "atr_target_long": round(curr_px + 2.0 * atr_14, 4) if curr_px > 0 else 0.0,
+            "atr_target_short": round(curr_px - 2.0 * atr_14, 4) if curr_px > 0 else 0.0,
+            "structural_sl_long": round(swing_l - 0.25 * atr_14, 4) if swing_l > 0 else round(curr_px - 1.5 * atr_14, 4),
+            "structural_sl_short": round(swing_h + 0.25 * atr_14, 4) if swing_h > 0 else round(curr_px + 1.5 * atr_14, 4),
+        }
+
         payload = {
             "target_symbol": symbol,
-            "key_levels": data.get("key_levels", {}),
+            "key_levels": key_levels,
             "multi_timeframe_context": clean_mtf,
             "analyst_reports": analyst_reports
         }

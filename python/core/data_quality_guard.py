@@ -102,7 +102,7 @@ class DataQualityGuard:
             prev_ts_sec = None
             interval_sec = 15 * 60 # 15 minutes
             
-            for c in candles_15m:
+            for idx, c in enumerate(candles_15m):
                 if not isinstance(c, dict):
                     return False, "NON_DICT_CANDLE_DATA"
                     
@@ -136,7 +136,8 @@ class DataQualityGuard:
                             return False, "NON_MONOTONIC_OHLCV_TIMESTAMP"
                             
                         gap_sec = ts_sec - prev_ts_sec
-                        if gap_sec > interval_sec * 2.0:
+                        # Limit OHLCV_GAP_DETECTED to the last 5 closed candles (candles_15m[-6:])
+                        if idx >= len(candles_15m) - 5 and gap_sec > interval_sec * 2.0:
                             return False, f"OHLCV_GAP_DETECTED ({gap_sec:.0f}s)"
                             
                     prev_ts_sec = ts_sec

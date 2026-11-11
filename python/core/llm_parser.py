@@ -29,7 +29,7 @@ class LLMStructuredOutputParser:
             
         clean_text = str(response_text).strip()
         
-        # 1. Поиск блока JSON внутри markdown ограждений (```json ... ```)
+        # 1. Поиск блока JSON внутри markdown ограждений (json code blocks)
         matches = re.findall(r"```(?:json)?(.*?)```", clean_text, re.DOTALL | re.IGNORECASE)
         if matches:
             clean_text = matches[-1].strip()
@@ -75,13 +75,9 @@ class LLMStructuredOutputParser:
                 # Check if we extracted a meaningful decision/signal
                 key_identifiers = ["decision", "signal", "trade_action"]
                 if any(ident in extracted_dict for ident in key_identifiers):
-                    if "score_breakdown" not in extracted_dict:
-                        extracted_dict["score_breakdown"] = {
-                            "bull_argument": 20,
-                            "bear_argument": -10,
-                            "mtf_trend": 10,
-                            "risk_penalties": {"total": 0}
-                        }
+                    # NOTE: Synthetic score_breakdown was intentionally removed to avoid falsifying
+                    # math verification or masking hallucinations. Agents requiring score_breakdown
+                    # must receive it directly from the LLM or fail validation to trigger a retry.
                     if "reasoning_en" not in extracted_dict:
                         extracted_dict["reasoning_en"] = clean_text[:400]
                     parsed = extracted_dict

@@ -43,25 +43,27 @@ class TelegramService:
             return text[:cls.MAX_MSG_LEN - 20] + "\n...[TRUNCATED]"
         return text
 
-    async def send_message(self, text: str, parse_mode: str = "Markdown", reply_markup: dict = None) -> bool:
+    async def send_message(self, text: str, parse_mode: str = "Markdown", reply_markup: dict = None, chat_id: Optional[str] = None) -> bool:
         """
-        Sends a text message to the configured Telegram chat.
+        Sends a text message to the configured Telegram chat or a specific subscriber chat_id.
         Includes automatic fallback to plain text if Markdown parsing fails.
         Safely enforces Telegram's 4096 character limit.
         """
-        if not self._is_valid_credential(self.bot_token) or not self._is_valid_credential(self.chat_id):
-            print("⚠️ [TelegramService] Токен или ID чата не настроены в .env! Сообщение выведено только в консоль.")
+        target_chat_id = str(chat_id or self.chat_id or "").strip()
+        if not self._is_valid_credential(self.bot_token) or not target_chat_id:
+            print("⚠️ [TelegramService] Токен или ID чата не настроены! Сообщение выведено только в консоль.")
             return False
 
         safe_text = self._safe_truncate(text)
         payload = {
-            "chat_id": self.chat_id,
+            "chat_id": target_chat_id,
             "text": safe_text,
             "disable_web_page_preview": True
         }
         if parse_mode:
             payload["parse_mode"] = parse_mode
-        if reply_markup is None and self.chat_id and not str(self.chat_id).startswith("-100"):
+        is_custom_subscriber = chat_id is not None and str(chat_id) != str(self.chat_id)
+        if reply_markup is None and target_chat_id and not str(target_chat_id).startswith("-100") and not is_custom_subscriber:
             try:
                 from services.telegram_bot_listener import REPLY_KEYBOARD
                 reply_markup = REPLY_KEYBOARD
@@ -113,7 +115,7 @@ class TelegramService:
             print(f"❌ [TelegramService] Критическая ошибка при отправке в Telegram: {e}")
             return False
 
-    async def answer_callback_query(self, callback_query_id: str, text: str = "") -> bool:
+    async def answer_callback_query(self, callback_query_id: str, text: str = "", show_alert: bool = False) -> bool:
         """
         Answers a callback query to stop the loading spinner on Telegram buttons.
         """
@@ -123,7 +125,8 @@ class TelegramService:
         url = f"https://api.telegram.org/bot{self.bot_token}/answerCallbackQuery"
         payload = {
             "callback_query_id": str(callback_query_id),
-            "text": text
+            "text": text,
+            "show_alert": bool(show_alert)
         }
         try:
             session = await SessionManager.get()

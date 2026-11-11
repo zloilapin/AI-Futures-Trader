@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import threading
 import structlog
 from datetime import datetime, timezone
 
@@ -10,6 +11,7 @@ class TradeLogger:
     Uses structlog for structured JSON lines output.
     """
     def __init__(self, base_dir="logs"):
+        self._lock = threading.Lock()
         is_test_env = ("pytest" in sys.modules) or bool(os.environ.get("PYTEST_CURRENT_TEST"))
         if is_test_env and base_dir == "logs":
             self.base_dir = os.path.join("logs", "pytest_sandbox")
@@ -63,8 +65,9 @@ class TradeLogger:
             **kwargs
         }
         
-        with open(file_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(log_data, ensure_ascii=False) + "\n")
+        with self._lock:
+            with open(file_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(log_data, ensure_ascii=False) + "\n")
             
         try:
             print(f"[{agent_name}] {message}")
@@ -114,8 +117,9 @@ class TradeLogger:
                 "level": "debug",
                 **kwargs
             }
-            with open(file_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(log_data, ensure_ascii=False) + "\n")
+            with self._lock:
+                with open(file_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(log_data, ensure_ascii=False) + "\n")
         except Exception:
             pass
 

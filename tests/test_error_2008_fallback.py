@@ -90,3 +90,72 @@ async def test_error_2008_post_only_crosses_book_auto_fallback_to_ioc(mock_nado_
     assert success is True, "Expected open_position to succeed after fallback!"
     assert "ETH-USD" in service.active_positions
     assert service.active_positions["ETH-USD"]["open_digest"] == "0xfallbacksuccessdigest12345"
+
+
+@pytest.mark.asyncio
+async def test_post_only_timeout_auto_fallback_to_ioc(mock_nado_service):
+    """
+    Verifies that when a Maker Post-Only order is accepted by exchange but not filled within 10s,
+    it is cancelled and automatically retried as an IOC Taker order with slippage buffer.
+    """
+    service = mock_nado_service
+
+    # Setup market parameters mock
+    mock_market_info = MagicMock()
+    mock_market_info.book_info.size_increment = str(int(0.01 * 1e18))
+    mock_market_info.book_info.price_increment_x18 = str(int(0.1 * 1e18))
+    mock_market_info.book_info.min_size = str(int(0.01 * 1e18))
+    mock_market_info.state.cumulative_funding = MagicMock()
+    mock_market_info.state.cumulative_funding.rate_x18 = "0"
+    service._market_cache = {4: mock_market_info}
+
+    calls = []
+    maker_digest = "0x" + "a" * 64
+    ioc_digest = "0x" + "b" * 64
+    def mock_place_order(params):
+        calls.append(params)
+        resp = MagicMock()
+        if len(calls) == 1:
+            resp.data.digest = maker_digest
+        else:
+            resp.data.digest = ioc_digest
+        return resp
+
+    service.client.market.place_order.side_effect = mock_place_order
+    service.client.market.cancel_orders = MagicMock(return_value=True)
+
+    def mock_get_historical(digests):
+        d = digests[0] if digests else ""
+        mock_ord = MagicMock()
+        if d == maker_digest:
+            mock_ord.base_filled = "0"
+            mock_ord.quote_filled = "0"
+            mock_ord.fee = "0"
+        else:
+            mock_ord.base_filled = str(int(0.1 * 1e18))
+            mock_ord.quote_filled = str(int(230.0 * 1e18))
+            mock_ord.fee = "0"
+        return MagicMock(orders=[mock_ord])
+
+    service.client.market.get_historical_orders_by_digest.side_effect = mock_get_historical
+    service.client.market.place_trigger_order = MagicMock(return_value=MagicMock(data=MagicMock(digest="0xtrigger")))
+
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        success = await service.open_position(
+            symbol="ETH-USD",
+            direction="LONG",
+            entry_price=2300.0,
+            notional_usd=230.0,
+            tp_price=2400.0,
+            sl_price=2200.0,
+            leverage=5,
+            contracts=0.1,
+            approved_risk_usd=10.0,
+            strategy_mode="TREND_FOLLOWING"
+        )
+
+    assert len(calls) == 2, f"Expected 2 place_order calls, got {len(calls)}"
+    service.client.market.cancel_orders.assert_called_once()
+    assert success is True
+    assert "ETH-USD" in service.active_positions
+    assert service.active_positions["ETH-USD"]["open_digest"] == ioc_digest

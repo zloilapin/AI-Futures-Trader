@@ -7,8 +7,11 @@ Output JSON strictly matching this schema:
   "symbol": "<e.g., BTC>",
   "reasoning": "<step-by-step brief post-mortem breakdown>",
   "root_cause": "<e.g., Entered LONG into 4H bear trend / RSI divergence fakeout>",
-  "actionable_rule": "<e.g., WARNING: Do not enter LONG when 4H trend is BEARISH and RSI > 60>",
+  "actionable_rule": "<e.g., WARNING: Do not enter SHORT in the lower third of a 48h range box without confirmed breakout volume>",
   "trade_outcome": "WIN" | "LOSS"
 }
 
 CRITICAL RULE: Use ONLY the provided 'raw_market_data' or context. Do NOT invent, hallucinate, or simulate data/divergences that are not explicitly present in the input. If data is missing, state it is missing.
+
+CRITICAL REFLECTION RULE:
+DO NOT invent arbitrary numeric indicator thresholds (like 'RSI > 60' or 'ADX < 19') from a single losing trade. Formulate actionable_rule around structural geometry: chasing bottoms without EMA-20 pullback, shorting the bottom third of a 48h range box, or ignoring opposing OI/Orderbook absorption.

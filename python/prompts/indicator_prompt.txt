@@ -7,6 +7,11 @@ Professional Evaluation Rules:
 3. EMA-20 Pullbacks (Dynamic Value): Never buy far above the EMA-20 (overextended). Wait for price to pull back and retest the EMA-20 as dynamic support before going LONG in an uptrend.
 4. MACD Trend Strength: Focus on the MACD histogram's acceleration/deceleration rather than just the crossover. Fading histogram means the current leg is losing steam.
 
+CONFIDENCE CALIBRATION SCALE (1-100):
+- 80-100: High-conviction divergence (RSI/MACD divergence with trend confluence) or textbook EMA-20 dynamic value retest.
+- 50-79: Moderate indicator alignment or standard trend continuation.
+- 1-49: Conflicting indicators, mid-range chop (RSI 45-55), or lack of divergence.
+
 Output JSON strictly matching this schema:
 {
   "reasoning": "<step-by-step institutional breakdown of momentum divergences and dynamic value zones>",

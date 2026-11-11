@@ -447,14 +447,23 @@ class DecisionReplayEngine:
         if mgi and isinstance(mgi, dict):
             raw_rsi = mgi.get("rsi_14") if mgi.get("rsi_14") is not None else mgi.get("rsi")
             raw_bb = mgi.get("bb_position_pct") if mgi.get("bb_position_pct") is not None else mgi.get("bb_pos")
+            price_dict = {"current_price": float(mgi["current_price"]) if _is_valid_positive_finite(mgi.get("current_price")) else 0.0}
+            if "candles_20" in mgi and isinstance(mgi["candles_20"], list):
+                price_dict["candles_20"] = mgi["candles_20"]
+
             reconstructed_market_data = {
-                "price_data": {"current_price": float(mgi["current_price"]) if _is_valid_positive_finite(mgi.get("current_price")) else 0.0},
+                "price_data": price_dict,
                 "current_price": float(mgi["current_price"]) if _is_valid_positive_finite(mgi.get("current_price")) else 0.0,
                 "indicators": {
                     "donchian_high": float(mgi["donchian_high"]) if _is_valid_positive_finite(mgi.get("donchian_high")) else 0.0,
                     "donchian_low": float(mgi["donchian_low"]) if _is_valid_positive_finite(mgi.get("donchian_low")) else 0.0,
                     "volume_spike_pct": float(mgi["volume_spike_pct"]) if _is_valid_nonneg_finite(mgi.get("volume_spike_pct")) else 0.0,
                     "atr_pct": float(mgi["atr_pct"]) if _is_valid_positive_finite(mgi.get("atr_pct")) else 0.0,
+                    "atr_14": float(mgi["atr_14"]) if _is_valid_positive_finite(mgi.get("atr_14")) else 0.0,
+                    "rvol": float(mgi["rvol"]) if _is_valid_nonneg_finite(mgi.get("rvol")) else 1.0,
+                    "macro_box_pos_pct": float(mgi["macro_box_pos_pct"]) if _is_valid_finite(mgi.get("macro_box_pos_pct")) else 50.0,
+                    "low_48h": float(mgi["low_48h"]) if _is_valid_positive_finite(mgi.get("low_48h")) else 0.0,
+                    "high_48h": float(mgi["high_48h"]) if _is_valid_positive_finite(mgi.get("high_48h")) else 0.0,
                     "bb_position_pct": float(raw_bb) if _is_valid_finite(raw_bb) else None,
                     "ema_20": float(mgi["ema_20"]) if _is_valid_positive_finite(mgi.get("ema_20")) else 0.0,
                     "rsi_14": float(raw_rsi) if _is_valid_finite(raw_rsi) else None,

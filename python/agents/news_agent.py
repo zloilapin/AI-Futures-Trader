@@ -21,6 +21,7 @@ class NewsAgent(BaseAgent):
 
         self._cached_result: Dict[str, Any] = {}
         self._cached_score: float = -1.0
+        self._cached_trend_1h: str = ""
         self._cache_time: float = 0.0
 
     async def analyze(self, market_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -33,17 +34,38 @@ class NewsAgent(BaseAgent):
         except (ValueError, TypeError):
             score = 50.0
 
+        mtf = market_data.get("multi_timeframe") or {}
+        trend_1h = str(
+            mtf.get("mtf_trend_1h")
+            or mtf.get("trend_1h")
+            or (mtf.get("tf_1h", {}).get("trend") if isinstance(mtf.get("tf_1h"), dict) else None)
+            or "NEUTRAL"
+        ).upper()
+        trend_4h = str(
+            mtf.get("mtf_trend_4h")
+            or mtf.get("trend_4h")
+            or (mtf.get("tf_4h", {}).get("trend") if isinstance(mtf.get("tf_4h"), dict) else None)
+            or "NEUTRAL"
+        ).upper()
+
         now = time.time()
 
-        # Cache valid for 30 minutes if sentiment_score hasn't changed
-        if self._cached_result and (now - self._cache_time < 1800) and (abs(self._cached_score - score) < 1.0):
+        # Cache valid for 30 minutes if (round(score), trend_1h) hasn't changed
+        if (
+            self._cached_result
+            and (now - self._cache_time < 1800)
+            and round(self._cached_score) == round(score)
+            and self._cached_trend_1h == trend_1h
+        ):
             cached = dict(self._cached_result)
-            self.logger.info(f"[{self.name}] [Cache Hit] Используем закэшированный сентимент (Score: {score}): {cached.get('signal')}")
+            self.logger.info(f"[{self.name}] [Cache Hit] Используем закэшированный сентимент (Score: {score}, 1H: {trend_1h}): {cached.get('signal')}")
             return cached
         
         payload = {
             "symbol": market_data.get("symbol"),
-            "sentiment_data": news_data
+            "sentiment_data": news_data,
+            "mtf_trend_1h": trend_1h,
+            "mtf_trend_4h": trend_4h
         }
         
         data_string = json.dumps(payload, indent=2)
@@ -59,11 +81,26 @@ class NewsAgent(BaseAgent):
         if isinstance(result, dict) and result.get("signal") not in ("ERROR", None):
             self._cached_result = result
             self._cached_score = score
+            self._cached_trend_1h = trend_1h
             self._cache_time = now
             return result
 
         # Deterministic contrarian sentiment fallback (aligned with news_prompt.txt)
-        if score <= 25.0:
+        if score < 40.0 and trend_1h == "BEARISH":
+            fallback_signal = "NEUTRAL"
+            fallback_conf = 55
+            fallback_reason = (
+                f"Страх на рынке ({score:.0f}/100), но 1H тренд нисходящий (BEARISH): "
+                f"контртрендовый лонг заблокирован без подтверждения истощения продаж (фолбэк)."
+            )
+        elif score > 60.0 and trend_1h == "BULLISH":
+            fallback_signal = "NEUTRAL"
+            fallback_conf = 55
+            fallback_reason = (
+                f"Жадность на рынке ({score:.0f}/100), но 1H тренд восходящий (BULLISH): "
+                f"контртрендовый шорт заблокирован без подтверждения истощения покупок (фолбэк)."
+            )
+        elif score <= 25.0:
             fallback_signal = "BULLISH"
             fallback_conf = 75
             fallback_reason = f"Extreme Fear ({score:.0f}/100): институциональная аккумуляция, асимметрия в лонг (фолбэк)."
@@ -91,5 +128,6 @@ class NewsAgent(BaseAgent):
         }
         self._cached_result = fallback_result
         self._cached_score = score
+        self._cached_trend_1h = trend_1h
         self._cache_time = now
         return fallback_result

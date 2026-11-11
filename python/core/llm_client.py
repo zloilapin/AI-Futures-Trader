@@ -87,9 +87,11 @@ class LLMClient:
         else:
             self.provider = "none"
             self.model_name = "none"
+            self._current_provider_dict = None
             print("⚠️ [LLMClient] Валидные ключи API не найдены.")
 
     def _set_provider(self, provider_dict):
+        self._current_provider_dict = dict(provider_dict)
         self.provider = provider_dict["provider"]
         self.model_name = provider_dict["model"]
         self.or_models = [self.model_name]
@@ -137,14 +139,34 @@ class LLMClient:
 
     def _switch_provider(self) -> bool:
         """Switch to the next available provider if current one fails completely."""
-        if self._available_providers:
-            next_p = self._available_providers.pop(0)
-            print(f"🔄 [LLMClient] Переключение провайдера на {next_p['provider'].capitalize()}...")
-            self._set_provider(next_p)
-            return True
-        return False
+        if not self._available_providers:
+            return False
 
-    async def generate(self, prompt: str, max_retries: int = 5) -> str:
+        current_p = getattr(self, "_current_provider_dict", None)
+        if not current_p and self.provider != "none":
+            current_p = {"provider": self.provider, "model": self.model_name}
+
+        next_p = self._available_providers.pop(0)
+        if current_p and current_p.get("provider") != "none":
+            self._available_providers.append(current_p)
+
+        print(f"🔄 [LLMClient] Переключение провайдера на {next_p['provider'].capitalize()}...")
+        self._set_provider(next_p)
+        return True
+
+    def get_unique_providers_count(self) -> int:
+        all_p = []
+        curr = getattr(self, "_current_provider_dict", None)
+        if curr and curr.get("provider") != "none":
+            all_p.append(curr)
+        elif self.provider != "none":
+            all_p.append({"provider": self.provider, "model": self.model_name})
+        all_p.extend(self._available_providers)
+
+        unique = {p.get("provider") for p in all_p if isinstance(p, dict) and p.get("provider") and p.get("provider") != "none"}
+        return max(1, len(unique))
+
+    async def generate(self, prompt: str, max_retries: int = 5, switch_count: int = 0) -> str:
         """
         Sends the fully formatted prompt to the LLM and retrieves JSON response.
         """
@@ -153,13 +175,14 @@ class LLMClient:
             print(f"🛑 [LLMClient] Circuit Breaker активен. Пропуск генерации (еще {remaining} мин).")
             raise LLMCircuitBreakerException("LLM is currently unavailable due to repeated failures.")
 
+        max_switches = self.get_unique_providers_count()
         current_prompt = prompt
 
         if self.provider == "groq":
             if not getattr(self, "client", None):
                 print("⚠️ [LLMClient Groq] Клиент Groq не инициализирован. Переключение...")
-                if self._switch_provider():
-                    return await self.generate(prompt, max_retries)
+                if switch_count < max_switches and self._switch_provider():
+                    return await self.generate(prompt, max_retries, switch_count=switch_count + 1)
                 raise LLMCircuitBreakerException("Groq client is not available")
             for attempt in range(max_retries):
                 try:
@@ -196,8 +219,8 @@ class LLMClient:
                         print(f"❌ [LLMClient Groq] Ошибка при запросе: {err_msg}")
                         break
                         
-            if self._switch_provider():
-                return await self.generate(prompt, max_retries)
+            if switch_count < max_switches and self._switch_provider():
+                return await self.generate(prompt, max_retries, switch_count=switch_count + 1)
                 
             self.circuit_breaker_until = time.time() + 300 # 5 min cooldown
             raise LLMCircuitBreakerException("All API providers failed after max retries")
@@ -225,8 +248,8 @@ class LLMClient:
                         print(f"❌ [LLMClient Gemini] Ошибка при запросе: {e}")
                         break
             
-            if self._switch_provider():
-                return await self.generate(prompt, max_retries)
+            if switch_count < max_switches and self._switch_provider():
+                return await self.generate(prompt, max_retries, switch_count=switch_count + 1)
 
             self.circuit_breaker_until = time.time() + 300
             raise LLMCircuitBreakerException("All API providers failed after max retries")
@@ -361,8 +384,8 @@ class LLMClient:
                         print(f"⚠️ [LLMClient {self.provider.upper()}] Ошибка сети ({err_str}). Повтор через {wait_time:.2f}s...")
                         await asyncio.sleep(wait_time)
                         
-            if self._switch_provider():
-                return await self.generate(prompt, max_retries)
+            if switch_count < max_switches and self._switch_provider():
+                return await self.generate(prompt, max_retries, switch_count=switch_count + 1)
 
             self.circuit_breaker_until = time.time() + 300
             raise LLMCircuitBreakerException("All API providers failed after max retries")

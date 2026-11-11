@@ -50,7 +50,7 @@ class RiskManager(BaseAgent):
         if not isinstance(pos, dict):
             return False
         state = str(pos.get("protection_state") or pos.get("state") or "").upper()
-        if any(k in state for k in ("BREAK_EVEN", "TRAILING", "TIME_STOP_BE")):
+        if "PENDING" not in state and any(k in state for k in ("BREAK_EVEN", "TRAILING", "TIME_STOP_BE")):
             return True
         plan = pos.get("partial_tp_plan")
         if isinstance(plan, dict) and plan.get("be_activated"):
@@ -1047,38 +1047,44 @@ class RiskManager(BaseAgent):
 
             has_structure = (decision == "SHORT" and swing_high_15m > 0) or (decision == "LONG" and swing_low_15m > 0)
             if has_structure:
-                if decision == "SHORT":
-                    atr_based_sl = current_price + sl_dist_clamped
-                    structural_sl = swing_high_15m + atr_buffer
-                    sl_price = max(atr_based_sl, structural_sl)
-                    sl_dist_base = sl_price - current_price
-                else: # LONG
-                    atr_based_sl = current_price - sl_dist_clamped
-                    structural_sl = swing_low_15m - atr_buffer
-                    sl_price = min(atr_based_sl, structural_sl)
-                    sl_dist_base = current_price - sl_price
-
                 is_retest = bool(
                     _extract_cand_field(ceo_decision, "is_pullback_retest")
                     or (market_data.get("is_pullback_retest") if market_data else False)
+                    or "RETEST" in str(_extract_cand_field(ceo_decision, "reasoning_en", "")).upper()
+                    or "RETEST" in str(_extract_cand_field(ceo_decision, "reasoning", "")).upper()
                 )
+                max_sl_dist_allowed = 2.50 if is_retest else 1.95
+
+                if decision == "SHORT":
+                    structural_sl = swing_high_15m + atr_buffer
+                    struct_dist_pct = ((structural_sl - current_price) / current_price) * 100.0 if current_price > 0 and structural_sl > current_price else 0.0
+                else: # LONG
+                    structural_sl = swing_low_15m - atr_buffer
+                    struct_dist_pct = ((current_price - structural_sl) / current_price) * 100.0 if current_price > 0 and structural_sl < current_price else 0.0
+
                 # Distance-to-Structure Gate (Step 4):
-                # If distance to structural SL > 1.95%, do NOT compress stop into noise zone!
-                # Reject immediate market entry and route to WAIT_FOR_PULLBACK.
-                # On confirmed pullback retest (which already waited for pullback to EMA-20),
-                # allow up to 2.50% so minor market noise doesn't trap the trade in a loop.
-                if current_price > 0:
-                    dist_pct = (sl_dist_base / current_price) * 100.0
-                    max_sl_dist_allowed = 2.50 if is_retest else 1.95
-                    if dist_pct > max_sl_dist_allowed:
-                        lvl_ref = swing_high_15m if decision == "SHORT" else swing_low_15m
-                        msg = (
-                            f"Distance-to-Structure Gate: Расстояние до структурного стопа ({dist_pct:.2f}% > {max_sl_dist_allowed:.2f}%) "
-                            f"слишком велико из-за позднего входа (структурный SL={sl_price:.4f} за уровнем {lvl_ref:.4f}). "
-                            f"Сжатие стопа внутрь зоны шума запрещено. Рекомендуется WAIT_FOR_PULLBACK ближе к уровню ретеста."
-                        )
-                        self.logger.warning(f"[{self.name}] ❌ DISTANCE_TO_STRUCTURE_VETO: {msg}")
-                        return self._build_veto_result("DISTANCE_TO_STRUCTURE_VETO", msg, "WAIT_FOR_PULLBACK")
+                # If distance to structural SL > max_sl_dist_allowed (1.95% or 2.50% for retest),
+                # do NOT compress stop into noise zone! Reject immediate market entry and route to WAIT_FOR_PULLBACK.
+                if struct_dist_pct > max_sl_dist_allowed:
+                    lvl_ref = swing_high_15m if decision == "SHORT" else swing_low_15m
+                    msg = (
+                        f"Distance-to-Structure Gate: Расстояние до структурного стопа ({struct_dist_pct:.2f}% > {max_sl_dist_allowed:.2f}%) "
+                        f"слишком велико из-за позднего входа (структурный SL={structural_sl:.4f} за уровнем {lvl_ref:.4f}). "
+                        f"Сжатие стопа внутрь зоны шума запрещено. Рекомендуется WAIT_FOR_PULLBACK ближе к уровню ретеста."
+                    )
+                    self.logger.warning(f"[{self.name}] ❌ DISTANCE_TO_STRUCTURE_VETO: {msg}")
+                    return self._build_veto_result("DISTANCE_TO_STRUCTURE_VETO", msg, "WAIT_FOR_PULLBACK")
+
+                # Capped ATR distance so that 1.75*ATR multiplier never pushes a valid structural entry beyond max_sl_dist_allowed
+                capped_atr_dist = min(sl_dist_clamped, current_price * (max_sl_dist_allowed / 100.0))
+                if decision == "SHORT":
+                    atr_based_sl = current_price + capped_atr_dist
+                    sl_price = max(atr_based_sl, structural_sl)
+                    sl_dist_base = sl_price - current_price
+                else: # LONG
+                    atr_based_sl = current_price - capped_atr_dist
+                    sl_price = min(atr_based_sl, structural_sl)
+                    sl_dist_base = current_price - sl_price
             else:
                 sl_dist_base = sl_dist_clamped
 
@@ -1092,6 +1098,29 @@ class RiskManager(BaseAgent):
         else: # SHORT
             sl_price = current_price + sl_dist_base
             tp_price = current_price - tp_dist_base
+
+        # Profit Booster #1: Structural Take-Profit in front of 48h Macro Box Boundaries
+        if strategy_mode == "TREND_FOLLOWING":
+            indicators_map = market_data.get("indicators") or {}
+            low_48h = float(indicators_map.get("low_48h") or 0.0)
+            high_48h = float(indicators_map.get("high_48h") or 0.0)
+            eff_atr = atr_14 if atr_14 > 0 else (current_price * 0.01)
+            if decision == "SHORT" and low_48h > 0 and tp_price <= low_48h:
+                box_tp = low_48h + (0.15 * eff_atr)
+                if current_price > box_tp and ((current_price - box_tp) / max(sl_dist_base, 1e-9)) >= 1.45:
+                    self.logger.info(
+                        f"[{self.name}] 🎯 Booster #1 Structural TP: SHORT TP adjusted from {tp_price:.4f} to {box_tp:.4f} "
+                        f"(in front of 48h low {low_48h:.4f}, R:R={((current_price - box_tp) / max(sl_dist_base, 1e-9)):.2f}R >= 1.45R)."
+                    )
+                    tp_price = box_tp
+            elif decision == "LONG" and high_48h > 0 and tp_price >= high_48h:
+                box_tp = high_48h - (0.15 * eff_atr)
+                if box_tp > current_price and ((box_tp - current_price) / max(sl_dist_base, 1e-9)) >= 1.45:
+                    self.logger.info(
+                        f"[{self.name}] 🎯 Booster #1 Structural TP: LONG TP adjusted from {tp_price:.4f} to {box_tp:.4f} "
+                        f"(in front of 48h high {high_48h:.4f}, R:R={((box_tp - current_price) / max(sl_dist_base, 1e-9)):.2f}R >= 1.45R)."
+                    )
+                    tp_price = box_tp
 
         # Strict Mean Reversion Guard: TP must NEVER cross or touch the mean target
         # For Anti-Bot v2.0, EMA-20 * 1.15 target intentionally penetrates beyond EMA-20 inside the channel,
@@ -1401,7 +1430,12 @@ class RiskManager(BaseAgent):
             # to qualify for Cohort B protection rather than falling into empirical Cohort D veto.
             cand_eq = float(_extract_cand_field(ceo_decision, "entry_quality", conviction) or conviction)
             has_explicit_conv_risk = _extract_cand_field(ceo_decision, "conviction_for_risk") is not None
-            is_retest = bool(_extract_cand_field(ceo_decision, "is_pullback_retest") or (market_data.get("is_pullback_retest") if market_data else False))
+            is_retest = bool(
+                _extract_cand_field(ceo_decision, "is_pullback_retest")
+                or (market_data.get("is_pullback_retest") if market_data else False)
+                or "RETEST" in str(_extract_cand_field(ceo_decision, "reasoning_en", "")).upper()
+                or "RETEST" in str(_extract_cand_field(ceo_decision, "reasoning", "")).upper()
+            )
             is_high_conv = (conv_for_risk >= (min_conviction + 10)) or (
                 has_explicit_conv_risk and conv_for_risk >= 75.0 and cand_eq >= 60.0
             ) or (
@@ -1639,6 +1673,15 @@ class RiskManager(BaseAgent):
                 self.logger.info(
                     f"[{self.name}] 🛡️ Preserving notional above $100.50: required margin ${notional_usd / final_leverage:.2f} fits in usable_margin * 0.95 (${usable_margin * 0.95:.2f})."
                 )
+            elif notional_usd >= 100.50 and (104.0 / final_leverage <= usable_margin):
+                preserved_notional = max(104.0, max_safe_notional)
+                self.logger.info(
+                    f"[{self.name}] 🛡️ Stage 7 Protection: Preserving notional at ${preserved_notional:.2f} >= $104.00 "
+                    f"to prevent clamping below exchange trigger minimum (fits in usable margin ${usable_margin:.2f} at {final_leverage}x)."
+                )
+                notional_usd = preserved_notional
+                contracts = notional_usd / execution_entry if execution_entry > 0 else 0.0
+                risk_amount_usd = contracts * effective_loss_per_contract
             else:
                 self.logger.warning(
                     f"[{self.name}] Required margin at {final_leverage}x would exceed target margin. "
@@ -1842,12 +1885,13 @@ class RiskManager(BaseAgent):
             msg = f"VETO: MIN_NOTIONAL (${notional_usd:.2f} < $101.00 exchange CLOB min_size). Refusing order."
             self.logger.warning(f"[{self.name}] 🚫 MIN_NOTIONAL VETO: {msg}")
             return self._build_veto_result("MIN_NOTIONAL", msg, trade_action)
-            self.logger.warning(f"[{self.name}] ❌ INSUFFICIENT MARGIN VETO: {msg}")
-            return self._build_veto_result("INSUFFICIENT_BALANCE", msg, trade_action)
 
         # Re-anchor risk_amount_usd to actual rounded contracts
         actual_planned_risk_usd = contracts * effective_loss_per_contract
-        risk_amount_usd = round(min(risk_amount_usd, actual_planned_risk_usd), 2)
+        if is_trigger_bumped:
+            risk_amount_usd = round(min(actual_planned_risk_usd, max_allowed_risk_budget), 2)
+        else:
+            risk_amount_usd = round(actual_planned_risk_usd, 2)
         sl_price = round(sl_price, 6)
         tp_price = round(tp_price, 6)
         rr_ratio = round(realized_rr, 2)
@@ -1963,6 +2007,7 @@ class RiskManager(BaseAgent):
             "holding_hours": holding_hours,
             "slippage_stress_pct": slippage_stress,
             "notional_size_usd": notional_usd,
+            "notional_usd": notional_usd,
             "margin_usd": margin_usd,
             "leverage": effective_leverage,
             "effective_leverage": effective_leverage,
@@ -1971,8 +2016,10 @@ class RiskManager(BaseAgent):
             "entry_price": execution_entry,
             "expected_slippage_pct": expected_slippage_pct,
             "take_profit_price": tp_price,
+            "tp_price": tp_price,
             "take_profit_pct": round(abs(tp_price - execution_entry) / execution_entry * 100, 2) if execution_entry > 0 else 0,
             "stop_loss_price": sl_price,
+            "sl_price": sl_price,
             "stop_loss_pct": round(abs(sl_price - execution_entry) / execution_entry * 100, 2) if execution_entry > 0 else 0,
             "risk_reward_ratio": rr_ratio,
             "candidate_net_rr": round(candidate_net_rr, 2),

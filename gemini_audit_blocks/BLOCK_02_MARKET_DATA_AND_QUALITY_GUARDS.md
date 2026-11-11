@@ -1,0 +1,1447 @@
+# BLOCK 02: MARKET DATA & QUALITY GUARDS
+> **Назначение:** Досье для стороннего глубокого аудита кодовой базы моделью Gemini Argon / сторонним ИИ.
+> **Дата генерации:** 2026-11-10 (Актуальное боевое состояние репозитория)
+
+## Описание блока
+Сбор рыночных данных с Nado Indexer/Archive, мульти-таймфреймный контекст (15m, 1h, 4h), валидация качества данных, проверка спреда и устаревших котировок.
+
+## Оглавление файлов блока
+1. [`python/services/market_data_service.py`](#file-python-services-market_data_service-py)
+2. [`python/core/data_quality_guard.py`](#file-python-core-data_quality_guard-py)
+3. [`python/core/nado_helper.py`](#file-python-core-nado_helper-py)
+4. [`python/services/news_services.py`](#file-python-services-news_services-py)
+
+---
+
+<a id="file-python-services-market_data_service-py"></a>
+## File: `python/services/market_data_service.py` (1145 строк, 59.4 KB)
+
+```python
+import asyncio
+import aiohttp
+from typing import Dict, Any, List
+
+class MarketDataService:
+    """
+    Real-time market data service for Nado DEX (Ink L2 by Kraken).
+    Retrieves live price tickers, multi-timeframe candlesticks (15m, 1H, 4H), order book depth,
+    technical indicators (RSI, EMA, MACD), and sentiment (Crypto Fear & Greed Index).
+    """
+    def __init__(self, exchange_name: str = "Nado_DEX (Ink L2)", logger=None, nado_client=None):
+        self.exchange_name = exchange_name
+        self.logger = logger
+        self.session = None
+        import os
+        self._oi_file = "data/memory/oi_history.json"
+        self._oi_history = self._load_oi_history()
+        self._candle_cache: Dict[tuple, tuple] = {}
+        self.CANDLE_CACHE_TTL: float = 15.0
+
+        from core.config import config
+        self.is_nado = bool(config.NADO_LIVE_TRADING_ENABLED or getattr(config, "TRADING_ENGINE", "NADO") == "NADO")
+        self.nado_client = nado_client
+        self.product_map = {}
+        if self.is_nado:
+            if self.nado_client:
+                # Use the provided global Nado Client
+                self._load_nado_product_map()
+            else:
+                # Fallback to instantiating if none was provided
+                try:
+                    from core.nado_helper import create_configured_nado_client
+                    private_key = os.getenv("INK_PRIVATE_KEY")
+                    self.nado_client = create_configured_nado_client(
+                        network_name=config.NADO_NETWORK,
+                        signer=private_key
+                    )
+                    self._load_nado_product_map()
+                except Exception as e:
+                    self._log(f"⚠️ [MarketDataService] Failed to init Nado Client: {e}")
+
+    def _load_nado_product_map(self):
+        try:
+            products = self.nado_client.market.get_all_product_symbols()
+            markets = self.nado_client.market.get_all_engine_markets()
+            perp_ids = {m.product_id for m in markets.perp_products}
+            
+            for p in products:
+                if p.product_id in perp_ids:
+                    base_symbol = p.symbol.split('-')[0].upper()
+                    self.product_map[base_symbol] = p.product_id
+        except Exception as e:
+            self._log(f"⚠️ [MarketDataService] Failed to load Nado product map: {e}")
+
+    def _load_oi_history(self) -> dict:
+        from core.state_store import StateStore
+        data = StateStore.load(self._oi_file)
+        if data:
+            return data
+        return {}
+
+    def _save_oi_history(self, force: bool = False):
+        import time
+        now = time.time()
+        if not force and (now - getattr(self, "_last_oi_save_ts", 0) < 60.0):
+            return
+        self._last_oi_save_ts = now
+        from core.state_store import StateStore
+        StateStore.save(self._oi_file, self._oi_history)
+
+    def _log(self, msg: str, level: str = "error"):
+        if self.logger:
+            if level == "error": self.logger.error(msg)
+            elif level == "warning": self.logger.warning(msg)
+            elif level == "debug" and hasattr(self.logger, "debug"): self.logger.debug(msg)
+            elif level != "debug": self.logger.info(msg)
+        else:
+            print(f"[{level.upper()}] {msg}")
+
+    async def _get_session(self):
+        from core.session import SessionManager
+        return await SessionManager.get()
+
+    async def close(self):
+        if self.session and not self.session.closed:
+            await self.session.close()
+
+    async def fetch_active_perps(self, limit: int = 15) -> List[Dict[str, Any]]:
+        """
+        Dynamically fetches all available perpetual contracts from Nado DEX
+        and sorts them by cumulative volume to always trade the most liquid pairs.
+        """
+        if self.is_nado and self.nado_client:
+            try:
+                import asyncio
+                from nado_protocol.indexer_client.types.query import IndexerMarketSnapshotsParams, IndexerMarketSnapshotInterval
+                
+                # Fetch a single aggregated market snapshot for all pairs
+                params = IndexerMarketSnapshotsParams(interval=IndexerMarketSnapshotInterval(count=1, granularity=86400))
+                snapshots = await asyncio.to_thread(self.nado_client.market.get_market_snapshots, params)
+                
+                if snapshots and snapshots.snapshots:
+                    vols = snapshots.snapshots[0].cumulative_volumes
+                    products = await asyncio.to_thread(self.nado_client.market.get_all_product_symbols)
+                    
+                    data = []
+                    stablecoins = {'USDT', 'USDC', 'USDE', 'DAI', 'USD'}
+                    skip_symbols = {'WBTC'} # Skip WBTC to avoid duplicate BTC exposure
+                    
+                    for p in products:
+                        base_symbol = p.symbol.split('-')[0].upper()
+                        if base_symbol in stablecoins or base_symbol in skip_symbols:
+                            continue
+                        
+                        if base_symbol not in self.product_map or self.product_map[base_symbol] != p.product_id:
+                            continue
+                            
+                        vid = str(p.product_id)
+                        vol = float(vols.get(vid, 0)) / 1e18
+                        data.append((base_symbol, vol))
+                        
+                    # Sort by highest volume
+                    data.sort(key=lambda x: x[1], reverse=True)
+                    
+                    return [{"symbol": f"{sym}-USD", "volumeQuote": vol, "change_24h": None} for sym, vol in data[:limit]]
+            except Exception as e:
+                self._log(f"⚠️ [MarketDataService] Failed to fetch Nado volume snapshots: {e}")
+                
+        # If dynamic fetch fails, fallback to product_map keys
+            stablecoins = {'USDT', 'USDC', 'USDE', 'DAI', 'USD'}
+            nado_symbols = [sym for sym in self.product_map.keys() if sym.upper() not in stablecoins]
+            return [{"symbol": f"{sym}-USD", "volumeQuote": 10000000, "change_24h": None} for sym in nado_symbols[:limit]]
+            
+        self._log(f"⚠️ [MarketDataService] Nado Client not initialized. Cannot fetch active perps.")
+        # Fallback list if API fails
+        return [{"symbol": f"{s}-USD", "volumeQuote": 0.0, "change_24h": None} for s in ["BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "LINK", "AVAX"]]
+
+
+    def _normalize_candles(self, raw_candles: List[Any]) -> List[Dict[str, float]]:
+        """Unified normalizer that accepts both dict and list API formats and returns a standard dict."""
+        normalized = []
+        for c in raw_candles:
+            if isinstance(c, dict):
+                c_dict = {
+                    "open": float(c.get("open", 0)),
+                    "high": float(c.get("high", 0)),
+                    "low": float(c.get("low", 0)),
+                    "close": float(c.get("close", 0)),
+                    "volume": float(c.get("volume", 0))
+                }
+                raw_ts = c.get("timestamp") or c.get("time") or c.get("t")
+                if raw_ts is not None:
+                    try:
+                        ts_f = float(raw_ts)
+                        if ts_f > 0:
+                            if ts_f > 1e11:
+                                ts_f = ts_f / 1000.0
+                            if ts_f >= 1_700_000_000.0:
+                                c_dict["timestamp"] = ts_f
+                    except (ValueError, TypeError):
+                        pass
+                normalized.append(c_dict)
+            elif isinstance(c, (list, tuple)) and len(c) >= 6:
+                # Format: [timestamp, open, high, low, close, volume]
+                c_dict = {
+                    "open": float(c[1]),
+                    "high": float(c[2]),
+                    "low": float(c[3]),
+                    "close": float(c[4]),
+                    "volume": float(c[5])
+                }
+                try:
+                    ts_f = float(c[0])
+                    if ts_f > 0:
+                        if ts_f > 1e11:
+                            ts_f = ts_f / 1000.0
+                        if ts_f >= 1_700_000_000.0:
+                            c_dict["timestamp"] = ts_f
+                except (ValueError, TypeError):
+                    pass
+                normalized.append(c_dict)
+        return normalized
+
+
+    async def _fetch_nado_candles(self, symbol: str, interval_min: int, limit: int) -> list:
+        base_symbol = symbol.split('-')[0].upper()
+        if not self.nado_client or base_symbol not in self.product_map:
+            return []
+
+        import time
+        now = time.time()
+        cache_key = (base_symbol, interval_min)
+        if cache_key in self._candle_cache:
+            cached_time, cached_candles = self._candle_cache[cache_key]
+            if (now - cached_time < self.CANDLE_CACHE_TTL) and len(cached_candles) >= limit:
+                return cached_candles[-limit:]
+
+        from nado_protocol.indexer_client.types.query import IndexerCandlesticksParams, IndexerCandlesticksGranularity
+        import asyncio
+        tf_map = {
+            15: IndexerCandlesticksGranularity.FIFTEEN_MINUTES,
+            60: IndexerCandlesticksGranularity.ONE_HOUR,
+            240: IndexerCandlesticksGranularity.FOUR_HOURS,
+            1440: IndexerCandlesticksGranularity.ONE_DAY
+        }
+        granularity_target = tf_map.get(interval_min, IndexerCandlesticksGranularity.FIFTEEN_MINUTES)
+        min_candles = 200 if interval_min == 15 else 50
+        params = IndexerCandlesticksParams(
+            product_id=self.product_map[base_symbol],
+            granularity=granularity_target,
+            limit=max(limit, min_candles)
+        )
+        try:
+            candles = None
+            for attempt in range(2):
+                try:
+                    candles = await asyncio.to_thread(self.nado_client.market.get_candlesticks, params)
+                    if candles and hasattr(candles, "candlesticks"):
+                        break
+                except Exception as net_err:
+                    if attempt == 0:
+                        await asyncio.sleep(0.5)
+                    else:
+                        raise net_err
+            parsed = []
+            for c in reversed(candles.candlesticks):
+                candle_dict = {
+                    "open": float(c.open_x18) / 1e18,
+                    "high": float(c.high_x18) / 1e18,
+                    "low": float(c.low_x18) / 1e18,
+                    "close": float(c.close_x18) / 1e18,
+                    "volume": float(c.volume) / 1e18
+                }
+                raw_ts = getattr(c, "timestamp", None) or getattr(c, "time", None)
+                if raw_ts is not None:
+                    try:
+                        ts_f = float(raw_ts)
+                        if ts_f > 0:
+                            if ts_f > 1e11:
+                                ts_f = ts_f / 1000.0
+                            if ts_f >= 1_700_000_000.0:
+                                candle_dict["timestamp"] = ts_f
+                    except (ValueError, TypeError):
+                        pass
+                parsed.append(candle_dict)
+            if parsed:
+                if cache_key in self._candle_cache:
+                    cached_time, cached_candles = self._candle_cache[cache_key]
+                    # Do not overwrite a longer cached list with a shorter one within TTL
+                    if len(cached_candles) > len(parsed) and (now - cached_time < self.CANDLE_CACHE_TTL):
+                        parsed = cached_candles
+                self._candle_cache[cache_key] = (now, parsed)
+            return parsed[-limit:] if parsed else []
+        except Exception as e:
+            self._log(f"⚠️ [MarketDataService] Failed to fetch Nado candles for {symbol}: {e}")
+            if cache_key in self._candle_cache:
+                cached_time, cached_candles = self._candle_cache[cache_key]
+                if now - cached_time <= 120.0:
+                    return cached_candles[-limit:]
+            return []
+
+    async def _fetch_ohlc_interval(self, symbol: str, interval_min: int) -> dict:
+        if getattr(self, "is_nado", False) or True: # Force Nado
+            # Fetch at least 60 candles for 1H (for 48h macro box) and 200 for 15m
+            limit_req = 60 if interval_min == 60 else (200 if interval_min == 15 else 50)
+            candles = await self._fetch_nado_candles(symbol, interval_min, limit_req)
+            if candles:
+                closes = [c["close"] for c in candles]
+                highs = [c["high"] for c in candles]
+                lows = [c["low"] for c in candles]
+                current_price = closes[-1]
+                
+                # CRITICAL-16, HIGH-17: Robust MTF Trend using EMA-9 and ATR
+                # 1. Calculate ATR (Average True Range) over available candles
+                # F-19 Fix: Unify ATR-14 (Wilder's RMA) and SMA-seeded EMA-9 / EMA-21 with fetch_indicators
+                if len(candles) > 14:
+                    tr = [max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1])) for i in range(1, len(candles))]
+                    atr = sum(tr[:14]) / 14.0
+                    for val in tr[14:]:
+                        atr = (atr * 13.0 + val) / 14.0
+                elif len(candles) > 1:
+                    tr = [max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1])) for i in range(1, len(candles))]
+                    atr = sum(tr) / len(tr)
+                else:
+                    atr = 0
+                    
+                # 2. Calculate EMA-9 and EMA-21 with standard SMA seed
+                trend = "NEUTRAL"
+                if len(closes) >= 21:
+                    mult_9 = 2.0 / (9.0 + 1.0)
+                    mult_21 = 2.0 / (21.0 + 1.0)
+                    ema_9 = sum(closes[:9]) / 9.0
+                    for c in closes[9:]:
+                        ema_9 = (c - ema_9) * mult_9 + ema_9
+                    ema_21 = sum(closes[:21]) / 21.0
+                    for c in closes[21:]:
+                        ema_21 = (c - ema_21) * mult_21 + ema_21
+                        
+                    # 3. Determine Trend using EMA Crossover + Structural Hold (Audit F-11)
+                    if ema_9 > ema_21 and (ema_9 - ema_21) > (atr * 0.05) and current_price >= (ema_21 - atr * 0.10):
+                        trend = "BULLISH"
+                    elif ema_9 < ema_21 and (ema_21 - ema_9) > (atr * 0.05) and current_price <= (ema_21 + atr * 0.10):
+                        trend = "BEARISH"
+                
+                # Safe pct_diff calculation avoiding division by zero/epsilon artifacts
+                pct_diff = ((current_price - closes[0]) / closes[0]) * 100.0 if closes[0] > 0 else 0.0
+                
+                import time
+                vol = sum(c["volume"] for c in candles)
+                return {
+                    "interval_min": interval_min,
+                    "current_price": round(current_price, 6),
+                    "trend": trend,
+                    "atr": round(atr, 6),
+                    "change_pct": round(pct_diff, 2),
+                    "volume": round(vol * current_price, 2),
+                    "candles_20": candles,
+                    "timestamp": time.time()
+                }
+            self._log(f"⚠️ [MarketDataService] Nado candles empty for {symbol}. NO FALLBACK ALLOWED.")
+            raise ValueError(f"Nado OHLCV data unavailable for {symbol}")
+        
+        return {}
+
+    async def fetch_multi_timeframe(self, symbol: str) -> Dict[str, Any]:
+        """
+        Fetches 15m, 1H (60m), and 4H (240m) trends for Multi-Timeframe Alignment check.
+        Uses return_exceptions=True so that higher timeframe glitches (e.g. 4H) do not abort the cycle.
+        """
+        results = await asyncio.gather(
+            self._fetch_ohlc_interval(symbol, 15),
+            self._fetch_ohlc_interval(symbol, 60),
+            self._fetch_ohlc_interval(symbol, 240),
+            return_exceptions=True
+        )
+
+        res_15m, res_1h, res_4h = results[0], results[1], results[2]
+        
+        # 15m is the primary trading timeframe - if it fails, re-raise
+        if isinstance(res_15m, Exception):
+            self._log(f"⚠️ [MarketDataService] Critical failure fetching 15m OHLCV for {symbol}: {res_15m}")
+            raise res_15m
+            
+        tf_15m = res_15m if isinstance(res_15m, dict) else {}
+        tf_1h = res_1h if isinstance(res_1h, dict) else {}
+        tf_4h = res_4h if isinstance(res_4h, dict) else {}
+
+        if isinstance(res_1h, Exception):
+            self._log(f"⚠️ [MarketDataService] 1H timeframe unavailable for {symbol}: {res_1h}. Defaulting to NEUTRAL.", level="warning")
+        if isinstance(res_4h, Exception):
+            self._log(f"⚠️ [MarketDataService] 4H timeframe unavailable for {symbol}: {res_4h}. Defaulting to NEUTRAL.", level="warning")
+
+        t15 = tf_15m.get("trend", "NEUTRAL") if tf_15m else "NEUTRAL"
+        t1h = tf_1h.get("trend", "NEUTRAL") if tf_1h else "NEUTRAL"
+        t4h = tf_4h.get("trend", "NEUTRAL") if tf_4h else "NEUTRAL"
+
+        if t15 == t1h == t4h and t15 != "NEUTRAL":
+            alignment = "FULL_ALIGNMENT"
+        elif t1h == t4h and t15 != t1h and t1h != "NEUTRAL":
+            alignment = "COUNTER_TREND_WARNING"
+        elif t15 == t1h and t1h != t4h and t15 != "NEUTRAL":
+            alignment = "TRANSITION"
+        else:
+            alignment = "MIXED_CHOP"
+
+        return {
+            "trend_15m": t15,
+            "trend_1h": t1h,
+            "trend_4h": t4h,
+            "mtf_alignment": alignment,
+            "tf_15m": tf_15m,
+            "tf_1h": tf_1h,
+            "tf_4h": tf_4h
+        }
+
+    async def fetch_ohlcv(self, symbol: str, timeframe: str = "15m") -> Dict[str, Any]:
+        """Fetches real candlestick data and computes price trend from Kraken."""
+        import time
+        tf_map = {"15m": 15, "1h": 60, "4h": 240, "1d": 1440}
+        interval_min = tf_map.get(timeframe.lower(), 15)
+        res = await self._fetch_ohlc_interval(symbol, interval_min)
+            
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "current_price": res.get("current_price", 0.0),
+            "trend": res.get("trend", "neutral").lower(),
+            "recent_volume": res.get("volume", 0.0),
+            "candles_20": res.get("candles_20", []),
+            "timestamp": res.get("timestamp", time.time())
+        }
+
+    async def fetch_order_book(self, symbol: str) -> Dict[str, Any]:
+        """Fetches real order book depth, spread, and wall strengths from Nado DEX."""
+        
+        if self.is_nado and self.nado_client:
+            try:
+                import asyncio
+                import time
+                base_symbol = symbol.split('-')[0].upper()
+                product_id = self.product_map.get(base_symbol)
+                
+                if product_id is not None:
+                    # Fetch liquidity up to 20 levels deep
+                    liquidity = await asyncio.to_thread(self.nado_client.market.get_market_liquidity, product_id, 20)
+                    
+                    if liquidity and liquidity.bids and liquidity.asks:
+                        # Convert x18 formats
+                        bids = [(float(p) / 1e18, float(s) / 1e18) for p, s in liquidity.bids]
+                        asks = [(float(p) / 1e18, float(s) / 1e18) for p, s in liquidity.asks]
+                        
+                        bids = sorted(bids, key=lambda x: x[0], reverse=True)
+                        asks = sorted(asks, key=lambda x: x[0])
+                        
+                        best_bid = bids[0][0]
+                        best_ask = asks[0][0]
+                        raw_spread = max(0.0, best_ask - best_bid)
+                        spread = round(raw_spread, 8)
+                        spread_pct = round((raw_spread / best_bid) * 100, 4) if best_bid > 0 else 0.0
+                        import math
+                        mid_price = (best_bid + best_ask) / 2
+                        if mid_price > 0:
+                            bid_vol = sum(size * math.exp(-100 * (abs(price - mid_price) / mid_price)) for price, size in bids)
+                            ask_vol = sum(size * math.exp(-100 * (abs(price - mid_price) / mid_price)) for price, size in asks)
+                        else:
+                            bid_vol = sum(size for _, size in bids)
+                            ask_vol = sum(size for _, size in asks)
+                        total_vol = bid_vol + ask_vol
+                        imbalance = round((bid_vol - ask_vol) / (total_vol + 1e-8), 4)
+                        
+                        return {
+                            "symbol": symbol,
+                            "spread": spread,
+                            "spread_pct": spread_pct,
+                            "bid_volume": round(bid_vol, 2),
+                            "ask_volume": round(ask_vol, 2),
+                            "imbalance": imbalance,
+                            "best_bid": best_bid,
+                            "best_ask": best_ask,
+                            "timestamp": time.time()
+                        }
+                    else:
+                        raise ValueError(f"Nado OrderBook is completely empty for {symbol} (No liquidity)")
+            except Exception as e:
+                self._log(f"⚠️ [MarketDataService] Failed to fetch Nado order book for {symbol}: {e}. NO FALLBACK ALLOWED.")
+                raise ValueError(f"Nado OrderBook data unavailable for {symbol}: {e}")
+                
+        raise ValueError(f"Nado OrderBook client not initialized for {symbol}")
+
+    async def fetch_indicators(self, symbol: str) -> Dict[str, Any]:
+        """Fetches candle data and computes RSI-14, EMA-20/50/200, MACD, ATR-14, ADX-14, VWAP, and Bollinger Bands."""
+        try:
+            # 250 candles for stable EMA-20/50/200, MACD, ADX and VWAP warm-up (Audit F-12).
+            # Reuses cached 15m candles from _fetch_ohlc_interval/fetch_multi_timeframe if already fetched.
+            candles = await self._fetch_nado_candles(symbol, 15, 250)
+            
+            if candles:
+                closes = [float(c["close"]) for c in candles[-250:]]
+                highs = [float(c["high"]) for c in candles[-250:]]
+                lows = [float(c["low"]) for c in candles[-250:]]
+                current_price = closes[-1]
+
+                if len(closes) >= 35:
+                    gains = [max(0.0, closes[i] - closes[i-1]) for i in range(1, len(closes))]
+                    losses = [max(0.0, closes[i-1] - closes[i]) for i in range(1, len(closes))]
+                    
+                    # 1. RSI Wilder's Smoothing (RMA)
+                    avg_gain = sum(gains[:14]) / 14.0
+                    avg_loss = sum(losses[:14]) / 14.0
+                    for i in range(14, len(gains)):
+                        avg_gain = (avg_gain * 13.0 + gains[i]) / 14.0
+                        avg_loss = (avg_loss * 13.0 + losses[i]) / 14.0
+                    if avg_gain == 0.0 and avg_loss == 0.0:
+                        rsi = 50.0
+                    else:
+                        rs = avg_gain / (avg_loss + 1e-6)
+                        rsi = round(100.0 - (100.0 / (1.0 + rs)), 2)
+
+                    def calc_ema_series(data, period):
+                        if not data or len(data) < period: return [0.0] * len(data)
+                        emas = [0.0] * (period - 1)
+                        ema = sum(data[:period]) / period
+                        emas.append(ema)
+                        k = 2.0 / (period + 1.0)
+                        for price in data[period:]:
+                            ema = (price - ema) * k + ema
+                            emas.append(ema)
+                        return emas
+
+                    # 2. EMAs (20, 50, 200)
+                    ema_20_series = calc_ema_series(closes, 20)
+                    ema_20 = round(ema_20_series[-1], 6)
+                    ema_50_series = calc_ema_series(closes, 50)
+                    ema_50 = round(ema_50_series[-1], 6) if len(closes) >= 50 else ema_20
+                    ema_200_series = calc_ema_series(closes, 200)
+                    ema_200 = round(ema_200_series[-1], 6) if len(closes) >= 200 else ema_50
+                    ema_trend = "up" if current_price > ema_20 else "down"
+
+                    # 3. MACD (12, 26, 9)
+                    ema_12_series = calc_ema_series(closes, 12)
+                    ema_26_series = calc_ema_series(closes, 26)
+                    macd_line = [ema_12_series[i] - ema_26_series[i] for i in range(len(closes))]
+                    
+                    # Signal line is EMA(9) of the valid MACD portion
+                    macd_valid = macd_line[25:]
+                    signal_line_series = calc_ema_series(macd_valid, 9)
+                    signal_val = signal_line_series[-1] if signal_line_series else 0.0
+                    
+                    macd_val = macd_line[-1]
+                    macd_signal_label = "bullish" if macd_val > signal_val else "bearish"
+                    macd_histogram = round(macd_val - signal_val, 6)
+                    prev_histogram = round(macd_valid[-2] - signal_line_series[-2], 6) if len(macd_valid) >= 2 and len(signal_line_series) >= 2 else 0.0
+                    histogram_momentum = "accelerating" if abs(macd_histogram) > abs(prev_histogram) else "decelerating"
+
+                    # 4. ATR-14 (Wilder's Smoothing)
+                    tr_list = [max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1])) for i in range(1, len(closes))]
+                    atr_14 = sum(tr_list[:14]) / 14.0
+                    for i in range(14, len(tr_list)):
+                        atr_14 = (atr_14 * 13.0 + tr_list[i]) / 14.0
+                    atr_pct = round((atr_14 / current_price) * 100.0, 2) if current_price > 0 else 0.0
+
+                    # 5. ADX-14 (Average Directional Index)
+                    adx_14 = 0.0
+                    plus_di_14 = 0.0
+                    minus_di_14 = 0.0
+                    if len(closes) >= 29:
+                        plus_dm = []
+                        minus_dm = []
+                        for i in range(1, len(closes)):
+                            up_m = highs[i] - highs[i-1]
+                            down_m = lows[i-1] - lows[i]
+                            plus_dm.append(up_m if up_m > down_m and up_m > 0 else 0.0)
+                            minus_dm.append(down_m if down_m > up_m and down_m > 0 else 0.0)
+                            
+                        tr_s = sum(tr_list[:14])
+                        pdm_s = sum(plus_dm[:14])
+                        mdm_s = sum(minus_dm[:14])
+                        dx_list = []
+                        for i in range(14, len(tr_list)):
+                            tr_s = tr_s - (tr_s / 14.0) + tr_list[i]
+                            pdm_s = pdm_s - (pdm_s / 14.0) + plus_dm[i]
+                            mdm_s = mdm_s - (mdm_s / 14.0) + minus_dm[i]
+                            p_di = 100.0 * (pdm_s / tr_s) if tr_s > 0 else 0.0
+                            m_di = 100.0 * (mdm_s / tr_s) if tr_s > 0 else 0.0
+                            di_sum = p_di + m_di
+                            dx = 100.0 * (abs(p_di - m_di) / di_sum) if di_sum > 0 else 0.0
+                            dx_list.append(dx)
+                            plus_di_14 = round(p_di, 2)
+                            minus_di_14 = round(m_di, 2)
+                        if len(dx_list) >= 14:
+                            adx_val = sum(dx_list[:14]) / 14.0
+                            for d in dx_list[14:]:
+                                adx_val = (adx_val * 13.0 + d) / 14.0
+                            adx_14 = round(adx_val, 2)
+                        elif dx_list:
+                            adx_14 = round(sum(dx_list) / len(dx_list), 2)
+
+                    # 6. Intraday VWAP (up to 96 bars = 24h)
+                    vwap_bars = candles[-96:] if len(candles) >= 96 else candles
+                    v_sum = 0.0
+                    tp_v_sum = 0.0
+                    for c in vwap_bars:
+                        h_c, l_c, cl_c, v_c = float(c.get("high", 0)), float(c.get("low", 0)), float(c.get("close", 0)), float(c.get("volume", 0))
+                        tp = (h_c + l_c + cl_c) / 3.0
+                        v_sum += v_c
+                        tp_v_sum += tp * v_c
+                    vwap = round(tp_v_sum / v_sum, 6) if v_sum > 0 else current_price
+
+                    # 7. Efficiency Ratio (ER-14) - Trend Strength based on past CLOSED candles
+                    if len(closes) >= 16:
+                        direction = abs(closes[-2] - closes[-16])
+                        volatility = sum(abs(closes[i] - closes[i-1]) for i in range(len(closes)-15, len(closes)-1))
+                        er_14 = round(direction / volatility, 3) if volatility > 0 else 0.0
+                    else:
+                        er_14 = 0.0
+                        
+                    # 8. Bollinger Bands (20, 2) based on past CLOSED candles (prevent repainting)
+                    if len(closes) >= 21:
+                        sma_20 = sum(closes[-21:-1]) / 20.0
+                        variance = sum((x - sma_20) ** 2 for x in closes[-21:-1]) / 20.0
+                        std_dev = max(0.0, variance) ** 0.5
+                        bb_upper = round(sma_20 + (2.0 * std_dev), 6)
+                        bb_lower = round(sma_20 - (2.0 * std_dev), 6)
+                        bb_width_pct = round(((bb_upper - bb_lower) / sma_20) * 100.0, 2) if sma_20 > 0 else 0.0
+                        bb_position_pct = round(((current_price - bb_lower) / (bb_upper - bb_lower)) * 100.0, 2) if bb_upper > bb_lower else 50.0
+                    else:
+                        sma_20 = current_price
+                        bb_upper = current_price
+                        bb_lower = current_price
+                        bb_width_pct = 0.0
+                        bb_position_pct = 50.0
+
+                    # 9. Breakout & Momentum (Volume Spike & Donchian 20)
+                    if len(candles) >= 22:
+                        cur_vol = float(candles[-1].get("volume", 0))
+                        prev_vol = float(candles[-2].get("volume", 0))
+                        # If current candle is young (< 50% volume of prev), evaluate breakout of closed candle[-2]
+                        # against preceding 20 bars candles[-22:-2] to prevent overwriting donchian level by breakout candle itself
+                        use_prev_bar = (cur_vol < prev_vol * 0.5)
+                        ref_slice = candles[-22:-2] if use_prev_bar else candles[-21:-1]
+                        
+                        past_20_vols = [float(c.get("volume", 0)) for c in ref_slice]
+                        vol_sma_20 = sum(past_20_vols) / len(past_20_vols) if past_20_vols else 0.0
+                        effective_vol = max(cur_vol, prev_vol) if use_prev_bar else cur_vol
+                        volume_spike_pct = round((effective_vol / vol_sma_20) * 100.0, 2) if vol_sma_20 > 0 else 0.0
+
+                        past_20_highs = [float(c.get("high", 0)) for c in ref_slice]
+                        past_20_lows = [float(c.get("low", 0)) for c in ref_slice]
+                        donchian_high = max(past_20_highs) if past_20_highs else current_price
+                        donchian_low = min(past_20_lows) if past_20_lows else current_price
+                    elif len(candles) >= 21:
+                        past_20_vols = [float(c.get("volume", 0)) for c in candles[-21:-1]]
+                        vol_sma_20 = sum(past_20_vols) / len(past_20_vols) if past_20_vols else 0.0
+                        current_vol = float(candles[-1].get("volume", 0))
+                        volume_spike_pct = round((current_vol / vol_sma_20) * 100.0, 2) if vol_sma_20 > 0 else 0.0
+                        past_20_highs = [float(c.get("high", 0)) for c in candles[-21:-1]]
+                        past_20_lows = [float(c.get("low", 0)) for c in candles[-21:-1]]
+                        donchian_high = max(past_20_highs) if past_20_highs else current_price
+                        donchian_low = min(past_20_lows) if past_20_lows else current_price
+                    else:
+                        volume_spike_pct = 0.0
+                        donchian_high = current_price
+                        donchian_low = current_price
+
+                    # === ALGORITHMIC SIGNALS ===
+                    # 10. RSI Divergence Detection (last 20 bars)
+                    rsi_divergence = "none"
+                    rsi_series = []
+                    _ag = sum(gains[:14]) / 14.0
+                    _al = sum(losses[:14]) / 14.0
+                    for i in range(14, len(gains)):
+                        _ag = (_ag * 13.0 + gains[i]) / 14.0
+                        _al = (_al * 13.0 + losses[i]) / 14.0
+                        _rs = _ag / (_al + 1e-6)
+                        rsi_series.append(round(100.0 - (100.0 / (1.0 + _rs)), 2))
+                    
+                    # F-20 Fix: Compare swing extremes in two 10-bar windows to eliminate single-bar index shift artifact
+                    if len(rsi_series) >= 20 and len(closes) >= 20:
+                        price_tail = closes[-20:]
+                        rsi_tail = rsi_series[-20:]
+                        p1_min = min(price_tail[:10])
+                        p2_min = min(price_tail[10:])
+                        p1_max = max(price_tail[:10])
+                        p2_max = max(price_tail[10:])
+
+                        rsi1_min = min(rsi_tail[:10])
+                        rsi2_min = min(rsi_tail[10:])
+                        rsi1_max = max(rsi_tail[:10])
+                        rsi2_max = max(rsi_tail[10:])
+
+                        if p2_min < p1_min and rsi2_min > (rsi1_min + 1.5):
+                            rsi_divergence = "bullish"
+                        elif p2_max > p1_max and rsi2_max < (rsi1_max - 1.5):
+                            rsi_divergence = "bearish"
+
+                    # 10b. Volume Trend & Trend Exhaustion Detection (15m timeframe)
+                    vol_declining_on_rise = False
+                    vol_declining_on_drop = False
+                    if len(candles) >= 3:
+                        try:
+                            v_prev = float(candles[-3].get("volume", 0))
+                            v_curr = float(candles[-2].get("volume", 0))
+                            p_prev = float(candles[-3].get("close", 0))
+                            p_curr = float(candles[-2].get("close", 0))
+                            if p_curr > p_prev and v_curr < v_prev:
+                                vol_declining_on_rise = True
+                            elif p_curr < p_prev and v_curr < v_prev:
+                                vol_declining_on_drop = True
+                        except (ValueError, TypeError):
+                            pass
+
+                    # Trend Exhaustion Criteria (15m timeframe):
+                    # - Long Exhaustion: (bb_pos > 85.0 or current_price >= donchian_high) and (rsi_divergence == "bearish" or vol_declining_on_rise)
+                    # - Short Exhaustion: (bb_pos < 15.0 or current_price <= donchian_low) and (rsi_divergence == "bullish" or vol_declining_on_drop)
+                    at_channel_high = (bb_position_pct > 85.0) or (donchian_high > 0 and current_price >= donchian_high)
+                    at_channel_low = (bb_position_pct < 15.0) or (donchian_low > 0 and current_price <= donchian_low)
+
+                    trend_exhaustion_long = at_channel_high and (rsi_divergence == "bearish" or vol_declining_on_rise)
+                    trend_exhaustion_short = at_channel_low and (rsi_divergence == "bullish" or vol_declining_on_drop)
+                    trend_exhaustion = trend_exhaustion_long or trend_exhaustion_short
+
+                    # 11. MACD Crossover Detection
+                    macd_crossover = "none"
+                    if len(macd_valid) >= 2 and len(signal_line_series) >= 2:
+                        prev_macd = macd_valid[-2]
+                        prev_signal = signal_line_series[-2]
+                        curr_macd = macd_valid[-1]
+                        curr_signal = signal_line_series[-1]
+                        if prev_macd <= prev_signal and curr_macd > curr_signal:
+                            macd_crossover = "bullish_cross"
+                        elif prev_macd >= prev_signal and curr_macd < curr_signal:
+                            macd_crossover = "bearish_cross"
+
+                    # 12. Liquidity Sweep Detection (wick > 60% of candle range on last 5 CLOSED candles)
+                    sweeps_detected = []
+                    for ci in range(-6, -1):
+                        if abs(ci) <= len(candles):
+                            c = candles[ci]
+                            o, h, l, cl = float(c["open"]), float(c["high"]), float(c["low"]), float(c["close"])
+                            rng = h - l
+                            if rng > 0:
+                                upper_wick = h - max(o, cl)
+                                lower_wick = min(o, cl) - l
+                                if upper_wick / rng > 0.6:
+                                    sweeps_detected.append({
+                                        "type": "upper_sweep",
+                                        "sweep_type": "bearish_sweep",
+                                        "direction": "bearish",
+                                        "bar": ci,
+                                        "rejection_from": round(h, 6)
+                                    })
+                                elif lower_wick / rng > 0.6:
+                                    sweeps_detected.append({
+                                        "type": "lower_sweep",
+                                        "sweep_type": "bullish_sweep",
+                                        "direction": "bullish",
+                                        "bar": ci,
+                                        "rejection_from": round(l, 6)
+                                    })
+
+                    # 13. Candle Pattern Detection (evaluated on closed candles)
+                    candle_patterns = []
+                    if len(candles) >= 3:
+                        for ci in range(-3, -1):
+                            c = candles[ci]
+                            o, h, l, cl = float(c["open"]), float(c["high"]), float(c["low"]), float(c["close"])
+                            body = abs(cl - o)
+                            rng = h - l
+                            if rng > 0:
+                                body_ratio = body / rng
+                                if body_ratio < 0.1:
+                                    candle_patterns.append({"bar": ci, "pattern": "doji"})
+                                elif body_ratio > 0.7 and cl > o:
+                                    candle_patterns.append({"bar": ci, "pattern": "strong_bullish"})
+                                elif body_ratio > 0.7 and cl < o:
+                                    candle_patterns.append({"bar": ci, "pattern": "strong_bearish"})
+                        
+                        # Engulfing on completed candles
+                        c_prev = candles[-3]
+                        c_curr = candles[-2]
+                        po, pc = float(c_prev["open"]), float(c_prev["close"])
+                        co, cc = float(c_curr["open"]), float(c_curr["close"])
+                        if pc < po and cc > co and cc > po and co < pc:
+                            candle_patterns.append({"bar": -2, "pattern": "bullish_engulfing"})
+                        elif pc > po and cc < co and cc < po and co > pc:
+                            candle_patterns.append({"bar": -2, "pattern": "bearish_engulfing"})
+
+                    # 14. EMA-20 Distance (overextension check)
+                    ema_distance_pct = round(((current_price - ema_20) / ema_20) * 100.0, 2) if ema_20 > 0 else 0.0
+
+                    # 15. 24h Return
+                    asset_return_24h = 0.0
+                    if len(closes) >= 97:
+                        past_price = closes[-97]
+                        asset_return_24h = ((current_price - past_price) / past_price) * 100.0 if past_price > 0 else 0.0
+
+                    return {
+                        "symbol": symbol,
+                        "rsi_14": rsi,
+                        "ema_20": ema_20,
+                        "ema_50": ema_50,
+                        "ema_200": ema_200,
+                        "ema_trend": ema_trend,
+                        "ema_distance_pct": ema_distance_pct,
+                        "macd": round(macd_val, 6),
+                        "macd_val": round(macd_val, 6),
+                        "macd_signal": round(signal_val, 6),
+                        "macd_label": macd_signal_label,
+                        "macd_histogram": macd_histogram,
+                        "histogram_momentum": histogram_momentum,
+                        "atr_14": round(atr_14, 6),
+                        "atr_pct": atr_pct,
+                        "adx_14": adx_14,
+                        "plus_di_14": plus_di_14,
+                        "minus_di_14": minus_di_14,
+                        "vwap": vwap,
+                        "er_14": er_14,
+                        "bb_upper": bb_upper,
+                        "bb_lower": bb_lower,
+                        "bb_middle": sma_20,
+                        "sma_20": sma_20,
+                        "bb_width_pct": bb_width_pct,
+                        "bb_position_pct": bb_position_pct,
+                        "bb_pos": bb_position_pct,
+                        "volume_spike_pct": volume_spike_pct,
+                        "rvol": round(volume_spike_pct / 100.0, 2),
+                        "donchian_high": donchian_high,
+                        "donchian_low": donchian_low,
+                        "last_closed_candle_close": closes[-2] if len(closes) >= 2 else current_price,
+                        "trend_exhaustion": trend_exhaustion,
+                        "trend_exhaustion_long": trend_exhaustion_long,
+                        "trend_exhaustion_short": trend_exhaustion_short,
+                        "rsi_divergence": rsi_divergence,
+                        "algo_signals": {
+                            "rsi_divergence": rsi_divergence,
+                            "macd_crossover": macd_crossover,
+                            "liquidity_sweeps": sweeps_detected,
+                            "candle_patterns": candle_patterns,
+                            "volume_declining": vol_declining_on_rise or vol_declining_on_drop,
+                            "volume_declining_on_rise": vol_declining_on_rise,
+                            "volume_declining_on_drop": vol_declining_on_drop,
+                            "trend_exhaustion": trend_exhaustion,
+                            "trend_exhaustion_long": trend_exhaustion_long,
+                            "trend_exhaustion_short": trend_exhaustion_short
+                        },
+                        "asset_return_24h": round(asset_return_24h, 2)
+                    }
+                else:
+                    self._log(f"⚠️ [MarketDataService] Недостаточно истории для индикаторов {symbol} (нужно >= 35, есть {len(closes)}).")
+                    return self._create_fallback_indicators(symbol, current_price)
+            else:
+                self._log(f"⚠️ [MarketDataService] Пустой массив свечей от Nado для {symbol}.")
+                return self._create_fallback_indicators(symbol, 0.0)
+
+        except Exception as e:
+            self._log(f"⚠️ [MarketDataService] Ошибка расчёта индикаторов: {e}")
+            raise Exception(f"Не удалось получить индикаторы для {symbol}") from e
+
+    def _create_fallback_indicators(self, symbol: str, price: float) -> Dict[str, Any]:
+        """Provides a complete, schema-compliant fallback dictionary for indicators."""
+        return {
+            "symbol": symbol,
+            "rsi_14": 50.0,
+            "ema_20": price,
+            "ema_50": price,
+            "ema_200": price,
+            "ema_trend": "flat",
+            "ema_distance_pct": 0.0,
+            "macd": 0.0,
+            "macd_val": 0.0,
+            "macd_signal": 0.0,
+            "macd_label": "neutral",
+            "macd_histogram": 0.0,
+            "histogram_momentum": "neutral",
+            "atr_14": 0.0,
+            "atr_pct": 0.0,
+            "adx_14": 0.0,
+            "plus_di_14": 0.0,
+            "minus_di_14": 0.0,
+            "vwap": price,
+            "er_14": 0.0,
+            "bb_upper": price,
+            "bb_lower": price,
+            "bb_middle": price,
+            "sma_20": price,
+            "bb_width_pct": 0.0,
+            "bb_position_pct": 50.0,
+            "bb_pos": 50.0,
+            "volume_spike_pct": 0.0,
+            "rvol": 1.0,
+            "donchian_high": price,
+            "donchian_low": price,
+            "last_closed_candle_close": price,
+            "trend_exhaustion": False,
+            "trend_exhaustion_long": False,
+            "trend_exhaustion_short": False,
+            "rsi_divergence": "none",
+            "algo_signals": {
+                "rsi_divergence": "none",
+                "macd_crossover": "none",
+                "liquidity_sweeps": [],
+                "candle_patterns": [],
+                "volume_declining": False,
+                "volume_declining_on_rise": False,
+                "volume_declining_on_drop": False,
+                "trend_exhaustion": False,
+                "trend_exhaustion_long": False,
+                "trend_exhaustion_short": False
+            },
+            "asset_return_24h": 0.0
+        }
+
+    async def fetch_news_sentiment(self, symbol: str) -> Dict[str, Any]:
+        """Fetches real Crypto Fear & Greed Index from Alternative.me."""
+        url = "https://api.alternative.me/fng/"
+        try:
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
+            session = await self._get_session()
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        item = data.get("data", [{}])[0]
+                        val = float(item.get("value", 50))
+                        classif = item.get("value_classification", "Neutral")
+                        return {
+                            "symbol": symbol,
+                            "sentiment_score": round(val, 2),
+                            "latest_event": f"Market Sentiment: {classif} (Fear & Greed Index: {int(val)})"
+                        }
+        except Exception as e:
+            self._log(f"⚠️ [MarketDataService] Ошибка загрузки сентимента для {symbol}: {e}. Используем Neutral.")
+            
+        return {
+            "symbol": symbol,
+            "sentiment_score": 50.0,
+            "latest_event": "Market Sentiment: Neutral (Fallback due to API error)"
+        }
+
+    async def fetch_oi_funding(self, symbol: str) -> Dict[str, Any]:
+        """Fetches real Open Interest and funding rates from Nado DEX."""
+        if not self.is_nado or not self.nado_client:
+            return {"symbol": symbol, "open_interest": None, "open_interest_trend": "neutral", "oi_change_pct": 0.0, "funding_rate": None}
+            
+        try:
+            import asyncio
+            from nado_protocol.indexer_client.types.query import IndexerMarketSnapshotsParams, IndexerMarketSnapshotInterval
+            
+            base_symbol = symbol.split('-')[0].upper()
+            product_id = self.product_map.get(base_symbol)
+            if product_id is None:
+                return {"symbol": symbol, "open_interest": None, "open_interest_trend": "neutral", "oi_change_pct": 0.0, "funding_rate": None}
+                
+            # 1. Real-time OI from engine markets (with transient network retry)
+            open_interest = None
+            markets = None
+            for attempt in range(2):
+                try:
+                    markets = await asyncio.to_thread(self.nado_client.market.get_all_engine_markets)
+                    if markets and hasattr(markets, "perp_products"):
+                        break
+                except Exception as net_err:
+                    if attempt == 0:
+                        await asyncio.sleep(0.5)
+                    else:
+                        raise net_err
+
+            if markets and hasattr(markets, "perp_products"):
+                for p in markets.perp_products:
+                    if p.product_id == product_id:
+                        try:
+                            if hasattr(p, 'state') and hasattr(p.state, 'open_interest') and p.state.open_interest is not None:
+                                open_interest = float(p.state.open_interest) / 1e18
+                            elif hasattr(p, 'open_interest_x18') and p.open_interest_x18 is not None:
+                                open_interest = float(p.open_interest_x18) / 1e18
+                        except Exception:
+                            pass
+                        break
+                    
+            # 2. Hourly Snapshot for Funding Rate (CRITICAL-14, with transient network retry)
+            funding_rate = None
+            snapshots = None
+            params = IndexerMarketSnapshotsParams(interval=IndexerMarketSnapshotInterval(count=1, granularity=3600))
+            for attempt in range(2):
+                try:
+                    snapshots = await asyncio.to_thread(self.nado_client.market.get_market_snapshots, params)
+                    if snapshots and snapshots.snapshots:
+                        break
+                except Exception as net_err:
+                    if attempt == 0:
+                        await asyncio.sleep(0.5)
+                    else:
+                        raise net_err
+            
+            if snapshots and snapshots.snapshots:
+                snap = snapshots.snapshots[0]
+                vid = str(product_id)
+                if vid in snap.funding_rates:
+                    funding_rate = float(snap.funding_rates[vid]) / 1e18
+                if open_interest is None and hasattr(snap, 'open_interests') and vid in snap.open_interests:
+                    try:
+                        open_interest = float(snap.open_interests[vid]) / 1e18
+                    except Exception:
+                        pass
+                    
+            # 3. Time-Weighted OI Trend (CRITICAL-13 & Audit F-16: Preserve OI and trend even if funding rate snapshot lags)
+            oi_trend = "neutral"
+            oi_change_pct = 0.0
+            import time
+            current_time = time.time()
+            if open_interest is not None:
+                if symbol not in self._oi_history or not isinstance(self._oi_history.get(symbol), list):
+                    self._oi_history[symbol] = []
+                    
+                history = self._oi_history[symbol]
+                history.append({"ts": current_time, "oi": open_interest})
+                
+                # Auto-purge data older than 2 hours (7200 seconds)
+                history = [x for x in history if current_time - x["ts"] <= 7200]
+                self._oi_history[symbol] = history
+                
+                # Find closest point to 1 hour ago
+                target_time = current_time - 3600
+                past_points = [x for x in history if x["ts"] <= current_time - 1800] # at least 30m old
+                
+                if past_points:
+                    closest_point = min(past_points, key=lambda x: abs(x["ts"] - target_time))
+                    prev_oi = closest_point["oi"]
+                    if prev_oi > 0:
+                        oi_change_pct = round(((open_interest - prev_oi) / prev_oi) * 100.0, 2)
+                        if open_interest > prev_oi * 1.01: # 1% increase
+                            oi_trend = "rising"
+                        elif open_interest < prev_oi * 0.99: # 1% decrease
+                            oi_trend = "falling"
+                        else:
+                            oi_trend = "stable"
+                elif len(history) >= 2 and float(history[0].get("oi", 0) or 0) > 0:
+                    init_oi = float(history[0]["oi"])
+                    oi_change_pct = round(((open_interest - init_oi) / init_oi) * 100.0, 2)
+                    if oi_change_pct > 1.0:
+                        oi_trend = "rising"
+                    elif oi_change_pct < -1.0:
+                        oi_trend = "falling"
+                    else:
+                        oi_trend = "stable"
+                            
+                self._save_oi_history()
+
+            if funding_rate is None or open_interest is None:
+                self._log(f"⚠️ [MarketDataService] Missing critical risk data OI ({open_interest}) or Funding ({funding_rate}) for {symbol}. VETO triggered.", level="debug")
+                return {
+                    "symbol": symbol,
+                    "open_interest": open_interest,
+                    "open_interest_trend": oi_trend,
+                    "oi_change_pct": oi_change_pct,
+                    "funding_rate": None,
+                    "funding_rate_decimal": None
+                }
+
+            return {
+                "symbol": symbol,
+                "open_interest": open_interest,
+                "open_interest_trend": oi_trend,
+                "oi_change_pct": oi_change_pct,
+                "funding_rate": round(funding_rate, 8),
+                "funding_rate_decimal": round(funding_rate, 8),
+                "timestamp": current_time
+            }
+        except Exception as e:
+            self._log(f"⚠️ [MarketDataService] Failed to fetch Nado OI/Funding for {symbol}: {e}")
+            
+        return {"symbol": symbol, "open_interest": None, "open_interest_trend": "neutral", "oi_change_pct": 0.0, "funding_rate": None, "funding_rate_decimal": None}
+
+    async def fetch_margin_requirements(self, symbol: str) -> Dict[str, Any]:
+        """Fetches real maintenance margin parameters and size limits from Nado DEX SDK."""
+        result = {"maintenance_margin_pct": 0.01, "min_size": 0.0, "size_increment": 0.001}
+        if not self.is_nado or not self.nado_client:
+            return result
+            
+        try:
+            import asyncio
+            base_symbol = symbol.split('-')[0].upper()
+            product_id = self.product_map.get(base_symbol)
+            
+            if product_id is not None:
+                markets = await asyncio.to_thread(self.nado_client.market.get_all_engine_markets)
+                for p in markets.perp_products:
+                    if p.product_id == product_id:
+                        # Extract maintenance margin from risk parameters
+                        try:
+                            lwm = float(p.risk.long_weight_maintenance_x18) / 1e18
+                            if lwm > 0:
+                                result["maintenance_margin_pct"] = round(1.0 - lwm, 4)
+                        except Exception:
+                            # Fallback if SDK structures differ slightly
+                            pass
+                        
+                        # Extract min_size and size_increment
+                        try:
+                            result["size_increment"] = float(p.book_info.size_increment) / 1e18
+                            raw_min_size = float(getattr(p.book_info, "min_size", 0)) / 1e18
+                            if raw_min_size >= 10.0:
+                                result["min_size"] = result["size_increment"]
+                                result["min_notional"] = raw_min_size
+                            elif raw_min_size > 0:
+                                result["min_size"] = raw_min_size
+                                result["min_notional"] = 0.0
+                            else:
+                                result["min_size"] = result["size_increment"]
+                                result["min_notional"] = 0.0
+                            if hasattr(p.book_info, "price_increment_x18"):
+                                raw_price_inc = float(p.book_info.price_increment_x18) / 1e18
+                                if raw_price_inc > 0:
+                                    result["price_increment"] = raw_price_inc
+                        except Exception:
+                            pass
+                        break
+        except Exception as e:
+            self._log(f"⚠️ [MarketDataService] Failed to fetch Nado margin for {symbol}: {e}")
+            
+        return result
+
+    async def fetch_all_market_data(self, symbol: str) -> Dict[str, Any]:
+        """
+        Aggregates all real-time market data asynchronously including Multi-Timeframe Alignment.
+        Includes a 3-attempt retry mechanism for resilience against temporary API failures.
+        """
+        for attempt in range(3):
+            try:
+                mtf, ohlcv, ob, oi, indicators, news, margin = await asyncio.gather(
+                    self.fetch_multi_timeframe(symbol),
+                    self.fetch_ohlcv(symbol),
+                    self.fetch_order_book(symbol),
+                    self.fetch_oi_funding(symbol),
+                    self.fetch_indicators(symbol),
+                    self.fetch_news_sentiment(symbol),
+                    self.fetch_margin_requirements(symbol)
+                )
+
+                # Merge margin into derivatives_data
+                if isinstance(oi, dict) and isinstance(margin, dict):
+                    oi.update(margin)
+
+                # CRITICAL-12: Inject open_interest_usd for OI_FundingAgent
+                current_price = ohlcv.get("current_price", 0.0) if isinstance(ohlcv, dict) else 0.0
+                if isinstance(oi, dict) and current_price > 0:
+                    oi_val = oi.get("open_interest")
+                    oi["open_interest_usd"] = (oi_val * current_price) if oi_val is not None else None
+
+                # 48h Box & 15m Structural Extremes (Step 1)
+                try:
+                    c_1h = (mtf.get("tf_1h") or {}).get("candles_20", []) if isinstance(mtf, dict) else []
+                    if c_1h:
+                        h_48 = max(float(c.get("high", current_price)) for c in c_1h[-48:] if isinstance(c, dict))
+                        l_48 = min(float(c.get("low", current_price)) for c in c_1h[-48:] if isinstance(c, dict))
+                        box_pos = ((current_price - l_48) / max(h_48 - l_48, 1e-9) * 100.0) if current_price > 0 else 50.0
+                        if isinstance(indicators, dict):
+                            indicators["high_48h"] = round(h_48, 6)
+                            indicators["low_48h"] = round(l_48, 6)
+                            indicators["macro_box_pos_pct"] = round(box_pos, 2)
+                    c_15m = (ohlcv.get("candles_20") or []) if isinstance(ohlcv, dict) else []
+                    if c_15m and isinstance(indicators, dict):
+                        h_16 = [float(c.get("high", current_price)) for c in c_15m[-16:] if isinstance(c, dict)]
+                        l_16 = [float(c.get("low", current_price)) for c in c_15m[-16:] if isinstance(c, dict)]
+                        if h_16: indicators["swing_high_15m"] = round(max(h_16), 6)
+                        if l_16: indicators["swing_low_15m"] = round(min(l_16), 6)
+                except Exception as box_err:
+                    self._log(f"⚠️ [MarketDataService] Error computing 48h box: {box_err}", level="debug")
+
+                return {
+                    "exchange": self.exchange_name,
+                    "symbol": symbol,
+                    "multi_timeframe": mtf,
+                    "price_data": ohlcv,
+                    "order_book_data": ob,
+                    "derivatives_data": oi,
+                    "indicators": indicators,
+                    "news_data": news
+                }
+            except Exception as e:
+                if attempt < 2:
+                    self._log(f"⚠️ [MarketDataService] Ошибка агрегации для {symbol}: {e}. Повтор ({attempt+1}/3) через 2 сек...")
+                    await asyncio.sleep(2)
+                else:
+                    self._log(f"❌ [MarketDataService] Критическая ошибка агрегации для {symbol} после 3 попыток.")
+                    raise
+```
+
+---
+
+<a id="file-python-core-data_quality_guard-py"></a>
+## File: `python/core/data_quality_guard.py` (179 строк, 8.0 KB)
+
+```python
+import time
+import math
+from typing import Dict, Any, Tuple, Optional
+from core.logger import TradeLogger
+
+class DataQualityGuard:
+    """
+    Deterministic system component that validates raw market data before it reaches the ScannerAgent or AI.
+    Ensures that the LLMs never hallucinate on stale, broken, or mathematically impossible data.
+    """
+    def __init__(self, logger: Optional[TradeLogger] = None):
+        self.logger = logger
+        
+        # TTL Thresholds in seconds
+        self.MAX_PRICE_AGE = 60
+        self.MAX_ORDER_BOOK_AGE = 60
+        self.MAX_OHLCV_AGE = 300
+        self.MAX_FUNDING_AGE = 600
+        self.MAX_OI_AGE = 600
+        
+        # Upper sanity bound for funding rate (allow up to 200% for extreme crypto/testnet conditions, reject true API corruptions)
+        self.MAX_FUNDING_RATE = 2.0 
+        self.EPSILON = 1e-8
+
+    def _safe_float(self, val: Any) -> Optional[float]:
+        """Safely parses a value to a finite float, returning None if invalid."""
+        if val is None:
+            return None
+        try:
+            f = float(val)
+            return f if math.isfinite(f) else None
+        except (ValueError, TypeError):
+            return None
+
+    def _to_timestamp_sec(self, ts: Any) -> Optional[float]:
+        """Converts timestamp in seconds or milliseconds to Unix seconds."""
+        ts_f = self._safe_float(ts)
+        if ts_f is None or ts_f <= 0:
+            return None
+        # If timestamp is > 1e11, it's in milliseconds (e.g. 1.7e12)
+        if ts_f > 1e11:
+            return ts_f / 1000.0
+        return ts_f
+
+    def validate(self, symbol: str, market_data: Dict[str, Any]) -> Tuple[bool, str]:
+        """
+        Runs all Data Quality Checks.
+        Returns: (is_valid, reason)
+        Guaranteed never to raise unhandled exceptions.
+        """
+        try:
+            if not market_data or not isinstance(market_data, dict):
+                return False, "EMPTY_MARKET_DATA"
+                
+            current_time_sec = time.time()
+
+            # 1. Price Freshness & Finite
+            price_data = market_data.get("price_data")
+            if not isinstance(price_data, dict) or not price_data:
+                return False, "MISSING_PRICE_DATA"
+                
+            current_price = self._safe_float(price_data.get("current_price"))
+            if current_price is None or current_price <= 0:
+                return False, "INVALID_CURRENT_PRICE"
+                
+            # Optional price timestamp freshness check
+            price_ts = self._to_timestamp_sec(price_data.get("timestamp"))
+            if not price_ts:
+                candles_20 = price_data.get("candles_20")
+                if isinstance(candles_20, list) and candles_20:
+                    price_ts = self._to_timestamp_sec(candles_20[-1].get("timestamp"))
+            
+            if price_ts:
+                age_sec = current_time_sec - price_ts
+                if age_sec > self.MAX_PRICE_AGE or age_sec < -60:
+                    return False, f"STALE_PRICE_DATA (Age: {age_sec:.1f}s)"
+
+            # 2. Order Book Integrity
+            orderbook = market_data.get("order_book_data")
+            if not isinstance(orderbook, dict) or not orderbook:
+                return False, "MISSING_ORDER_BOOK"
+                
+            best_bid = self._safe_float(orderbook.get("best_bid"))
+            best_ask = self._safe_float(orderbook.get("best_ask"))
+            
+            if best_bid is None or best_bid <= 0:
+                return False, "INVALID_BEST_BID"
+            if best_ask is None or best_ask <= 0:
+                return False, "INVALID_BEST_ASK"
+                
+            # Allow equal or tiny float difference; strictly ask < bid minus epsilon is crossed
+            if best_ask < best_bid - self.EPSILON:
+                return False, f"CROSSED_ORDER_BOOK (Bid: {best_bid}, Ask: {best_ask})"
+
+            # 3. OHLCV Integrity & Gaps
+            candles_15m = price_data.get("candles_20")
+            if not isinstance(candles_15m, list) or not candles_15m:
+                return False, "MISSING_OHLCV_DATA"
+            if len(candles_15m) < 20:
+                return False, f"INSUFFICIENT_CANDLES ({len(candles_15m)} < 20)"
+                
+            prev_ts_sec = None
+            interval_sec = 15 * 60 # 15 minutes
+            
+            for idx, c in enumerate(candles_15m):
+                if not isinstance(c, dict):
+                    return False, "NON_DICT_CANDLE_DATA"
+                    
+                o = self._safe_float(c.get("open"))
+                h = self._safe_float(c.get("high"))
+                l = self._safe_float(c.get("low"))
+                cl = self._safe_float(c.get("close"))
+                v = self._safe_float(c.get("volume"))
+                ts_sec = self._to_timestamp_sec(c.get("timestamp"))
+                
+                # Finite & non-null checks
+                if None in (o, h, l, cl, v):
+                    return False, "NON_FINITE_OHLCV_DATA"
+                    
+                if o <= 0 or h <= 0 or l <= 0 or cl <= 0 or v < 0:
+                    return False, "NEGATIVE_OR_ZERO_OHLCV_DATA"
+                    
+                # Logic checks with dynamic epsilon tolerance for IEEE-754 float rounding
+                cand_eps = max(self.EPSILON, h * 1e-6)
+                if (h < l - cand_eps or 
+                    h < o - cand_eps or 
+                    h < cl - cand_eps or 
+                    l > o + cand_eps or 
+                    l > cl + cand_eps):
+                    return False, f"CORRUPTED_OHLCV_CANDLE_LOGIC (O:{o} H:{h} L:{l} C:{cl})"
+                    
+                # Gap detection and monotonicity (only if timestamps are provided by exchange)
+                if ts_sec is not None:
+                    if prev_ts_sec is not None:
+                        if ts_sec <= prev_ts_sec:
+                            return False, "NON_MONOTONIC_OHLCV_TIMESTAMP"
+                            
+                        gap_sec = ts_sec - prev_ts_sec
+                        # Limit OHLCV_GAP_DETECTED to the last 5 closed candles (candles_15m[-6:])
+                        if idx >= len(candles_15m) - 5 and gap_sec > interval_sec * 2.0:
+                            return False, f"OHLCV_GAP_DETECTED ({gap_sec:.0f}s)"
+                            
+                    prev_ts_sec = ts_sec
+                
+            last_candle_ts = self._to_timestamp_sec(candles_15m[-1].get("timestamp"))
+            if last_candle_ts:
+                age_sec = current_time_sec - last_candle_ts
+                if age_sec > self.MAX_OHLCV_AGE + interval_sec or age_sec < -60:
+                    return False, f"STALE_OHLCV_DATA (Age: {age_sec:.1f}s)"
+
+            # 4. Derivatives Sanity (Funding & OI)
+            derivs = market_data.get("derivatives_data")
+            if not isinstance(derivs, dict) or not derivs:
+                return False, "MISSING_DERIVATIVES_DATA"
+                
+            oi = self._safe_float(derivs.get("open_interest"))
+            funding = self._safe_float(derivs.get("funding_rate", derivs.get("funding_rate_decimal")))
+            deriv_ts = self._to_timestamp_sec(derivs.get("timestamp"))
+            
+            # Open Interest: allow 0.0 on testnet / low activity DEX, reject negative
+            if oi is not None and oi < 0:
+                return False, f"INVALID_OPEN_INTEREST ({oi})"
+                    
+            # Funding Rate Sanity: reject truly absurd corruptions
+            if funding is not None:
+                if abs(funding) > self.MAX_FUNDING_RATE:
+                    return False, f"FUNDING_RATE_ANOMALY (Value: {funding})"
+                    
+            if deriv_ts:
+                age_sec = current_time_sec - deriv_ts
+                if age_sec > self.MAX_FUNDING_AGE or age_sec < -60:
+                    return False, f"STALE_DERIVATIVES_DATA (Age: {age_sec:.1f}s)"
+
+            return True, "DATA_VALID"
+
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"[DataQualityGuard] Unexpected validation exception on {symbol}: {e}")
+            return False, f"VALIDATION_EXCEPTION: {type(e).__name__}: {e}"
+```
+
+---
+
+<a id="file-python-core-nado_helper-py"></a>
+## File: `python/core/nado_helper.py` (36 строк, 1.5 KB)
+
+```python
+import logging
+from typing import Optional
+
+logger = logging.getLogger("System_Core")
+
+def get_nado_client_mode(network_name: str = "TESTNET"):
+    """
+    Dynamically discovers and returns the appropriate NadoClientMode enum.
+    Supports TESTNET / SEPOLIA_TESTNET and MAINNET.
+    """
+    from nado_protocol.client import NadoClientMode
+    net = (network_name or "TESTNET").upper()
+    
+    if net == "MAINNET":
+        return getattr(NadoClientMode, "MAINNET", NadoClientMode.MAINNET)
+    
+    # Priority check for testnet modes in SDK
+    for attr in ["TESTNET", "SEPOLIA_TESTNET", "INK_SEPOLIA_TESTNET", "DEVNET"]:
+        if hasattr(NadoClientMode, attr):
+            return getattr(NadoClientMode, attr)
+            
+    for mode in NadoClientMode:
+        if "TEST" in mode.name.upper() or "SEPOLIA" in mode.name.upper() or "DEV" in mode.name.upper():
+            return mode
+            
+    logger.warning("[NadoHelper] No explicit TESTNET mode found in NadoClientMode, falling back to default.")
+    return NadoClientMode.MAINNET
+
+def create_configured_nado_client(network_name: str = "TESTNET", signer: Optional[str] = None):
+    """
+    Creates and returns an initialized NadoClient configured for the specified network.
+    """
+    from nado_protocol.client import create_nado_client
+    mode = get_nado_client_mode(network_name)
+    logger.info(f"[NadoHelper] Creating Nado Client in mode: {mode} (Network: {network_name})")
+    return create_nado_client(mode=mode, signer=signer)
+```
+
+---
+
+<a id="file-python-services-news_services-py"></a>
+## File: `python/services/news_services.py` (40 строк, 1.5 KB)
+
+```python
+import aiohttp
+import xml.etree.ElementTree as ET
+from typing import Dict, Any
+
+class NewsService:
+    """
+    Сервис для сбора новостного фона из публичного RSS канала (CoinTelegraph).
+    """
+    def __init__(self):
+        pass
+
+    async def fetch_news_sentiment(self, symbol: str) -> Dict[str, Any]:
+        """
+        Асинхронно собирает новости (RSS) и возвращает последние заголовки.
+        """
+        url = "https://cointelegraph.com/rss"
+        headlines = []
+        try:
+            from core.session import SessionManager
+            session = await SessionManager.get()
+            async with session.get(url, timeout=5) as resp:
+                if resp.status == 200:
+                    content = await resp.read()
+                    root = ET.fromstring(content)
+                    for item in root.findall('.//item')[:3]:
+                        title = item.find('title')
+                        if title is not None and title.text:
+                            headlines.append(title.text)
+        except Exception as e:
+            print(f"⚠️ [NewsService] Ошибка парсинга RSS: {e}")
+            raise Exception(f"Не удалось получить новости для {symbol}") from e
+            
+        if not headlines:
+            headlines = ["No recent news found."]
+
+        return {
+            "symbol": symbol,
+            "sentiment": "neutral",
+            "headlines": headlines
+        }
+```
+
+---
+

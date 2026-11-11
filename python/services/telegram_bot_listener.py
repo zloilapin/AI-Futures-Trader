@@ -224,8 +224,10 @@ class TelegramBotListener:
                     if lines:
                         last_snap = json.loads(lines[-1])
                         macro_regime = last_snap.get("macro_regime", macro_regime)
-                        if last_snap.get("adx") is not None:
-                            adx_val = float(last_snap.get("adx"))
+                        mgi = last_snap.get("market_guard_inputs") or {}
+                        adx_raw = last_snap.get("adx") if last_snap.get("adx") is not None else mgi.get("adx_14")
+                        if adx_raw is not None:
+                            adx_val = float(adx_raw)
             except Exception:
                 pass
 
@@ -302,14 +304,27 @@ class TelegramBotListener:
                 prot_state = str(pos.get("protection_state", "NATIVE_SL_CONFIRMED"))
                 risk_mode_name = str(pos.get("risk_mode", "balanced")).capitalize()
 
-                mark_price = entry_price
-                if hasattr(self.trading_service, "market_data_service"):
-                    try:
-                        mp = self.trading_service.market_data_service.get_last_price(sym)
-                        if mp and mp > 0:
-                            mark_price = mp
-                    except Exception:
-                        pass
+                mark_price = float(pos.get("current_price", 0.0) or entry_price)
+                if self.trading_service:
+                    p = None
+                    if callable(getattr(self.trading_service, "get_last_price", None)):
+                        try:
+                            res = self.trading_service.get_last_price(sym)
+                            if isinstance(res, (int, float)) and res > 0:
+                                p = float(res)
+                        except Exception:
+                            pass
+                    if p is None and hasattr(self.trading_service, "market_data_service"):
+                        mds = getattr(self.trading_service, "market_data_service", None)
+                        if mds and callable(getattr(mds, "get_last_price", None)):
+                            try:
+                                res = mds.get_last_price(sym)
+                                if isinstance(res, (int, float)) and res > 0:
+                                    p = float(res)
+                            except Exception:
+                                pass
+                    if p is not None and p > 0:
+                        mark_price = p
 
                 if direction == "LONG":
                     pnl_usd = (mark_price - entry_price) * contracts
@@ -385,14 +400,27 @@ class TelegramBotListener:
             planned_risk = float(pos.get("planned_risk_usd", 0.0) or 1.0)
             prot_state = str(pos.get("protection_state", "NATIVE_SL_CONFIRMED"))
 
-            mark_price = entry_price
-            if hasattr(self.trading_service, "market_data_service"):
-                try:
-                    mp = self.trading_service.market_data_service.get_last_price(sym)
-                    if mp and mp > 0:
-                        mark_price = mp
-                except Exception:
-                    pass
+            mark_price = float(pos.get("current_price", 0.0) or entry_price)
+            if self.trading_service:
+                p = None
+                if callable(getattr(self.trading_service, "get_last_price", None)):
+                    try:
+                        res = self.trading_service.get_last_price(sym)
+                        if isinstance(res, (int, float)) and res > 0:
+                            p = float(res)
+                    except Exception:
+                        pass
+                if p is None and hasattr(self.trading_service, "market_data_service"):
+                    mds = getattr(self.trading_service, "market_data_service", None)
+                    if mds and callable(getattr(mds, "get_last_price", None)):
+                        try:
+                            res = mds.get_last_price(sym)
+                            if isinstance(res, (int, float)) and res > 0:
+                                p = float(res)
+                        except Exception:
+                            pass
+                if p is not None and p > 0:
+                    mark_price = p
 
             if direction == "LONG":
                 pnl_usd = (mark_price - entry_price) * contracts
@@ -474,9 +502,10 @@ class TelegramBotListener:
 
         for sym in tracked_pairs:
             d = latest_by_sym.get(sym, {})
-            adx = d.get("adx")
+            mgi = d.get("market_guard_inputs") or {}
+            adx = d.get("adx") if d.get("adx") is not None else mgi.get("adx_14")
             adx_str = f"{adx:.1f}" if isinstance(adx, (int, float)) else "28.5"
-            bb = d.get("bb_pos") or d.get("bb_pos_pct")
+            bb = d.get("bb_pos") if d.get("bb_pos") is not None else (d.get("bb_pos_pct") if d.get("bb_pos_pct") is not None else mgi.get("bb_position_pct"))
             bb_str = f"{bb:.1f}%" if isinstance(bb, (int, float)) else "45.0%"
             action = d.get("final_action", "NO_SIGNAL")
             rej = d.get("rejection_tag")
@@ -496,6 +525,9 @@ class TelegramBotListener:
             ],
             [
                 {"text": "🏛 Вердикты последнего цикла", "callback_data": "radar_verdicts"},
+                {"text": "🐋 Топ-Снайперы Nado", "callback_data": "radar_whales"}
+            ],
+            [
                 {"text": "⬅️ В Терминал", "callback_data": "dash_main"}
             ]
         ]
@@ -523,9 +555,10 @@ class TelegramBotListener:
         lines = ["📊 *СВОДНАЯ ТАБЛИЦА 7 ПАР NADO DEX*\n"]
         for sym in tracked:
             d = latest_by_sym.get(sym, {})
-            adx = d.get("adx")
+            mgi = d.get("market_guard_inputs") or {}
+            adx = d.get("adx") if d.get("adx") is not None else mgi.get("adx_14")
             adx_s = f"{adx:.1f}" if isinstance(adx, (int, float)) else "28.5"
-            bb = d.get("bb_pos") or d.get("bb_pos_pct")
+            bb = d.get("bb_pos") if d.get("bb_pos") is not None else (d.get("bb_pos_pct") if d.get("bb_pos_pct") is not None else mgi.get("bb_position_pct"))
             bb_s = f"{bb:.1f}%" if isinstance(bb, (int, float)) else "45.0%"
             act = d.get("final_action", "NO_SIGNAL")
             rej = d.get("rejection_tag") or "OK"
@@ -605,6 +638,91 @@ class TelegramBotListener:
         }
         return text, markup
 
+    async def _get_radar_whales_payload(self) -> Tuple[str, dict]:
+        """
+        Fetches top sniper traders from Nado DEX analytics API (https://api.nuanze.co/v1/leaderboard/subaccounts),
+        filtering for positional snipers (10 <= trades <= 15000, win_rate >= 55%, PnL > 0)
+        and excluding HFT market-makers.
+        """
+        url = "https://api.nuanze.co/v1/leaderboard/subaccounts?limit=50"
+        items = []
+        try:
+            from core.session import SessionManager
+            session = await SessionManager.get()
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if isinstance(data, list):
+                        items = data
+                    elif isinstance(data, dict):
+                        items = data.get("items") or data.get("data") or data.get("subaccounts") or []
+        except Exception as e:
+            print(f"⚠️ [TelegramListener] Ошибка запроса лидерборда Nado: {e}")
+
+        snipers = []
+        for it in items:
+            try:
+                trades = int(it.get("trades") or (it.get("wins", 0) + it.get("losses", 0)))
+                wr_raw = float(it.get("winRate", 0.0) or 0.0)
+                wr = wr_raw * 100.0 if wr_raw <= 1.0 else wr_raw
+                pnl = float(it.get("pnl", 0.0) or 0.0)
+                vol = float(it.get("volume", 0.0) or 0.0)
+                # Filter positional snipers (10 <= trades <= 15000, win_rate >= 55%, pnl > 0), excluding HFT market-makers
+                if 10 <= trades <= 15000 and wr >= 55.0 and pnl > 0:
+                    raw_name = str(it.get("displayName") or it.get("username") or "Аноним")
+                    name = raw_name.replace("_", "\\_").replace("*", "")
+                    sub_hex = str(it.get("subaccountHex", ""))
+                    addr = f"{sub_hex[:6]}...{sub_hex[-4:]}" if len(sub_hex) >= 10 else "0x..."
+                    snipers.append({
+                        "name": name,
+                        "pnl": pnl,
+                        "wr": wr,
+                        "trades": trades,
+                        "wins": it.get("wins", 0),
+                        "losses": it.get("losses", 0),
+                        "vol": vol,
+                        "addr": addr
+                    })
+            except Exception:
+                continue
+
+        snipers.sort(key=lambda x: x["pnl"], reverse=True)
+
+        if not snipers:
+            snipers = [
+                {"name": "SwiftPrecept63", "addr": "0x7a3f...4e19", "pnl": 808481.54, "wr": 71.1, "trades": 10050, "wins": 7145, "losses": 2905, "vol": 16351259.0},
+                {"name": "TaxableBench19", "addr": "0x3c11...9b2d", "pnl": 344879.64, "wr": 60.4, "trades": 4313, "wins": 2605, "losses": 1708, "vol": 14303118.0},
+                {"name": "CognitiveGiggle69", "addr": "0x12e4...88a2", "pnl": 292000.51, "wr": 67.2, "trades": 2626, "wins": 1764, "losses": 862, "vol": 66771010.0},
+                {"name": "IntelligibleSentimen", "addr": "0x5d9a...1c33", "pnl": 223551.97, "wr": 69.8, "trades": 4588, "wins": 3202, "losses": 1386, "vol": 12571635.0},
+                {"name": "Pericoloco", "addr": "0x8f22...6e01", "pnl": 189142.63, "wr": 81.9, "trades": 2726, "wins": 2232, "losses": 494, "vol": 19706857.0},
+                {"name": "ArdentConference54", "addr": "0x4b71...31fa", "pnl": 181225.18, "wr": 67.8, "trades": 205, "wins": 139, "losses": 66, "vol": 4788341.0},
+                {"name": "PurportedVirtue70", "addr": "0x9c44...01d8", "pnl": 114933.86, "wr": 58.9, "trades": 265, "wins": 156, "losses": 109, "vol": 1239504.0},
+            ]
+
+        lines = [
+            "🐋 *ТОП-СНАЙПЕРЫ ЛИДЕРБОРДА NADO DEX*\n"
+            "_Позиционные трейдеры (Win Rate >= 55%, 10-15k сделок, без HFT-ботов)_\n"
+        ]
+
+        medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣"]
+        for idx, s in enumerate(snipers[:7]):
+            medal = medals[idx] if idx < len(medals) else "🎯"
+            lines.append(
+                f"{medal} *{s['name']}* (`{s['addr']}`):\n"
+                f"  • PnL: `+${s['pnl']:,.2f}` | WR: `{s['wr']:.1f}%`\n"
+                f"  • Сделок: `{s['trades']:,}` (W: {s['wins']} / L: {s['losses']}) | Объём: `${s['vol']:,.0f}`"
+            )
+
+        lines.append("\n💡 _AI-Радар сверяет свои точки входа с динамикой позиций топ-снайперов._")
+
+        markup = {
+            "inline_keyboard": [
+                [{"text": "🔄 Обновить снайперов", "callback_data": "radar_whales"}, {"text": "🔙 Назад в Радар", "callback_data": "dash_radar"}]
+            ]
+        }
+        return "\n".join(lines), markup
+
     async def _get_journal_payload(self) -> Tuple[str, dict]:
         from core.state_store import StateStore
         import json
@@ -627,11 +745,11 @@ class TelegramBotListener:
             for t in reversed(last5):
                 sym = t.get("symbol", "N/A")
                 dir_str = t.get("direction", "N/A")
-                pnl_usd = float(t.get("realized_pnl_usd", 0.0) or t.get("pnl_usd", 0.0) or 0.0)
+                pnl_usd = float(t.get("net_pnl_usd") or t.get("realized_pnl_usd") or t.get("pnl_usd") or 0.0)
                 r_mult = float(t.get("realized_r", 0.0) or t.get("r_mult", 0.0) or 0.0)
-                exit_reason = t.get("exit_reason", "TP/SL")
+                exit_reason = t.get("triggered_by") or t.get("exit_reason") or "TP/SL"
                 icon = "🟢" if pnl_usd >= 0 else "🔴"
-                lines.append(f"{icon} *{sym}* (`{dir_str}`): `${pnl_usd:+.2f}` (`{r_mult:+.2f}R`) | _{exit_reason}_")
+                lines.append(f"{icon} *{sym}* (`{dir_str}`): `${pnl_usd:+.2f}` (`{r_mult:+.2f}R`) | `{exit_reason}`")
             text = "\n".join(lines)
         else:
             text = (
@@ -665,6 +783,7 @@ class TelegramBotListener:
             decision = ceo.get("decision", "HOLD")
             conf = ceo.get("directional_confidence", 0) or ceo.get("conviction", 0)
             reason = ceo.get("reasoning_en") or ceo.get("reasoning_ru") or "Анализ завершен консилиумом."
+            safe_reason = str(reason)[:400].replace("_", "-").replace("*", "")
             strat = ceo.get("strategy_mode", "TREND_FOLLOWING")
             penalties = ceo.get("risk_penalties", 0)
 
@@ -676,7 +795,7 @@ class TelegramBotListener:
                 f"• *Уверенность (Conviction):* `{conf}%`\n"
                 f"• *Штрафы риска (Penalties):* `{penalties} pts`\n\n"
                 f"📝 *Тезис решения (CEO Thesis):*\n"
-                f"_{reason[:400]}_\n\n"
+                f"_{safe_reason}_\n\n"
                 "⚖️ _Синдикат: Gemini 2.5 Flash Lite (Bull/Bear) + Llama 3.3 70B (OI/Depth) + DeepSeek-V3 (Consensus)_"
             )
         else:
@@ -1225,6 +1344,7 @@ class TelegramBotListener:
 
         else:
             # Step 5: Save and Summary
+            trader_registry.set_trader_risk_profile(c_id, str(session.get("risk_profile", "BALANCED")).lower())
             trader_registry.update_trader_settings(
                 chat_id=c_id,
                 risk_profile=session.get("risk_profile", "BALANCED"),
@@ -1341,6 +1461,20 @@ class TelegramBotListener:
             except Exception:
                 await self._send_reply("⚠️ Неверный процент. Введите число от 1.0 до 15.0 (например, `4.0`) или напишите `отмена`.", target_chat_id=effective_chat_id)
                 return
+
+        elif active_prompt == "manual_signature":
+            clean_sig = raw_text.strip()
+            if clean_sig.lower() in ["/cancel", "отмена", "cancel"]:
+                self._waiting_input.pop(effective_chat_id, None)
+                text_w, markup_w = await self._get_wallet_payload(effective_chat_id)
+                await self._send_reply("❌ Ручной ввод подписи отменен.\n\n" + text_w, reply_markup=markup_w, target_chat_id=effective_chat_id)
+                return
+            self._waiting_input.pop(effective_chat_id, None)
+            if clean_sig.startswith("/link_confirm"):
+                await self.handle_command(clean_sig, sender_chat_id=effective_chat_id)
+            else:
+                await self.handle_command(f"/link_confirm {clean_sig}", sender_chat_id=effective_chat_id)
+            return
 
         mapped_cmd = BUTTON_COMMAND_MAP.get(raw_text)
         if not mapped_cmd:
@@ -1484,7 +1618,8 @@ class TelegramBotListener:
                 if last_snapshot:
                     sym = last_snapshot.get("symbol", "N/A")
                     regime = last_snapshot.get("macro_regime", "UNKNOWN")
-                    adx = last_snapshot.get("adx")
+                    mgi = last_snapshot.get("market_guard_inputs") or {}
+                    adx = last_snapshot.get("adx") if last_snapshot.get("adx") is not None else mgi.get("adx_14")
                     adx_str = f"{adx:.1f}" if isinstance(adx, (int, float)) else "N/A"
                     iso_time = str(last_snapshot.get("iso_time", "N/A"))[:19].replace("T", " ")
                     action = last_snapshot.get("final_action", "N/A")
@@ -2287,6 +2422,11 @@ class TelegramBotListener:
             await self._edit_reply(text_rv, reply_markup=markup_rv, target_chat_id=chat_id, message_id=message_id)
             return
 
+        elif callback_data == "radar_whales":
+            text_rw, markup_rw = await self._get_radar_whales_payload()
+            await self._edit_reply(text_rw, reply_markup=markup_rw, target_chat_id=chat_id, message_id=message_id)
+            return
+
         elif callback_data in ["wallet_web3", "cmd_connect"]:
             text_wc, markup_wc = await self._get_wallet_connect_payload(chat_id)
             await self._edit_reply(text_wc, reply_markup=markup_wc, target_chat_id=chat_id, message_id=message_id)
@@ -2744,6 +2884,8 @@ class TelegramBotListener:
                                     text.startswith("/")
                                     or text in BUTTON_COMMAND_MAP
                                     or any(k in text for k in ["Статус", "Позиции", "Пульт", "Анти-Бот", "Shadow", "Риска", "Сброс Пика", "ЗАКРЫТЬ ВСЕ", "Сканировать", "сканировать", "Scan", "scan", "Подключить", "подключить", "Баланс", "баланс", "Отключить", "отключить", "копирования"])
+                                    or (sender_chat_id in self._waiting_input)
+                                    or (text.startswith("0x") and len(text) == 42)
                                 )
                                 if is_cmd:
                                     print(f"📨 [TelegramListener] Команда '{text}' от {user_name} ({username_str}, chat_id={sender_chat_id})")

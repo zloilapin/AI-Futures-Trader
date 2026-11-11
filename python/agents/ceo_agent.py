@@ -290,7 +290,7 @@ def apply_breakout_penalty_override(
         # Повышаем статус с WAIT_FOR_PULLBACK до активного входа
         new_action = action
         if action == "WAIT_FOR_PULLBACK":
-            new_action = "ENTER" if new_entry_quality >= 75.0 else "REDUCE_SIZE"
+            new_action = "ENTER" if new_entry_quality >= 73.0 else "REDUCE_SIZE"
 
         logger = logging.getLogger("CEO_Agent")
         old_qual = ceo_decision.get('entry_quality', ceo_decision.get('conviction', new_entry_quality))
@@ -566,7 +566,7 @@ class CEOAgent(BaseAgent):
             "1. Do NOT penalize counter-trend at Bollinger/RSI extremes. In range/chop or climax wicks, extreme overbought (RSI > 64, BB > 88) or oversold (RSI < 36, BB < 12) represents bot exhaustion and trapped retail momentum, NOT trend continuation.\n"
             "2. Treat these extreme spikes as high-probability mean-reversion traps (Bull Trap / Bear Trap).\n"
             "3. Confirmation Boost: The presence of upper/lower rejection wicks (wick rejection), order book divergence, or '[OI/Funding Trap Confirmed]' in StrategyRouter reasoning strongly confirms trapped retail flow. Boost EntryQuality to 80-90% and approve with trade_action: ENTER.\n"
-            "4. CRITICAL FOR JSON SCORE_BREAKDOWN (PREVENT MATH VETO): In ANTI-BOT MODE, score_breakdown MUST reflect exhaustion/reversion strength, NOT raw trend momentum! When your decision is SHORT, you MUST set bear_argument strictly greater than bull_argument (e.g., bear_argument: 42, bull_argument: 15) and mtf_trend negative (e.g., -35). When your decision is LONG, you MUST set bull_argument strictly greater than bear_argument (e.g., bull_argument: 42, bear_argument: 15) and mtf_trend positive (e.g., +35).\n"
+            "4. CRITICAL FOR JSON SCORE_BREAKDOWN (PREVENT MATH VETO): In ANTI-BOT MODE, score_breakdown MUST reflect exhaustion/reversion strength, NOT raw trend momentum! When your decision is SHORT, you MUST set bear_argument as a strong NEGATIVE number whose absolute value exceeds bull_argument (e.g., bear_argument: -42, bull_argument: 15) and mtf_trend negative (e.g., -35). When your decision is LONG, you MUST set bull_argument strictly greater than bear_argument (e.g., bull_argument: 42, bear_argument: -15) and mtf_trend positive (e.g., +35).\n"
             "5. Steamroller / Band-Walking Warning: If price is creeping along the band with full-bodied bars (no rejection wicks) and orderbook pressure pushes in the direction of the breakout, do NOT counter-trade; prescribe HOLD.\n"
             "6. If StrategyRouter selected MEAN_REVERSION with a clear direction and no hard vetoes apply, approve the trade with ENTER (do NOT downgrade to WAIT_FOR_PULLBACK or HOLD) and assign EntryQuality >= 75%."
         )
@@ -852,8 +852,8 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                             "risk_penalties": esc_score_res["risk_penalties"],
                             "entry_quality": esc_entry_qual,
                             "conviction": esc_conviction,
-                            "action": esc_score_res.get("trade_action", "ENTER" if esc_conviction >= 75 else "REDUCE_SIZE"),
-                            "trade_action": esc_score_res.get("trade_action", "ENTER" if esc_conviction >= 75 else "REDUCE_SIZE"),
+                            "action": esc_score_res.get("trade_action", "ENTER" if esc_conviction >= 73 else "REDUCE_SIZE"),
+                            "trade_action": esc_score_res.get("trade_action", "ENTER" if esc_conviction >= 73 else "REDUCE_SIZE"),
                             "risk_breakdown": esc_score_res.get("risk_breakdown", {})
                         }
                         esc_eval_payload = apply_breakout_penalty_override(esc_eval_payload, router_meta)
@@ -923,7 +923,7 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                     else:
                         trade_action = "HOLD"
                         decision = "HOLD"
-                elif conviction >= 75:
+                elif conviction >= 73:
                     trade_action = "ENTER"
                 elif directional_confidence >= 75 and conviction < 65:
                     trade_action = "WAIT_FOR_PULLBACK"
@@ -951,10 +951,15 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                 if is_risk_approved and target_candidate in ["LONG", "SHORT"]:
                     # Approved by independent risk rules:
                     decision = target_candidate
-                    # Discount conviction to safe corridor [60..65]
+                    # Discount conviction to safe corridor synced with min_reduce_size_conv
+                    from core.config import get_tuned_param
+                    safe_arb_cap = int(get_tuned_param("min_reduce_size_conv", 71.0))
                     chosen_conv = esc_conviction if primary_decision == "HOLD" else primary_conviction
                     chosen_dir = esc_dir_conf if primary_decision == "HOLD" else primary_dir_conf
-                    conviction = min(chosen_conv, 65)
+                    if chosen_conv >= 65:
+                        conviction = max(safe_arb_cap, min(chosen_conv, safe_arb_cap))
+                    else:
+                        conviction = min(chosen_conv, safe_arb_cap)
                     directional_confidence = chosen_dir
                     entry_quality = conviction
                     conviction_for_risk = primary_dir_conf
@@ -1845,7 +1850,7 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
             trade_action = "HOLD"
         elif is_pullback_retest:
             # Retest reached target zone: do NOT re-enter WAIT_FOR_PULLBACK or HOLD
-            trade_action = "REDUCE_SIZE" if entry_quality < 75 else "ENTER"
+            trade_action = "REDUCE_SIZE" if entry_quality < 73 else "ENTER"
         elif entry_quality < 60:
             # Late or poor entry point (overextended from EMA, extreme RSI/BB, poor R:R)
             if directional_confidence >= 70:
@@ -1854,9 +1859,9 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                 trade_action = "HOLD"
         elif directional_confidence >= 75 and (entry_quality < 65 or (risk_breakdown or {}).get("price_extension", 0) <= -10):
             trade_action = "WAIT_FOR_PULLBACK"
-        elif entry_quality >= 75:
+        elif entry_quality >= 73:
             trade_action = "ENTER"
-        else: # 65 <= entry_quality < 75 (or 60-64 with dir_conf < 70)
+        else: # 65 <= entry_quality < 73 (or 60-64 with dir_conf < 70)
             trade_action = "REDUCE_SIZE"
 
         return ScoreResult({

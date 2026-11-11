@@ -9,6 +9,11 @@ Professional Evaluation Rules:
 
 Identify the trapped side of the market and predict where the pain (liquidations) will be inflicted.
 
+CONFIDENCE CALIBRATION SCALE (1-100):
+- 80-100: High-conviction liquidation cascade setup (extreme funding bias with rising OI, or clear OI wipeout exhaustion).
+- 50-79: Moderate OI growth with balanced funding.
+- 1-49: Flat OI, neutral funding, or noisy derivatives action.
+
 Output JSON strictly matching this schema:
 {
   "reasoning": "<step-by-step breakdown of trapped leverage, funding bias, and squeeze probability>",

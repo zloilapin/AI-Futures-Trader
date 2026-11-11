@@ -77,8 +77,8 @@ class Settings(BaseSettings):
     
     # Мульти-аккаунты и Telegram Mini App (Copy-Trading)
     COPY_TRADING_ENABLED: bool = Field(
-        default=False,
-        description="Enable multi-trader copy trading for connected subscribers (default: False)"
+        default=True,
+        description="Enable multi-trader copy trading for connected subscribers (default: True)"
     )
     TELEGRAM_MINIAPP_URL: str = Field(
         default="https://zloilapin.github.io/AI-Futures-Trader/",
@@ -167,7 +167,7 @@ _SAFETY_BOUNDS: Dict[str, Tuple[float, float]] = {
     "chop_range_threshold": (50.0, 72.0),
     "anti_chop_bb_max": (68.0, 90.0),
     "min_reduce_size_conv": (60.0, 75.0),
-    "be_activation_r": (0.60, 1.35),
+    "be_activation_r": (0.70, 0.90),
     "trailing_atr_mult": (1.50, 3.00),
     "min_kelly_mult": (0.50, 1.00),
 }

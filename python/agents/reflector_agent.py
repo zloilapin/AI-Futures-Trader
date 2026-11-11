@@ -49,9 +49,11 @@ class ReflectorAgent(BaseAgent):
             return {}
         clean = {}
         for k, v in context.items():
-            if k in ["ohlcv", "candles", "raw_candles"]:
+            if k in ["ohlcv", "candles", "raw_candles", "candles_20"]:
                 continue
-            if k == "order_book" and isinstance(v, dict):
+            if k == "price_data" and isinstance(v, dict):
+                clean["price_data"] = {pk: pv for pk, pv in v.items() if pk not in ["candles", "candles_20", "ohlcv", "raw_candles"]}
+            elif k == "order_book" and isinstance(v, dict):
                 clean["order_book"] = {
                     "best_bid": v.get("best_bid"),
                     "best_ask": v.get("best_ask"),

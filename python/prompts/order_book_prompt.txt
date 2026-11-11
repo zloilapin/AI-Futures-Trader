@@ -9,6 +9,11 @@ Professional Evaluation Rules:
 
 Do not blindly trust 'Bid > Ask = Bullish'. Read the institutional manipulation behind the data.
 
+CONFIDENCE CALIBRATION SCALE (1-100):
+- 80-100: Clear institutional manipulation pattern (verified iceberg absorption, confirmed spoofing, or aggressive depth stacking).
+- 50-79: Moderate book imbalance without spoofing red flags.
+- 1-49: Balanced book, low liquidity depth, or erratic fleeting orders.
+
 Output JSON strictly matching this schema:
 {
   "reasoning": "<step-by-step breakdown of spoofing, liquidity magnetism, and true imbalance>",

@@ -155,7 +155,7 @@ class SentinelAgent:
         age_minutes = ((now_ts - open_time) / 60.0) if open_time > 0 else 0.0
 
         # Lever 4: Dynamic Runner Trailing Mode
-        is_runner = bool(pos.get("is_runner") or pos.get("runner") or pos.get("partial_tp_taken") or pos.get("be_activated") or pos.get("be_moved"))
+        is_runner = bool(pos.get("is_runner") or pos.get("runner"))
 
         candidate_sl = None
         new_state = current_state
@@ -241,13 +241,13 @@ class SentinelAgent:
             # (No premature tightening on volume spikes for MEAN_REVERSION)
 
             # 2. Time-Stop / Stagnation Guard (Time-Based Risk Decay - Doubled for Anti-Bot MR: 360m / 480m / 720m)
-            # Stop Choking Prevention: TREND_FOLLOWING needs 300m and at least 0.85R profit to avoid premature BE exit
-            t1_age = 360.0 if is_anti_bot_mr else (300.0 if strategy_mode == "TREND_FOLLOWING" else 180.0)
+            # Stop Choking Prevention: TREND_FOLLOWING needs 180m and at least 0.25R profit to avoid premature BE exit
+            t1_age = 360.0 if is_anti_bot_mr else 180.0
             t2_age = 480.0 if is_anti_bot_mr else 240.0
             t3_age = 720.0 if is_anti_bot_mr else 360.0
             if age_minutes >= t1_age and (candidate_sl is None or candidate_sl <= current_sl):
                 be_target = entry + cost_buffer
-                min_be_r = 0.85 if strategy_mode == "TREND_FOLLOWING" else 0.15
+                min_be_r = 0.25 if strategy_mode == "TREND_FOLLOWING" else 0.15
                 is_modest_profit = (planned_r_dist > 0 and profit_distance >= min_be_r * planned_r_dist) or (profit_distance >= min_be_r * eval_atr)
                 if is_modest_profit and current_sl < be_target:
                     candidate_sl = be_target
@@ -268,7 +268,7 @@ class SentinelAgent:
 
             # 3. Dynamic Parabolic Trailing Check (strictly at effective_r >= 1.35R or runner)
             can_trail = (
-                is_runner
+                (is_runner and effective_r >= 1.35)
                 or (
                     current_state == "TRAILING"
                     and (("initial_sl" not in pos and "planned_risk_usd" not in pos) or effective_r >= 1.35)
@@ -287,7 +287,9 @@ class SentinelAgent:
                 if use_parabolic:
                     runner_trail_dist = min(trail_dist, 1.5)
                     parabolic_mult = 1.0 / (1.0 + 0.35 * max(0.0, effective_r - 1.0))
-                    clamped_dist = max(0.45, runner_trail_dist * parabolic_mult)
+                    # Profit Booster #3: Stepped floor gives runners breathing room (0.85*ATR) between 1.35R-3.0R
+                    min_atr_floor = 0.50 if effective_r >= 3.0 else 0.85
+                    clamped_dist = max(min_atr_floor, runner_trail_dist * parabolic_mult)
                     trail_target = highest - (clamped_dist * eval_atr)
                     reasoning = (
                         f"Dynamic Parabolic Trailing: SL trailed {clamped_dist:.2f}x ATR ({trail_target:.4f}) "
@@ -365,13 +367,13 @@ class SentinelAgent:
             # (No premature tightening on volume spikes for MEAN_REVERSION)
 
             # 2. Time-Stop / Stagnation Guard (Time-Based Risk Decay - Doubled for Anti-Bot MR: 360m / 480m / 720m)
-            # Stop Choking Prevention: TREND_FOLLOWING needs 300m and at least 0.85R profit to avoid premature BE exit
-            t1_age = 360.0 if is_anti_bot_mr else (300.0 if strategy_mode == "TREND_FOLLOWING" else 180.0)
+            # Stop Choking Prevention: TREND_FOLLOWING needs 180m and at least 0.25R profit to avoid premature BE exit
+            t1_age = 360.0 if is_anti_bot_mr else 180.0
             t2_age = 480.0 if is_anti_bot_mr else 240.0
             t3_age = 720.0 if is_anti_bot_mr else 360.0
             if age_minutes >= t1_age and (candidate_sl is None or (current_sl > 0 and candidate_sl >= current_sl)):
                 be_target = entry - cost_buffer
-                min_be_r = 0.85 if strategy_mode == "TREND_FOLLOWING" else 0.15
+                min_be_r = 0.25 if strategy_mode == "TREND_FOLLOWING" else 0.15
                 is_modest_profit = (planned_r_dist > 0 and profit_distance >= min_be_r * planned_r_dist) or (profit_distance >= min_be_r * eval_atr)
                 if is_modest_profit and (current_sl > be_target or current_sl == 0):
                     candidate_sl = be_target
@@ -392,7 +394,7 @@ class SentinelAgent:
 
             # 3. Dynamic Parabolic Trailing Check (strictly at effective_r >= 1.35R or runner)
             can_trail = (
-                is_runner
+                (is_runner and effective_r >= 1.35)
                 or (
                     current_state == "TRAILING"
                     and (("initial_sl" not in pos and "planned_risk_usd" not in pos) or effective_r >= 1.35)
@@ -411,7 +413,9 @@ class SentinelAgent:
                 if use_parabolic:
                     runner_trail_dist = min(trail_dist, 1.5)
                     parabolic_mult = 1.0 / (1.0 + 0.35 * max(0.0, effective_r - 1.0))
-                    clamped_dist = max(0.45, runner_trail_dist * parabolic_mult)
+                    # Profit Booster #3: Stepped floor gives runners breathing room (0.85*ATR) between 1.35R-3.0R
+                    min_atr_floor = 0.50 if effective_r >= 3.0 else 0.85
+                    clamped_dist = max(min_atr_floor, runner_trail_dist * parabolic_mult)
                     trail_target = lowest + (clamped_dist * eval_atr)
                     reasoning = (
                         f"Dynamic Parabolic Trailing: SL trailed {clamped_dist:.2f}x ATR ({trail_target:.4f}) "

@@ -20,6 +20,18 @@ class RegimeAgent(BaseAgent):
         self.last_trend_ts: float = 0.0
         self.last_eval_ts: float = 0.0
 
+        try:
+            from core.state_store import StateStore
+            persisted = StateStore.load("data/memory/regime_state.json", default={})
+            if isinstance(persisted, dict):
+                self.last_regime = str(persisted.get("last_regime", "UNKNOWN"))
+                self.last_range_score = float(persisted.get("last_range_score", 0.0) or 0.0)
+                self.consecutive_trend_count = int(persisted.get("consecutive_trend_count", 0) or 0)
+                self.last_trend_ts = float(persisted.get("last_trend_ts", 0.0) or 0.0)
+                self.last_eval_ts = float(persisted.get("last_eval_ts", 0.0) or 0.0)
+        except Exception:
+            pass
+
     @staticmethod
     def _safe_finite_float(val: Any, default: Optional[float] = None) -> Optional[float]:
         """Safely parses a value to a finite float, rejecting NaN, Inf, None, and unparseable types."""
@@ -191,7 +203,8 @@ class RegimeAgent(BaseAgent):
         vol_score: float,
         btc_atr: float,
         previous_regime: Optional[str] = None,
-        consecutive_trend_count: int = 0
+        consecutive_trend_count: int = 0,
+        last_range_score: float = 0.0
     ) -> tuple[str, str]:
         """
         Pure deterministic decision function mapping composite scores to regime and recommended profile.
@@ -205,7 +218,10 @@ class RegimeAgent(BaseAgent):
         elif trend_score >= 60.0 and trend_score > (range_score + 15.0):
             # Hysteresis check: If emerging from RANGE_CHOPPY on a single candle spike,
             # require at least 1 confirmation cycle before escalating to AGGRESSIVE.
-            if previous_regime in ["RANGE_CHOPPY", "TRANSITION"] and consecutive_trend_count < 1:
+            is_prev_range = (previous_regime in ["RANGE_CHOPPY", "TRANSITION"]) or (
+                previous_regime == "UNKNOWN" and float(last_range_score or 0.0) >= 55.0
+            )
+            if is_prev_range and consecutive_trend_count < 1:
                 return "TRANSITION", "BALANCED"
             return "TRENDING", "AGGRESSIVE"
         elif range_score >= 55.0 and range_score > (trend_score + 15.0):
@@ -407,7 +423,8 @@ class RegimeAgent(BaseAgent):
         regime, profile = self.classify_regime_from_scores(
             trend_score, range_score, vol_score, btc_atr,
             previous_regime=self.last_regime,
-            consecutive_trend_count=effective_trend_count
+            consecutive_trend_count=effective_trend_count,
+            last_range_score=self.last_range_score
         )
 
         if regime == "TRENDING":
@@ -436,6 +453,17 @@ class RegimeAgent(BaseAgent):
         self.last_regime = regime
         self.last_range_score = range_score
         self.last_eval_ts = now_ts
+        try:
+            from core.state_store import StateStore
+            StateStore.save("data/memory/regime_state.json", {
+                "last_regime": self.last_regime,
+                "last_range_score": float(self.last_range_score),
+                "consecutive_trend_count": int(self.consecutive_trend_count),
+                "last_trend_ts": float(self.last_trend_ts),
+                "last_eval_ts": float(self.last_eval_ts)
+            })
+        except Exception:
+            pass
 
         reasoning = (
             f"Multi-Factor Regime Scores -> TREND: {trend_score:.1f} | "

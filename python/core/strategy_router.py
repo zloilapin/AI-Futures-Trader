@@ -221,7 +221,7 @@ class StrategyRouter:
                 return StrategyProfile(
                     False,
                     "ANTI_CHASE_REENTRY_VETO",
-                    "NEUTRAL",
+                    profile_res.direction_bias,
                     f"ОТКЛОНЕН ({anti_chase_reason})"
                 )
 
@@ -233,7 +233,7 @@ class StrategyRouter:
                         return StrategyProfile(
                             False,
                             "MACRO_BOX_FLOOR_VETO",
-                            "NEUTRAL",
+                            profile_res.direction_bias,
                             f"ОТКЛОНЕН (Macro Floor Guard: SHORT в нижней трети 48h коробки (Box={macro_box_pos:.1f}% < 32.0%, BB={bb_pos:.1f}% < 38.0%, rvol={rvol:.2f} < 1.6). Вход по рынку запрещен -> WAIT_FOR_PULLBACK в верхнюю половину коробки)."
                         )
                 elif profile_res.direction_bias == "LONG":
@@ -241,7 +241,7 @@ class StrategyRouter:
                         return StrategyProfile(
                             False,
                             "MACRO_BOX_CEILING_VETO",
-                            "NEUTRAL",
+                            profile_res.direction_bias,
                             f"ОТКЛОНЕН (Macro Ceiling Guard: LONG в верхней трети 48h коробки (Box={macro_box_pos:.1f}% > 68.0%, BB={bb_pos:.1f}% > 62.0%, rvol={rvol:.2f} < 1.6). Вход по рынку запрещен -> WAIT_FOR_PULLBACK в нижнюю половину коробки)."
                         )
 
@@ -258,7 +258,7 @@ class StrategyRouter:
                     return StrategyProfile(
                         False,
                         "ANTI_CHASE_REENTRY_VETO",
-                        "NEUTRAL",
+                        profile_res.direction_bias,
                         f"ОТКЛОНЕН ({ext_reason})"
                     )
 
@@ -466,21 +466,34 @@ class StrategyRouter:
                     "ОТКЛОНЕН (Поводыри BTC/ETH в синхронном ралли FULL_ALIGNMENT BULLISH: ретест SHORT заблокирован)."
                 )
 
-            # Anti-Knife Catching: Reject retest ONLY if analysts violently oppose (>= 3 opposing)
+            # ADX Trend Strength Check for Retests
+            from core.config import config
+            allow_forbidden = bool(getattr(config, "ALLOW_FORBIDDEN_STRATEGIES", False))
+            is_transition_market = (str(detected_regime).upper() == "TRANSITION") or (mtf_alignment == "TRANSITION")
+            req_retest_adx = 22.0 if is_transition_market else (22.0 if symbol.split("-")[0].upper() in ["BTC", "ETH"] else 20.0)
+            if not allow_forbidden and 0.0 < adx_14 < req_retest_adx:
+                return StrategyProfile(
+                    False,
+                    "LOW_ADX_RETEST_VETO",
+                    "NEUTRAL",
+                    f"ОТКЛОНЕН (Ретест {retest_dir} заблокирован: слабый ADX={adx_14:.1f} < {req_retest_adx:.1f})."
+                )
+
+            # Anti-Knife Catching: Reject retest if analysts violently oppose (>= 3 opposing) or lack supporting analysts (< 1)
             # Corrective 15m candle color is expected on retest and does NOT cancel the trade
-            if retest_dir == "LONG" and tech_bears >= 3:
+            if retest_dir == "LONG" and (tech_bears >= 3 or tech_bulls < 1):
                 return StrategyProfile(
                     False,
                     "FALLING_KNIFE_VETO",
                     "NEUTRAL",
-                    f"ОТКЛОНЕН (Ловля падающих ножей: ретест LONG отклонен из-за сильного медвежьего давления аналитиков: Bears={tech_bears})."
+                    f"ОТКЛОНЕН (Ловля падающих ножей: ретест LONG отклонен из-за оппозиции аналитиков: Bears={tech_bears}, Bulls={tech_bulls})."
                 )
-            elif retest_dir == "SHORT" and tech_bulls >= 3:
+            elif retest_dir == "SHORT" and (tech_bulls >= 3 or tech_bears < 1):
                 return StrategyProfile(
                     False,
                     "ROCKET_RALLY_VETO",
                     "NEUTRAL",
-                    f"ОТКЛОНЕН (Ловля ракет: ретест SHORT отклонен из-за сильного бычьего давления аналитиков: Bulls={tech_bulls})."
+                    f"ОТКЛОНЕН (Ловля ракет: ретест SHORT отклонен из-за оппозиции аналитиков: Bulls={tech_bulls}, Bears={tech_bears})."
                 )
 
             # Trend Exhaustion Guard for Retests

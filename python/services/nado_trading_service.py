@@ -93,6 +93,8 @@ class NadoTradingService(BaseTradingService):
         self.fast_monitor_task: Optional[asyncio.Task] = None
         self.fast_monitor_running: bool = False
         self.fast_monitor_last_heartbeat: float = 0.0
+        self._latest_prices: Dict[str, float] = {}
+        self.market_data_service = self  # Backwards compatibility alias
         self._load_state()
         
     def _get_position_lock(self, symbol: str) -> asyncio.Lock:
@@ -105,6 +107,39 @@ class NadoTradingService(BaseTradingService):
         if canonical_key not in self._position_locks:
             self._position_locks[canonical_key] = asyncio.Lock()
         return self._position_locks[canonical_key]
+
+    def get_last_price(self, symbol: str) -> float:
+        """
+        Returns the most recent price for a symbol.
+        Checks:
+        1. Active positions live price (updated every 5s by FastPriceMonitor).
+        2. _latest_prices cache.
+        3. _market_cache oracle price from Nado DEX.
+        """
+        clean = str(symbol).replace("/", "-").strip().upper()
+        base = clean.split("-")[0]
+        canon = f"{base}-USD"
+        # 1. Check active position live price updated every 5s by FastPriceMonitor
+        for k in (canon, clean, base):
+            pos = self.active_positions.get(k)
+            if isinstance(pos, dict) and float(pos.get("current_price") or 0.0) > 0:
+                return float(pos["current_price"])
+        # 2. Check _latest_prices cache
+        latest_map = getattr(self, "_latest_prices", {}) or {}
+        for k in (canon, clean, base):
+            if float(latest_map.get(k) or 0.0) > 0:
+                return float(latest_map[k])
+        # 3. Check _market_cache oracle price
+        prod_id = self.product_map.get(base) or self.product_map.get(canon)
+        if prod_id is not None and getattr(self, "_market_cache", None) and prod_id in self._market_cache:
+            m_info = self._market_cache[prod_id]
+            raw_op = getattr(m_info, "oracle_price_x18", None) or getattr(getattr(m_info, "product", None), "oracle_price_x18", None)
+            if raw_op is not None:
+                try:
+                    return float(raw_op) / 1e18
+                except (ValueError, TypeError):
+                    pass
+        return 0.0
         
         # NOTE: self.initialize(nado_client) MUST be awaited explicitly after instantiation.
 
@@ -397,6 +432,7 @@ class NadoTradingService(BaseTradingService):
                     self._market_cache = {}
                 for m in markets_data.perp_products:
                     self._market_cache[m.product_id] = m
+                self._market_cache_ts = time.time()
             except Exception as e:
                 logger.warning(f"[NadoTradingService] ⚠️ Failed to refresh market cache: {e}")
                 
@@ -712,6 +748,7 @@ class NadoTradingService(BaseTradingService):
                 markets_data = await asyncio.to_thread(self.client.market.get_all_engine_markets)
                 for m in markets_data.perp_products:
                     self._market_cache[m.product_id] = m
+                self._market_cache_ts = time.time()
             
             base_symbol = symbol.split('-')[0].upper()
             product_id = self.product_map.get(base_symbol)
@@ -807,11 +844,34 @@ class NadoTradingService(BaseTradingService):
             enable_maker = bool(getattr(config, "ENABLE_MAKER_LIMIT_ENTRY", True))
             use_maker_entry = enable_maker and not is_breakout_mode and strategy_mode in ["TREND_FOLLOWING", "MEAN_REVERSION"]
 
-            if limit_price is not None and float(limit_price) > 0 and math.isfinite(float(limit_price)):
+            price_inc_float = float(Decimal(price_increment) / Decimal(10**18)) if price_increment > 0 else 0.0001
+            if use_maker_entry:
+                # Maker / Post-Only entry: rest passively on the book without crossing the spread
+                best_bid = 0.0
+                best_ask = 0.0
+                try:
+                    price_data = await asyncio.to_thread(self.client.market.get_latest_market_price, product_id)
+                    if price_data:
+                        if hasattr(price_data, "bid_x18") and float(price_data.bid_x18) > 0:
+                            best_bid = float(price_data.bid_x18) / 1e18
+                        if hasattr(price_data, "ask_x18") and float(price_data.ask_x18) > 0:
+                            best_ask = float(price_data.ask_x18) / 1e18
+                except Exception:
+                    pass
+
+                if dir_clean == "LONG":
+                    # Place on passive bid (best_bid or 1 tick below market) and round strictly down (floor)
+                    # Verify best_bid is a sane market price (within 20% of entry_price) to prevent empty book/mock corruption
+                    is_sane_bid = best_bid > 0 and (abs(best_bid - entry_price) / max(entry_price, 1.0) < 0.2)
+                    raw_limit = best_bid if is_sane_bid else (entry_price - price_inc_float)
+                elif dir_clean == "SHORT":
+                    # Place on passive ask (best_ask or 1 tick above market) and round strictly up (ceil)
+                    is_sane_ask = best_ask > 0 and (abs(best_ask - entry_price) / max(entry_price, 1.0) < 0.2)
+                    raw_limit = best_ask if is_sane_ask else (entry_price + price_inc_float)
+                else:
+                    raw_limit = float(entry_price)
+            elif limit_price is not None and float(limit_price) > 0 and math.isfinite(float(limit_price)):
                 raw_limit = float(limit_price)
-            elif use_maker_entry:
-                # Maker / Post-Only entry: rest at entry_price without crossing the book
-                raw_limit = float(entry_price)
             elif dir_clean == "LONG":
                 raw_limit = entry_price * (1.0 + slip_buffer)
             elif dir_clean == "SHORT":
@@ -851,10 +911,22 @@ class NadoTradingService(BaseTradingService):
                     abs_amount_x18 = int(Decimal(str(round(needed_contracts, 8))) * Decimal(10**18))
                     abs_amount_x18 = (abs_amount_x18 // size_increment) * size_increment
                     amount_x18 = abs_amount_x18 if amount_x18 >= 0 else -abs_amount_x18
-                    logger.info(
-                        f"[NadoTradingService] ⚡ Predispatch CLOB adjustment: Adjusted order amount from {current_order_contracts} to {needed_contracts} "
-                        f"contracts (limit notional ${needed_contracts * order_limit_price:.2f} >= $101.00) to guarantee passing Nado DEX min_size."
-                    )
+                    if needed_contracts > current_order_contracts:
+                        taker_fee_val = float(taker_fee_pct or 0.0005)
+                        bumped_risk = needed_contracts * abs(entry_price - float(sl_price)) + needed_contracts * (entry_price + float(sl_price)) * taker_fee_val
+                        max_allowed_risk = float(approved_risk_usd) * 1.35
+                        new_approved_risk = min(max_allowed_risk, max(float(approved_risk_usd), bumped_risk))
+                        logger.info(
+                            f"[NadoTradingService] ⚡ Predispatch CLOB adjustment: Adjusted order amount from {current_order_contracts} to {needed_contracts} "
+                            f"contracts (limit notional ${needed_contracts * order_limit_price:.2f} >= $101.00) to guarantee passing Nado DEX min_size. "
+                            f"Synchronized approved_risk_usd: ${float(approved_risk_usd):.2f} -> ${new_approved_risk:.2f}."
+                        )
+                        approved_risk_usd = new_approved_risk
+                    else:
+                        logger.info(
+                            f"[NadoTradingService] ⚡ Predispatch CLOB adjustment: Adjusted order amount from {current_order_contracts} to {needed_contracts} "
+                            f"contracts (limit notional ${needed_contracts * order_limit_price:.2f} >= $101.00) to guarantee passing Nado DEX min_size."
+                        )
             
             if amount_x18 == 0:
                 logger.error(f"[NadoTradingService] ❌ Order amount is zero after step size alignment.")
@@ -1130,7 +1202,6 @@ class NadoTradingService(BaseTradingService):
                 res = await asyncio.to_thread(self.client.market.place_order, params)
             except Exception as e:
                 err_str = str(e)
-                print(f"❌ [NadoTradingService] Ошибка размещения ордера на бирже: {err_str}")
                 # Auto-fallback: if Maker Post-Only crosses the book (code 2008), retry immediately as IOC Taker
                 if "2008" in err_str and use_maker_entry:
                     logger.warning(
@@ -1162,10 +1233,21 @@ class NadoTradingService(BaseTradingService):
                         if final_limit_price > 0 and (float(Decimal(abs(amount_x18)) / Decimal(10**18)) * final_limit_price) < 101.0:
                             size_inc_float = float(Decimal(size_increment) / Decimal(10**18))
                             if size_inc_float > 0:
+                                cur_cntr = float(Decimal(abs(amount_x18)) / Decimal(10**18))
                                 needed_contracts = math.ceil(101.0 / final_limit_price / size_inc_float) * size_inc_float
                                 abs_amt = int(Decimal(str(round(needed_contracts, 8))) * Decimal(10**18))
                                 abs_amt = (abs_amt // size_increment) * size_increment
                                 amount_x18 = abs_amt if amount_x18 >= 0 else -abs_amt
+                                if needed_contracts > cur_cntr:
+                                    taker_fee_val = float(taker_fee_pct or 0.0005)
+                                    bumped_risk = needed_contracts * abs(entry_price - float(sl_price)) + needed_contracts * (entry_price + float(sl_price)) * taker_fee_val
+                                    max_allowed_risk = float(approved_risk_usd) * 1.35
+                                    new_approved_risk = min(max_allowed_risk, max(float(approved_risk_usd), bumped_risk))
+                                    logger.info(
+                                        f"[NadoTradingService] ⚡ Predispatch CLOB adjustment (IOC fallback): Synchronized approved_risk_usd: "
+                                        f"${float(approved_risk_usd):.2f} -> ${new_approved_risk:.2f}."
+                                    )
+                                    approved_risk_usd = new_approved_risk
                         ioc_order = OrderParams(
                             sender=sender,
                             amount=amount_x18,
@@ -1351,9 +1433,85 @@ class NadoTradingService(BaseTradingService):
                         self._save_pending_reconciliations()
                         self._save_state()
                         self.last_execution_status = "PENDING_ORDER_RECONCILIATION"
+                        return False
                     else:
-                        self.last_execution_status = "REJECTED_BY_EXCHANGE"
-                    return False
+                        # Auto-fallback: if maker POST_ONLY timed out without fill, retry immediately as IOC Taker
+                        if cancel_confirmed and use_maker_entry:
+                            logger.info(
+                                f"[NadoTradingService] ⚠️ Post-Only order {digest} timed out without fill and was cancelled. "
+                                f"Switching to IOC Taker entry with slip_buffer to guarantee execution..."
+                            )
+                            print(f"🔄 [NadoTradingService] Post-Only ордер не исполнился за 10с и отменен. Авто-переход на IOC Taker...")
+                            try:
+                                try:
+                                    from nado_protocol.utils.expiration import OrderType
+                                    ioc_order_type = OrderType.IOC
+                                except ImportError:
+                                    ioc_order_type = 1
+
+                                ioc_appendix = self.build_order_appendix(order_type=ioc_order_type)
+                                ioc_nonce = gen_order_nonce()
+
+                                if dir_clean == "LONG":
+                                    ioc_raw_limit = entry_price * (1.0 + slip_buffer)
+                                    ioc_price_x18 = int(Decimal(str(round(ioc_raw_limit, 8))) * Decimal(10**18))
+                                    ioc_price_x18 = (ioc_price_x18 // price_increment) * price_increment
+                                else:
+                                    ioc_raw_limit = entry_price * (1.0 - slip_buffer)
+                                    ioc_price_x18 = int(Decimal(str(round(ioc_raw_limit, 8))) * Decimal(10**18))
+                                    ioc_price_x18 = ((ioc_price_x18 + price_increment - 1) // price_increment) * price_increment
+
+                                ioc_order = OrderParams(
+                                    sender=sender,
+                                    amount=amount_x18,
+                                    priceX18=ioc_price_x18,
+                                    expiration=expiration,
+                                    nonce=ioc_nonce,
+                                    appendix=ioc_appendix
+                                )
+                                ioc_params = PlaceOrderParams(
+                                    product_id=product_id,
+                                    order=ioc_order
+                                )
+                                ioc_res = await asyncio.to_thread(self.client.market.place_order, ioc_params)
+                                ioc_digest = ioc_res.data.digest if (ioc_res and ioc_res.data) else None
+                                if ioc_digest:
+                                    logger.info(f"[NadoTradingService] ✅ Fallback IOC Taker order submitted: {ioc_digest}. Waiting for fill...")
+                                    for _ in range(5):
+                                        await asyncio.sleep(0.5)
+                                        ioc_data = await asyncio.to_thread(self.client.market.get_historical_orders_by_digest, [ioc_digest])
+                                        if ioc_data and ioc_data.orders:
+                                            ioc_ord = ioc_data.orders[0]
+                                            if abs(int(ioc_ord.base_filled)) > 0:
+                                                filled = True
+                                                digest = ioc_digest
+                                                actual_filled_x18 = int(ioc_ord.base_filled)
+                                                try:
+                                                    raw_bf = float(ioc_ord.base_filled)
+                                                    raw_qf = float(ioc_ord.quote_filled)
+                                                    raw_fee = float(getattr(ioc_ord, "fee", 0) or getattr(ioc_ord, "fee_x18", 0) or 0)
+                                                    norm_bf = self._normalize_indexer_amount(raw_bf) if abs(raw_bf) > 1e10 else raw_bf
+                                                    norm_qf = self._normalize_indexer_amount(raw_qf) if abs(raw_qf) > 1e10 else raw_qf
+                                                    norm_fee = self._normalize_indexer_amount(raw_fee) if abs(raw_fee) > 1e10 else raw_fee
+                                                    if norm_fee > 0:
+                                                        actual_entry_fee = norm_fee
+                                                    _, exact_p = self._calculate_gross_quote_and_price(
+                                                        base_filled=norm_bf, quote_filled=norm_qf, fee=norm_fee,
+                                                        is_mock=getattr(self, "_mock_mode", False)
+                                                    )
+                                                    if exact_p > 0:
+                                                        actual_entry_price = exact_p
+                                                except Exception:
+                                                    pass
+                                                break
+                                    if filled:
+                                        logger.info(f"[NadoTradingService] ✅ Fallback IOC Taker order {digest} FILLED successfully!")
+                            except Exception as ioc_err:
+                                logger.error(f"[NadoTradingService] ❌ Fallback IOC Taker after timeout failed: {ioc_err}")
+
+                        if not filled:
+                            self.last_execution_status = "REJECTED_BY_EXCHANGE"
+                            return False
             
             # --- Defensive Step: Immediate local registration before protection checks ---
             # Ensures position is never orphaned or invisible if emergency close fails or indexer lags
@@ -5124,6 +5282,7 @@ class NadoTradingService(BaseTradingService):
                 markets_data = await asyncio.to_thread(self.client.market.get_all_engine_markets)
                 for m in markets_data.perp_products:
                     self._market_cache[m.product_id] = m
+                self._market_cache_ts = time.time()
                     
             params = self._get_market_parameters(product_id)
             limits["size_increment"] = params["size_increment_base"]
@@ -6406,6 +6565,10 @@ class NadoTradingService(BaseTradingService):
                                     pass
 
                         if current_price > 0:
+                            pos["current_price"] = current_price
+                            if not hasattr(self, "_latest_prices") or self._latest_prices is None:
+                                self._latest_prices = {}
+                            self._latest_prices[symbol] = current_price
                             entry = pos.get("entry_price", 0)
                             if current_price > pos.get("highest_price", entry):
                                 pos["highest_price"] = current_price
@@ -6428,6 +6591,19 @@ class NadoTradingService(BaseTradingService):
                                 if cur_mfe_r > float(pos.get("max_favorable_excursion_r", 0.0) or 0.0):
                                     pos["max_favorable_excursion_r"] = cur_mfe_r
 
+                                be_trigger_r = float(pos.get("be_activation_r") or 0.75)
+                                prot_st = str(pos.get("protection_state") or "").upper()
+                                if (
+                                    cur_mfe_r >= be_trigger_r
+                                    and not pos.get("be_moved")
+                                    and not pos.get("is_closing")
+                                    and prot_st not in ("BREAK_EVEN", "SOFTWARE_BREAK_EVEN", "TRAILING", "PENDING_BREAK_EVEN")
+                                ):
+                                    pos["be_moved"] = True
+                                    pos["protection_state"] = "PENDING_BREAK_EVEN"
+                                    self._save_positions()
+                                    asyncio.create_task(self.update_stop_loss_to_be(symbol))
+
                             # Software SL/TP Trigger Check (ALWAYS ACTIVE as a safety net)
                             # We check this regardless of sl_digest to cover exchange failures, dropped orders, or replacement windows
                             direction = pos.get("direction", "LONG").upper()
@@ -6437,8 +6613,9 @@ class NadoTradingService(BaseTradingService):
                             # Price Asymmetry: SL evaluates against Oracle/Mark price to eliminate false stop-outs
                             # from temporary orderbook liquidation wicks, while TP evaluates against Last/Book price
                             # to capitalize on book wick liquidity spikes!
+                            cache_age = time.time() - getattr(self, "_market_cache_ts", 0.0)
                             oracle_price = current_price
-                            if getattr(self, "_market_cache", None) and product_id in self._market_cache:
+                            if cache_age <= 15.0 and getattr(self, "_market_cache", None) and product_id in self._market_cache:
                                 m_info = self._market_cache[product_id]
                                 raw_oracle = getattr(m_info, "oracle_price_x18", None) or getattr(getattr(m_info, "product", None), "oracle_price_x18", None)
                                 if raw_oracle is not None:
@@ -6450,8 +6627,21 @@ class NadoTradingService(BaseTradingService):
                                         pass
 
                             sl_eval_price = oracle_price if oracle_price > 0 else current_price
-                            hit_sl = (direction == "LONG" and sl_price > 0 and sl_eval_price <= sl_price) or \
-                                     (direction == "SHORT" and sl_price > 0 and sl_eval_price >= sl_price)
+                            is_virtual_pos = bool(pos.get("is_virtual") or pos.get("is_shadow"))
+                            has_native_sl = bool(pos.get("sl_digest"))
+                            if is_virtual_pos:
+                                sl_buffer_pct = 0.0
+                            else:
+                                sl_buffer_pct = 0.0020 if has_native_sl else 0.0010
+
+                            if direction == "LONG" and sl_price > 0:
+                                backup_sl_threshold = sl_price * (1.0 - sl_buffer_pct)
+                                hit_sl = (sl_eval_price <= backup_sl_threshold)
+                            elif direction == "SHORT" and sl_price > 0:
+                                backup_sl_threshold = sl_price * (1.0 + sl_buffer_pct)
+                                hit_sl = (sl_eval_price >= backup_sl_threshold)
+                            else:
+                                hit_sl = False
                             
                             # If position has a multi-tier partial TP plan, evaluate partial TP ladder!
                             if pos.get("partial_tp_plan") and not hit_sl:

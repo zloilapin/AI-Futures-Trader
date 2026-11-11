@@ -61,7 +61,7 @@ def test_price_drift_guard_allows_fresh_entry_and_updates_live_price():
     If drift <= 38%, entry is approved and SL/TP are re-anchored to live_price,
     preserving exact calculated R:R distances.
     """
-    # Case 1: LONG setup with 15% drift
+    # Case 1: LONG setup with 15% drift in favorable direction (price went up)
     # Snapshot=100.0, TP=110.0 (dist=10.0), SL=95.0 (dist=5.0) -> R:R = 2.0
     # Live=101.5 -> drift = 1.5 / 10.0 = 15.0% <= 38.0%
     is_ok, re_entry, re_tp, re_sl, msg = DeterministicGuard.evaluate_price_drift(
@@ -75,16 +75,10 @@ def test_price_drift_guard_allows_fresh_entry_and_updates_live_price():
     assert is_ok is True
     assert re_entry == 101.5
     assert re_tp == 111.5  # 110.0 + 1.5
-    assert re_sl == 96.5   # 95.0 + 1.5
-    # Verify R:R is perfectly preserved
-    tp_distance = re_tp - re_entry
-    sl_distance = re_entry - re_sl
-    assert round(tp_distance, 4) == 10.0
-    assert round(sl_distance, 4) == 5.0
-    assert round(tp_distance / sl_distance, 2) == 2.0
-    assert "SL/TP перепривязаны к live_price" in msg
+    # Structural SL protection: For LONG, when price drifts up (price_delta >= 0), SL remains at 95.0
+    assert re_sl == 95.0
 
-    # Case 2: SHORT setup with 20% drift
+    # Case 2: SHORT setup with 20% drift in favorable direction (price went down)
     # Snapshot=100.0, TP=90.0 (dist=10.0), SL=105.0 (dist=5.0) -> R:R = 2.0
     # Live=98.0 -> drift = (100 - 98) / 10 = 20.0% <= 38.0%
     is_ok_s, re_entry_s, re_tp_s, re_sl_s, msg_s = DeterministicGuard.evaluate_price_drift(
@@ -98,12 +92,8 @@ def test_price_drift_guard_allows_fresh_entry_and_updates_live_price():
     assert is_ok_s is True
     assert re_entry_s == 98.0
     assert re_tp_s == 88.0   # 90.0 + (98.0 - 100.0) = 88.0
-    assert re_sl_s == 103.0  # 105.0 + (98.0 - 100.0) = 103.0
-    tp_distance_s = re_entry_s - re_tp_s
-    sl_distance_s = re_sl_s - re_entry_s
-    assert round(tp_distance_s, 4) == 10.0
-    assert round(sl_distance_s, 4) == 5.0
-    assert round(tp_distance_s / sl_distance_s, 2) == 2.0
+    # Structural SL protection: For SHORT, when price drifts down (price_delta <= 0), SL remains at 105.0
+    assert re_sl_s == 105.0
 
     # Case 3: Negative drift (price pulled back slightly in our favor before entry)
     # Snapshot=100.0, Live=99.2 for LONG

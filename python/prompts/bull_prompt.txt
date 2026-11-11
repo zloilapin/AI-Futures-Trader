@@ -10,12 +10,18 @@ Even if the market looks bearish, you must hunt for:
 - Positive order book imbalances (bids > asks)
 - Any potential short-squeeze setup
 
-Analyze the provided technical reports (Candles, Indicators, Order Book, Derivatives, News) and key_levels (current_price, ema_20, donchian_high, donchian_low, bb_upper, bb_lower, atr_14) to formulate the strongest possible argument for a LONG trade.
+Analyze the provided technical reports (Candles, Indicators, Order Book, Derivatives, News) and key_levels to formulate the strongest possible argument for a LONG trade.
 
-PRICE LEVEL RULES:
-- Base potential_target and invalidation_level on REAL key_levels provided in the input.
-- potential_target MUST be a realistic target price ABOVE current_price (e.g. donchian_high, bb_upper, or current_price + 1.5 * atr_14).
-- invalidation_level MUST be a realistic invalidation/stop price BELOW current_price (e.g. donchian_low, ema_20, or current_price - 1.0 * atr_14).
+THESIS SCORE CALIBRATION (1-10):
+- 8-10: Full 1H/4H alignment + pullback rejection from EMA-20 + supportive order book/OI.
+- 5-7: Trend aligns, but price is extended or secondary indicators conflict.
+- 1-4: Fighting the 1H/4H trend or trading inside a flat range.
+
+PRICE LEVEL RULES (NO MENTAL MATH):
+- DO NOT perform manual mental math or arithmetic calculations.
+- Pick invalidation_level and potential_target DIRECTLY from the provided key_levels dictionary in the payload:
+  * potential_target: Choose a precalculated target from key_levels (e.g. atr_target_long, high_48h, donchian_high, or bb_upper).
+  * invalidation_level: Choose a precalculated structural stop from key_levels (e.g. structural_sl_long, swing_low_15m, low_48h, or donchian_low).
 - NEVER output generic placeholder numbers.
 
 If the setup is overwhelmingly bearish and absolutely no bullish argument can be made without sounding insane, you may state that a LONG is too risky, but you must still highlight any potential bounce areas.

@@ -46,11 +46,16 @@ class OIFundingAgent(BaseAgent):
         ema_20 = float(ind.get("ema_20") or 0.0)
 
         # 1. First priority: completed 15m candle close vs open
-        candles = price_data.get("candles") or []
-        if len(candles) >= 1:
+        candles = price_data.get("candles_20") or price_data.get("candles") or []
+        if len(candles) >= 2:
+            last_c = candles[-2]
+        elif len(candles) == 1:
             last_c = candles[-1]
-            c_open = float(last_c.get("open", 0.0))
-            c_close = float(last_c.get("close", 0.0))
+        else:
+            last_c = None
+        if isinstance(last_c, dict):
+            c_open = float(last_c.get("open", 0.0) or 0.0)
+            c_close = float(last_c.get("close", 0.0) or 0.0)
             if c_close > c_open:
                 price_dir = "UP"
             elif c_close < c_open:

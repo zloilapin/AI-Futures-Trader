@@ -449,12 +449,15 @@ class PartialTPCalculator:
                 # 2. Test 2-tier candidate
                 q2 = cls.floor_to_step(0.50 * total_contracts, size_inc)
                 rem2 = cls.floor_to_step(total_contracts - q2, size_inc)
+                notional_q2 = q2 * worst_price
+                notional_rem2 = rem2 * worst_price
 
                 can_do_2_tier = (
                     q2 >= min_size and
                     rem2 >= min_size and
                     q2 > 0 and
-                    rem2 > 0
+                    rem2 > 0 and
+                    (effective_min_notional <= 0 or (notional_q2 >= effective_min_notional and notional_rem2 >= effective_min_notional))
                 )
 
                 if can_do_2_tier:

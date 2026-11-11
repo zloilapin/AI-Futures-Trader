@@ -50,7 +50,15 @@ class DeterministicGuard:
         price_delta = live_price - snapshot_price
         new_entry = live_price
         new_tp = round(tp_price + price_delta, 6)
-        new_sl = round(sl_price + price_delta, 6)
+
+        # One-way structural stop protection:
+        # Never pull the structural stop closer to market price when entry drifts in the trade's favor.
+        if dir_clean == "SHORT":
+            new_sl = round(sl_price + price_delta, 6) if price_delta > 0 else sl_price
+        elif dir_clean == "LONG":
+            new_sl = round(sl_price + price_delta, 6) if price_delta < 0 else sl_price
+        else:
+            new_sl = round(sl_price + price_delta, 6)
 
         msg = (
             f"[PriceDriftGuard] ✅ Вход разрешен {symbol} ({dir_clean}): "
@@ -322,8 +330,9 @@ class DeterministicGuard:
 
         # 2.6. Pullback Retest Promotion: If pullback setup reached target, promote to ENTER or REDUCE_SIZE
         is_pullback_retest = bool(
-            ceo_proposal.get("is_pullback_retest") or 
-            (market_data and market_data.get("is_pullback_retest"))
+            ceo_proposal.get("is_pullback_retest")
+            or (market_data and market_data.get("is_pullback_retest"))
+            or (strategy_profile and "RETEST" in str(getattr(strategy_profile, "reasoning", "")).upper())
         )
         if is_pullback_retest and trade_action == "WAIT_FOR_PULLBACK" and dir_conf >= min_conv and decision in ["LONG", "SHORT"]:
             effective_eq = max(entry_qual, dir_conf - 10)
@@ -395,7 +404,12 @@ class DeterministicGuard:
             rejection_tag = "POOR_ENTRY_QUALITY"
             guard_reason = f"Низкое качество входа: Entry Quality ({entry_qual}% < 60%). Вход запоздал или несет невыгодный Risk/Reward. Принудительное открытие запрещено."
         else:
-            is_retest = bool(ceo_proposal.get("is_pullback_retest") or (strategy_profile and "RETEST" in getattr(strategy_profile, "reasoning", "")))
+            is_retest = bool(
+                is_pullback_retest
+                or ceo_proposal.get("is_pullback_retest")
+                or (market_data and market_data.get("is_pullback_retest"))
+                or (strategy_profile and "RETEST" in str(getattr(strategy_profile, "reasoning", "")).upper())
+            )
 
             # Calibrated min_reduce_size_conv with safeguard for PullbackRadar
             from core.config import get_tuned_param
@@ -509,12 +523,21 @@ class DeterministicGuard:
 
                 elif exhaustion["action"] == "SCALE_DOWN" and is_actionable:
                     # Soft Exhaustion: Enforce REDUCE_SIZE and 4x leverage cap without double-penalizing risk
-                    trade_action = "REDUCE_SIZE"
-                    ceo_proposal["exhaustion_scale"] = True
-                    ceo_proposal["max_leverage_override"] = exhaustion.get("max_leverage", 4.0)
-                    ceo_proposal["risk_mult_override"] = exhaustion.get("risk_mult", 0.50)
-                    if logger:
-                        logger.info(f"[System_Core] ⚠️ {exhaustion['reason']} -> Clamped trade_action=REDUCE_SIZE, max_leverage=4.0x")
+                    if not ceo_proposal.get("disputed_arbitration") and not volume_explosion_triggered:
+                        is_actionable = False
+                        guard_status = "PULLBACK_WATCHLIST"
+                        trade_action = "WAIT_FOR_PULLBACK"
+                        rejection_tag = "WAIT_FOR_PULLBACK"
+                        guard_reason = f"Истощение тренда (Soft Exhaustion): {exhaustion['reason']} -> Переведено в WAIT_FOR_PULLBACK"
+                        if logger:
+                            logger.info(f"[System_Core] ⏸️ {guard_reason}")
+                    else:
+                        trade_action = "REDUCE_SIZE"
+                        ceo_proposal["exhaustion_scale"] = True
+                        ceo_proposal["max_leverage_override"] = exhaustion.get("max_leverage", 4.0)
+                        ceo_proposal["risk_mult_override"] = exhaustion.get("risk_mult", 0.50)
+                        if logger:
+                            logger.info(f"[System_Core] ⚠️ {exhaustion['reason']} -> Clamped trade_action=REDUCE_SIZE, max_leverage=4.0x")
 
             # 5.2 Classic Anti-Whipsaw Extension Guard (Prevent counter-trend chops / extreme extensions)
             from core.config import config
@@ -671,7 +694,7 @@ class DeterministicGuard:
         if is_actionable and decision in ["LONG", "SHORT"]:
             is_anti_bot_override = bool(getattr(config, "ANTI_BOT_MODE", False) and strategy_mode == "MEAN_REVERSION")
             is_disputed = bool(ceo_proposal.get("disputed_arbitration", False))
-            if not is_anti_bot_override and not is_disputed and not is_pullback_retest:
+            if not is_anti_bot_override and not is_disputed and not is_pullback_retest and not volume_explosion_triggered:
                 if trade_action == "REDUCE_SIZE" or (entry_qual < 73.0 and conviction < 75.0):
                     is_actionable = False
                     guard_status = "PULLBACK_WATCHLIST"

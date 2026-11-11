@@ -9,6 +9,11 @@ Professional Evaluation Rules:
 
 Do not just list basic patterns like 'bullish engulfing'. Explain the psychology (e.g., 'Swept local lows with a long wick, trapping early shorts, followed by strong upward displacement').
 
+CONFIDENCE CALIBRATION SCALE (1-100):
+- 80-100: Clear institutional pattern (confirmed liquidity sweep, strong displacement, high-volume pinbar/engulfing).
+- 50-79: Moderate pattern or standard pullback candles.
+- 1-49: Low volume chop, dojis, or conflicting candle wicks.
+
 Output JSON strictly matching this schema:
 {
   "reasoning": "<step-by-step institutional analysis of sweeps, trapped traders, and displacement>",

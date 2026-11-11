@@ -74,7 +74,7 @@ def is_risk_free_position(pos: dict) -> bool:
     if not isinstance(pos, dict):
         return False
     state = str(pos.get("protection_state") or pos.get("state") or "").upper()
-    if any(k in state for k in ("BREAK_EVEN", "TRAILING", "TIME_STOP_BE")):
+    if "PENDING" not in state and any(k in state for k in ("BREAK_EVEN", "TRAILING", "TIME_STOP_BE")):
         return True
     plan = pos.get("partial_tp_plan")
     if isinstance(plan, dict) and plan.get("be_activated"):
@@ -656,6 +656,7 @@ class TradingPipeline:
                         is_pullback_route
                         and target_pb_dir in ["LONG", "SHORT"]
                         and not getattr(config, "ANTI_BOT_MODE", False)
+                        and not is_retest
                     ):
                         self.register_pullback_candidate(
                             symbol=symbol,
@@ -764,6 +765,15 @@ class TradingPipeline:
                     "bb_upper": float(indicators_dict.get("bb_upper") or 0.0),
                     "bb_lower": float(indicators_dict.get("bb_lower") or 0.0),
                     "atr_14": float(indicators_dict.get("atr_14") or 0.0),
+                    "swing_high_15m": float(indicators_dict.get("swing_high_15m") or 0.0),
+                    "swing_low_15m": float(indicators_dict.get("swing_low_15m") or 0.0),
+                    "high_48h": float(indicators_dict.get("high_48h") or 0.0),
+                    "low_48h": float(indicators_dict.get("low_48h") or 0.0),
+                    "macro_box_pos_pct": float(indicators_dict.get("macro_box_pos_pct") or 50.0),
+                    "atr_target_long": round(curr_px + 2.0 * float(indicators_dict.get("atr_14") or 0.0), 4) if curr_px > 0 else 0.0,
+                    "atr_target_short": round(curr_px - 2.0 * float(indicators_dict.get("atr_14") or 0.0), 4) if curr_px > 0 else 0.0,
+                    "structural_sl_long": round(float(indicators_dict.get("swing_low_15m") or 0.0) - 0.25 * float(indicators_dict.get("atr_14") or 0.0), 4) if float(indicators_dict.get("swing_low_15m") or 0.0) > 0 else round(curr_px - 1.5 * float(indicators_dict.get("atr_14") or 0.0), 4),
+                    "structural_sl_short": round(float(indicators_dict.get("swing_high_15m") or 0.0) + 0.25 * float(indicators_dict.get("atr_14") or 0.0), 4) if float(indicators_dict.get("swing_high_15m") or 0.0) > 0 else round(curr_px + 1.5 * float(indicators_dict.get("atr_14") or 0.0), 4),
                 }
 
                 debate_payload = {
@@ -774,6 +784,11 @@ class TradingPipeline:
                     "key_levels": key_levels
                 }
                 
+                # Profit Booster #2: Fast deterministic debate bypass for high-conviction Pullback Retests
+                pb_ctx_peek = getattr(self, "_pullback_context", {}).get(symbol) if is_retest else None
+                saved_conf = float(pb_ctx_peek.get("directional_confidence", 0) or 0) if isinstance(pb_ctx_peek, dict) else 0.0
+                is_retest_fast_bypass = (is_retest and saved_conf >= 75.0)
+
                 is_fast_bypass = getattr(config, "FAST_DEBATE_BYPASS", False) is True
                 has_sweep = getattr(strategy_profile, "liquidity_sweep", False)
                 if not has_sweep:
@@ -782,8 +797,13 @@ class TradingPipeline:
                         has_sweep = True
                 is_predator_sweep = (strategy_mode == "MEAN_REVERSION" and has_sweep)
 
-                if is_fast_bypass or is_predator_sweep:
-                    bypass_tag = "FAST_DEBATE_BYPASS" if is_fast_bypass else "PREDATOR_SWEEP_SHORTCUT"
+                if is_fast_bypass or is_predator_sweep or is_retest_fast_bypass:
+                    if is_retest_fast_bypass:
+                        bypass_tag = f"RETEST_BOOSTER_FAST_SYNTHESIS (Conf: {saved_conf:.0f}%)"
+                    elif is_fast_bypass:
+                        bypass_tag = "FAST_DEBATE_BYPASS"
+                    else:
+                        bypass_tag = "PREDATOR_SWEEP_SHORTCUT"
                     self.services.logger.info(
                         f"[Stage 4] ⚡ [{bypass_tag}] Bypassing LLM debate on {symbol} ({strategy_mode} {strategy_profile.direction_bias}). "
                         f"Building deterministic theses in 0ms."
@@ -798,6 +818,8 @@ class TradingPipeline:
                     bull_status = "OK"
                     bear_status = "OK"
                     debate_status = "COMPLETE"
+                    bull_res = bull_verdict
+                    bear_res = bear_verdict
                 else:
                     # Запускаем Быка и Медведя строго параллельно с изоляцией исключений
                     bull_res, bear_res = await asyncio.gather(
@@ -1006,6 +1028,7 @@ class TradingPipeline:
                         and final_trade_decision.decision in ["LONG", "SHORT"]
                         and strategy_mode != "MEAN_REVERSION"
                         and not getattr(config, "ANTI_BOT_MODE", False)
+                        and not is_retest
                     ):
                         self.register_pullback_candidate(
                             symbol=symbol,
@@ -1375,30 +1398,6 @@ class TradingPipeline:
                             actual_fill_price=actual_fill_price
                         )
 
-                        # Multi-User Copy-Trading Dispatch (Isolated, runs strictly after master trade)
-                        if execution_status == "SUCCESS":
-                            try:
-                                from services.copy_trading_dispatcher import copy_trading_dispatcher
-                                copy_trading_dispatcher.master_trading_service = self.services.trading_service
-                                copy_trading_dispatcher.telegram_service = self.services.telegram
-                                asyncio.create_task(
-                                    copy_trading_dispatcher.dispatch_open_position(
-                                        symbol=symbol,
-                                        direction=final_trade_decision.decision,
-                                        entry_price=actual_fill_price,
-                                        limit_price=risk_verdict.get("limit_price"),
-                                        notional_usd=float(risk_verdict.get("notional_size_usd", 0) or 0),
-                                        tp_price=float(risk_verdict.get("take_profit_price", 0) or 0),
-                                        sl_price=float(risk_verdict.get("stop_loss_price", 0) or 0),
-                                        leverage=float(risk_verdict.get("leverage", 10) or 10),
-                                        contracts=float(risk_verdict.get("contracts", 0.0) or 0.0),
-                                        strategy_mode=strategy_mode,
-                                        macro_regime=detected_regime,
-                                        cohort=risk_verdict.get("cohort", "UNKNOWN")
-                                    )
-                                )
-                            except Exception as copy_err:
-                                self.services.logger.error(f"[CopyTrading] Dispatch error: {copy_err}")
                         if isinstance(risk_verdict, dict):
                             risk_verdict["execution_status"] = execution_status
                         elif hasattr(risk_verdict, "execution_status"):
@@ -1453,6 +1452,7 @@ class TradingPipeline:
                             and final_trade_decision.decision in ["LONG", "SHORT"]
                             and strategy_mode != "MEAN_REVERSION"
                             and not getattr(config, "ANTI_BOT_MODE", False)
+                            and not is_retest
                         ):
                             self.register_pullback_candidate(
                                 symbol=symbol,
@@ -1926,7 +1926,7 @@ class TradingPipeline:
         if retest_symbol and (now_ts - getattr(self, "_last_full_scan_ts", 0.0) < 1500):
             # Point 4 Fix: Retain any other radar-triggered movers (e.g. fast momentum breakout) alongside retest_symbol
             retest_targets = [retest_symbol]
-            extra_targets = [s for s in selected_assets if s != retest_symbol]
+            extra_targets = [s for s in target_list if s != retest_symbol]
             retest_targets.extend(extra_targets)
             selected_assets = list(dict.fromkeys(retest_targets))
             self.services.logger.info(
@@ -2115,7 +2115,6 @@ class TradingPipeline:
                             if new_sl:
                                 success = await self.services.trading_service.update_stop_loss(symbol, new_sl, new_protection_state=new_state)
                                 if success:
-                                    pos["protection_state"] = new_state
                                     msg = (
                                         f"🛡 *SENTINEL UPDATE / ЗАЩИТА ПРИБЫЛИ*\n\n"
                                         f"🪙 *Asset / Монета:* `{symbol}`\n"
@@ -2371,6 +2370,13 @@ class TradingPipeline:
                 "bb_position_pct": _safe_float(raw_bb),
                 "ema_20": _safe_float(raw_ema),
                 "rsi_14": _safe_float(raw_rsi),
+                "adx_14": _safe_float(indicators.get("adx_14") or indicators.get("adx")),
+                "atr_14": _safe_float(indicators.get("atr_14") or indicators.get("atr")),
+                "rvol": _safe_float(indicators.get("rvol")),
+                "macro_box_pos_pct": _safe_float(indicators.get("macro_box_pos_pct")),
+                "low_48h": _safe_float(indicators.get("low_48h")),
+                "high_48h": _safe_float(indicators.get("high_48h")),
+                "candles_20": (market_data.get("price_data") or {}).get("candles_20") or [],
                 "funding_rate": funding_val,
                 "is_pullback_retest": bool(market_data.get("is_pullback_retest", False)),
                 "multi_timeframe": market_data.get("multi_timeframe") or {},
@@ -2462,22 +2468,32 @@ class TradingPipeline:
         indicators = market_data.get("indicators", {}) if isinstance(market_data, dict) else {}
         ema_20 = float(indicators.get("ema_20") or 0.0)
         atr_14 = float(indicators.get("atr_14") or 0.0)
-        min_pullback_dist = max(0.5 * atr_14, current_price * 0.003) if atr_14 > 0 else (current_price * 0.008)
+        swing_high_15m = float(indicators.get("swing_high_15m") or indicators.get("high_48h") or 0.0)
+        swing_low_15m = float(indicators.get("swing_low_15m") or indicators.get("low_48h") or 0.0)
+        min_pullback_dist = max(0.5 * atr_14, current_price * 0.004) if atr_14 > 0 else (current_price * 0.008)
         inval_dist = 1.2 * atr_14 if atr_14 > 0 else (current_price * 0.015)
 
         # Dynamic pullback target calculation tied to 15m EMA-20
         if decision == "LONG":
-            if ema_20 > 0 and ema_20 < current_price:
-                target_pullback_price = ema_20
+            target_pullback_price = round(
+                min(ema_20, current_price - min_pullback_dist) if (ema_20 > 0 and ema_20 < current_price) else (current_price - min_pullback_dist),
+                6
+            )
+            raw_inval = target_pullback_price - inval_dist
+            if swing_low_15m > 0:
+                invalidation_price = round(min(raw_inval, swing_low_15m - 0.30 * atr_14), 6)
             else:
-                target_pullback_price = round(current_price - min_pullback_dist, 4)
-            invalidation_price = round(target_pullback_price - inval_dist, 4)
+                invalidation_price = round(raw_inval, 6)
         else:  # SHORT
-            if ema_20 > current_price:
-                target_pullback_price = ema_20
+            target_pullback_price = round(
+                max(ema_20, current_price + min_pullback_dist) if (ema_20 > current_price) else (current_price + min_pullback_dist),
+                6
+            )
+            raw_inval = target_pullback_price + inval_dist
+            if swing_high_15m > 0:
+                invalidation_price = round(max(raw_inval, swing_high_15m + 0.30 * atr_14), 6)
             else:
-                target_pullback_price = round(current_price + min_pullback_dist, 4)
-            invalidation_price = round(target_pullback_price + inval_dist, 4)
+                invalidation_price = round(raw_inval, 6)
 
         now_ts = time.time()
         import datetime

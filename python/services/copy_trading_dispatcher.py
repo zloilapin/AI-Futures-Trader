@@ -45,6 +45,16 @@ from nado_protocol.utils.bytes32 import subaccount_to_hex
 
 logger = logging.getLogger("CopyTradingDispatcher")
 
+NADO_SIZE_INCREMENTS: Dict[str, float] = {
+    "LIT": 1.0,
+    "SOL": 0.1,
+    "HYPE": 0.1,
+    "ZEC": 0.01,
+    "BNB": 0.005,
+    "ETH": 0.001,
+    "BTC": 0.00005,
+}
+
 
 class SubscriberPositionsStore:
     """Thread-safe and process-safe storage for active subscriber positions."""
@@ -222,7 +232,8 @@ class CopyTradingDispatcher:
             is_risk_acceptable = (risk_at_104 <= user_risk_usd * 1.45)
 
             if is_risk_acceptable and has_margin:
-                return True, 104.0, user_risk_usd, "BUMPED_TO_MIN_NOTIONAL"
+                actual_risk = round(max(user_risk_usd, risk_at_104), 4)
+                return True, 104.0, actual_risk, "BUMPED_TO_MIN_NOTIONAL"
             else:
                 return False, user_notional, user_risk_usd, "BELOW_EXCHANGE_MIN"
 
@@ -427,13 +438,26 @@ class CopyTradingDispatcher:
             if master_open_time > 0 and (now_ts - master_open_time > 600.0):
                 sl_dist = abs(entry_price - master_sl) if (entry_price > 0 and master_sl > 0) else 0.0
                 curr_price = entry_price
-                if self.master_trading_service and hasattr(self.master_trading_service, "market_data_service"):
-                    try:
-                        p = self.master_trading_service.market_data_service.get_last_price(symbol)
-                        if p and p > 0:
-                            curr_price = p
-                    except Exception:
-                        pass
+                if self.master_trading_service:
+                    p = None
+                    if callable(getattr(self.master_trading_service, "get_last_price", None)):
+                        try:
+                            res = self.master_trading_service.get_last_price(symbol)
+                            if isinstance(res, (int, float)) and res > 0:
+                                p = float(res)
+                        except Exception:
+                            pass
+                    if p is None and hasattr(self.master_trading_service, "market_data_service"):
+                        mds = getattr(self.master_trading_service, "market_data_service", None)
+                        if mds and callable(getattr(mds, "get_last_price", None)):
+                            try:
+                                res = mds.get_last_price(symbol)
+                                if isinstance(res, (int, float)) and res > 0:
+                                    p = float(res)
+                            except Exception:
+                                pass
+                    if p is not None and p > 0:
+                        curr_price = p
                 price_drift = abs(curr_price - entry_price)
                 drift_r = price_drift / sl_dist if sl_dist > 0 else 0.0
                 if drift_r > 0.15:
@@ -477,8 +501,31 @@ class CopyTradingDispatcher:
             sub_sl = master_sl
 
         effective_entry = limit_price if (limit_price and limit_price > 0) else entry_price
-        contracts = round(sub_notional / effective_entry, 4)
-        actual_notional = contracts * effective_entry
+        raw_contracts = (sub_notional / effective_entry) if effective_entry > 0 else 0.0
+
+        # Align contracts strictly to product size_increment
+        base_sym = symbol.split("-")[0].upper()
+        size_inc = NADO_SIZE_INCREMENTS.get(base_sym, 0.001)
+        if size_inc > 0:
+            if sub_notional <= 104.5:
+                # Use ceil to guarantee actual notional >= $101.00 exchange minimum on small sizes
+                steps = math.ceil(round(raw_contracts / size_inc, 8))
+            else:
+                steps = math.floor(round(raw_contracts / size_inc, 8))
+            inc_str = f"{size_inc:.10f}".rstrip("0")
+            decimals = len(inc_str.split(".")[1]) if "." in inc_str else 0
+            contracts = round(steps * size_inc, min(decimals, 8))
+
+            # Enforce $101 minimum notional if floor rounded contracts below exchange threshold
+            if sub_notional >= 101.0 and (contracts * effective_entry) < 101.0:
+                steps = math.ceil(round(raw_contracts / size_inc, 8))
+                contracts = round(steps * size_inc, min(decimals, 8))
+                if sl_dist > 0:
+                    user_risk_usd = round(max(user_risk_usd, contracts * sl_dist), 4)
+        else:
+            contracts = round(raw_contracts, 4)
+
+        actual_notional = round(contracts * effective_entry, 2)
 
         # 8. Execution on Nado DEX via subscriber session key
         signer_key = sub.get("signer_private_key")
@@ -570,14 +617,27 @@ class CopyTradingDispatcher:
         if entry_price <= 0.0 or r_dist <= 0.0:
             return
 
-        mark_price = entry_price
-        if self.master_trading_service and hasattr(self.master_trading_service, "market_data_service"):
-            try:
-                mp = self.master_trading_service.market_data_service.get_last_price(symbol)
-                if mp and mp > 0:
-                    mark_price = mp
-            except Exception:
-                pass
+        mark_price = float(pos.get("current_price", 0.0) or entry_price)
+        if self.master_trading_service:
+            p = None
+            if callable(getattr(self.master_trading_service, "get_last_price", None)):
+                try:
+                    res = self.master_trading_service.get_last_price(symbol)
+                    if isinstance(res, (int, float)) and res > 0:
+                        p = float(res)
+                except Exception:
+                    pass
+            if p is None and hasattr(self.master_trading_service, "market_data_service"):
+                mds = getattr(self.master_trading_service, "market_data_service", None)
+                if mds and callable(getattr(mds, "get_last_price", None)):
+                    try:
+                        res = mds.get_last_price(symbol)
+                        if isinstance(res, (int, float)) and res > 0:
+                            p = float(res)
+                    except Exception:
+                        pass
+            if p is not None and p > 0:
+                mark_price = p
 
         if direction == "LONG":
             pnl_usd = (mark_price - entry_price) * contracts
@@ -611,17 +671,19 @@ class CopyTradingDispatcher:
         if r_mult >= trail_act_r:
             # Trailing floor locked at +0.75R
             lock_floor = (entry_price + (0.75 * r_dist)) if direction == "LONG" else (entry_price - (0.75 * r_dist))
-            is_improved = (lock_floor > current_sl) if direction == "LONG" else (lock_floor < current_sl)
+            dynamic_trail = (mark_price - 0.85 * r_dist) if direction == "LONG" else (mark_price + 0.85 * r_dist)
+            target_sl = max(lock_floor, dynamic_trail) if direction == "LONG" else min(lock_floor, dynamic_trail)
+            is_improved = (target_sl > current_sl) if direction == "LONG" else (target_sl < current_sl)
             if is_improved:
-                pos["sl_price"] = lock_floor
+                pos["sl_price"] = target_sl
                 pos["protection_state"] = "TRAILING"
                 self.positions_store.set_user_position(chat_id, symbol, pos)
-                logger.info(f"[CopyTrading] 🚀 Subscriber {chat_id} {symbol} SL trailed to {lock_floor:.2f} ({r_mult:+.2f}R >= {trail_act_r}R)")
+                logger.info(f"[CopyTrading] 🚀 Subscriber {chat_id} {symbol} SL trailed to {target_sl:.2f} ({r_mult:+.2f}R >= {trail_act_r}R)")
                 await self._send_subscriber_notification(
                     chat_id,
                     f"🚀 *[Трейлинг-стоп активирован]*\n"
                     f"Позиция *{symbol}* выросла до `{r_mult:+.2f}R`!\n"
-                    f"Stop-Loss подтянут на `${lock_floor:,.2f}`, зафиксировав гарантированную прибыль."
+                    f"Stop-Loss подтянут на `${target_sl:,.2f}`, зафиксировав гарантированную прибыль."
                 )
 
     async def move_subscriber_sl_to_be(self, chat_id: str, symbol: str) -> Tuple[bool, str]:

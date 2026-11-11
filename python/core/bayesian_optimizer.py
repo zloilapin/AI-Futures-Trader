@@ -105,13 +105,22 @@ class TradingBayesianOptimizer:
 
             # 3. Sentinel Break-Even & 2-Tier Partial TP Simulation
             adj_r = raw_r
+            trade_notional = float(trade.get("notional_usd", trade.get("size_usd", 0.0)) or 0.0)
+            is_small_pos = (trade_notional > 0.0 and trade_notional < 200.0) or bool(trade.get("small_pos_protect"))
             if mfe_r >= params["be_activation_r"]:
-                if raw_r < 0.0:
-                    # Tier 1 locked in 50% at be_activation_r; remaining 50% exited at BE (+0.05R net fees)
-                    adj_r = (0.50 * params["be_activation_r"]) + (0.50 * 0.05)
+                if is_small_pos:
+                    # Small positions (< $200) operate under small_pos_protect without 50% partial TP
+                    if raw_r < 0.0:
+                        adj_r = 0.05
+                    else:
+                        adj_r = raw_r
                 else:
-                    # Tier 1 locked in 50% at be_activation_r; remaining 50% ran to raw_r
-                    adj_r = (0.50 * params["be_activation_r"]) + (0.50 * raw_r)
+                    if raw_r < 0.0:
+                        # Tier 1 locked in 50% at be_activation_r; remaining 50% exited at BE (+0.05R net fees)
+                        adj_r = (0.50 * params["be_activation_r"]) + (0.50 * 0.05)
+                    else:
+                        # Tier 1 locked in 50% at be_activation_r; remaining 50% ran to raw_r
+                        adj_r = (0.50 * params["be_activation_r"]) + (0.50 * raw_r)
 
             retained.append(adj_r)
             cum_r += adj_r
@@ -170,7 +179,7 @@ class TradingBayesianOptimizer:
             "chop_range_threshold": trial.suggest_float("chop_range_threshold", 50.0, 75.0, step=1.0),
             "anti_chop_bb_max": trial.suggest_float("anti_chop_bb_max", 65.0, 90.0, step=1.0),
             "min_reduce_size_conv": trial.suggest_float("min_reduce_size_conv", 58.0, 75.0, step=1.0),
-            "be_activation_r": trial.suggest_float("be_activation_r", 0.60, 1.35, step=0.05),
+            "be_activation_r": trial.suggest_float("be_activation_r", 0.70, 0.90, step=0.05),
         }
         obj_val, _, _ = self.evaluate_cv(params)
         return obj_val

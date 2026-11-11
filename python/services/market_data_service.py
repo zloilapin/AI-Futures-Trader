@@ -141,22 +141,44 @@ class MarketDataService:
         normalized = []
         for c in raw_candles:
             if isinstance(c, dict):
-                normalized.append({
+                c_dict = {
                     "open": float(c.get("open", 0)),
                     "high": float(c.get("high", 0)),
                     "low": float(c.get("low", 0)),
                     "close": float(c.get("close", 0)),
                     "volume": float(c.get("volume", 0))
-                })
+                }
+                raw_ts = c.get("timestamp") or c.get("time") or c.get("t")
+                if raw_ts is not None:
+                    try:
+                        ts_f = float(raw_ts)
+                        if ts_f > 0:
+                            if ts_f > 1e11:
+                                ts_f = ts_f / 1000.0
+                            if ts_f >= 1_700_000_000.0:
+                                c_dict["timestamp"] = ts_f
+                    except (ValueError, TypeError):
+                        pass
+                normalized.append(c_dict)
             elif isinstance(c, (list, tuple)) and len(c) >= 6:
                 # Format: [timestamp, open, high, low, close, volume]
-                normalized.append({
+                c_dict = {
                     "open": float(c[1]),
                     "high": float(c[2]),
                     "low": float(c[3]),
                     "close": float(c[4]),
                     "volume": float(c[5])
-                })
+                }
+                try:
+                    ts_f = float(c[0])
+                    if ts_f > 0:
+                        if ts_f > 1e11:
+                            ts_f = ts_f / 1000.0
+                        if ts_f >= 1_700_000_000.0:
+                            c_dict["timestamp"] = ts_f
+                except (ValueError, TypeError):
+                    pass
+                normalized.append(c_dict)
         return normalized
 
 
@@ -200,13 +222,27 @@ class MarketDataService:
                         await asyncio.sleep(0.5)
                     else:
                         raise net_err
-            parsed = [{
-                "open": float(c.open_x18) / 1e18,
-                "high": float(c.high_x18) / 1e18,
-                "low": float(c.low_x18) / 1e18,
-                "close": float(c.close_x18) / 1e18,
-                "volume": float(c.volume) / 1e18
-            } for c in reversed(candles.candlesticks)]
+            parsed = []
+            for c in reversed(candles.candlesticks):
+                candle_dict = {
+                    "open": float(c.open_x18) / 1e18,
+                    "high": float(c.high_x18) / 1e18,
+                    "low": float(c.low_x18) / 1e18,
+                    "close": float(c.close_x18) / 1e18,
+                    "volume": float(c.volume) / 1e18
+                }
+                raw_ts = getattr(c, "timestamp", None) or getattr(c, "time", None)
+                if raw_ts is not None:
+                    try:
+                        ts_f = float(raw_ts)
+                        if ts_f > 0:
+                            if ts_f > 1e11:
+                                ts_f = ts_f / 1000.0
+                            if ts_f >= 1_700_000_000.0:
+                                candle_dict["timestamp"] = ts_f
+                    except (ValueError, TypeError):
+                        pass
+                parsed.append(candle_dict)
             if parsed:
                 if cache_key in self._candle_cache:
                     cached_time, cached_candles = self._candle_cache[cache_key]
@@ -218,7 +254,9 @@ class MarketDataService:
         except Exception as e:
             self._log(f"⚠️ [MarketDataService] Failed to fetch Nado candles for {symbol}: {e}")
             if cache_key in self._candle_cache:
-                return self._candle_cache[cache_key][1][-limit:]
+                cached_time, cached_candles = self._candle_cache[cache_key]
+                if now - cached_time <= 120.0:
+                    return cached_candles[-limit:]
             return []
 
     async def _fetch_ohlc_interval(self, symbol: str, interval_min: int) -> dict:
@@ -745,6 +783,7 @@ class MarketDataService:
                         "bb_position_pct": bb_position_pct,
                         "bb_pos": bb_position_pct,
                         "volume_spike_pct": volume_spike_pct,
+                        "rvol": round(volume_spike_pct / 100.0, 2),
                         "donchian_high": donchian_high,
                         "donchian_low": donchian_low,
                         "last_closed_candle_close": closes[-2] if len(closes) >= 2 else current_price,
@@ -808,6 +847,7 @@ class MarketDataService:
             "bb_position_pct": 50.0,
             "bb_pos": 50.0,
             "volume_spike_pct": 0.0,
+            "rvol": 1.0,
             "donchian_high": price,
             "donchian_low": price,
             "last_closed_candle_close": price,
@@ -859,7 +899,7 @@ class MarketDataService:
     async def fetch_oi_funding(self, symbol: str) -> Dict[str, Any]:
         """Fetches real Open Interest and funding rates from Nado DEX."""
         if not self.is_nado or not self.nado_client:
-            return {"symbol": symbol, "open_interest": None, "open_interest_trend": "neutral", "funding_rate": None}
+            return {"symbol": symbol, "open_interest": None, "open_interest_trend": "neutral", "oi_change_pct": 0.0, "funding_rate": None}
             
         try:
             import asyncio
@@ -868,7 +908,7 @@ class MarketDataService:
             base_symbol = symbol.split('-')[0].upper()
             product_id = self.product_map.get(base_symbol)
             if product_id is None:
-                return {"symbol": symbol, "open_interest": None, "open_interest_trend": "neutral", "funding_rate": None}
+                return {"symbol": symbol, "open_interest": None, "open_interest_trend": "neutral", "oi_change_pct": 0.0, "funding_rate": None}
                 
             # 1. Real-time OI from engine markets (with transient network retry)
             open_interest = None
@@ -924,6 +964,7 @@ class MarketDataService:
                     
             # 3. Time-Weighted OI Trend (CRITICAL-13 & Audit F-16: Preserve OI and trend even if funding rate snapshot lags)
             oi_trend = "neutral"
+            oi_change_pct = 0.0
             import time
             current_time = time.time()
             if open_interest is not None:
@@ -945,12 +986,22 @@ class MarketDataService:
                     closest_point = min(past_points, key=lambda x: abs(x["ts"] - target_time))
                     prev_oi = closest_point["oi"]
                     if prev_oi > 0:
+                        oi_change_pct = round(((open_interest - prev_oi) / prev_oi) * 100.0, 2)
                         if open_interest > prev_oi * 1.01: # 1% increase
                             oi_trend = "rising"
                         elif open_interest < prev_oi * 0.99: # 1% decrease
                             oi_trend = "falling"
                         else:
                             oi_trend = "stable"
+                elif len(history) >= 2 and float(history[0].get("oi", 0) or 0) > 0:
+                    init_oi = float(history[0]["oi"])
+                    oi_change_pct = round(((open_interest - init_oi) / init_oi) * 100.0, 2)
+                    if oi_change_pct > 1.0:
+                        oi_trend = "rising"
+                    elif oi_change_pct < -1.0:
+                        oi_trend = "falling"
+                    else:
+                        oi_trend = "stable"
                             
                 self._save_oi_history()
 
@@ -960,6 +1011,7 @@ class MarketDataService:
                     "symbol": symbol,
                     "open_interest": open_interest,
                     "open_interest_trend": oi_trend,
+                    "oi_change_pct": oi_change_pct,
                     "funding_rate": None,
                     "funding_rate_decimal": None
                 }
@@ -968,6 +1020,7 @@ class MarketDataService:
                 "symbol": symbol,
                 "open_interest": open_interest,
                 "open_interest_trend": oi_trend,
+                "oi_change_pct": oi_change_pct,
                 "funding_rate": round(funding_rate, 8),
                 "funding_rate_decimal": round(funding_rate, 8),
                 "timestamp": current_time
@@ -975,7 +1028,7 @@ class MarketDataService:
         except Exception as e:
             self._log(f"⚠️ [MarketDataService] Failed to fetch Nado OI/Funding for {symbol}: {e}")
             
-        return {"symbol": symbol, "open_interest": None, "open_interest_trend": "neutral", "funding_rate": None, "funding_rate_decimal": None}
+        return {"symbol": symbol, "open_interest": None, "open_interest_trend": "neutral", "oi_change_pct": 0.0, "funding_rate": None, "funding_rate_decimal": None}
 
     async def fetch_margin_requirements(self, symbol: str) -> Dict[str, Any]:
         """Fetches real maintenance margin parameters and size limits from Nado DEX SDK."""
