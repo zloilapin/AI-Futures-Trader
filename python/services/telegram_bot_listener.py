@@ -20,7 +20,8 @@ if sys.platform == "win32":
 MAIN_REPLY_KEYBOARD = {
     "keyboard": [
         [{"text": "📊 Терминал"}, {"text": "💼 Позиции и SL"}],
-        [{"text": "🧠 AI-Радар"}, {"text": "🔗 Кошелек"}]
+        [{"text": "🧠 AI-Радар"}, {"text": "🐋 Киты Nado"}],
+        [{"text": "🔗 Кошелек"}]
     ],
     "resize_keyboard": True,
     "is_persistent": True
@@ -30,7 +31,7 @@ REPLY_KEYBOARD = {
     "keyboard": [
         [{"text": "▶️ Start"}, {"text": "📊 Терминал"}],
         [{"text": "💼 Позиции и SL"}, {"text": "🧠 AI-Радар"}],
-        [{"text": "🔗 Кошелек"}]
+        [{"text": "🐋 Киты Nado"}, {"text": "🔗 Кошелек"}]
     ],
     "resize_keyboard": True,
     "is_persistent": True
@@ -40,7 +41,7 @@ SHOWCASE_KEYBOARD = {
     "keyboard": [
         [{"text": "▶️ Start"}, {"text": "📊 Терминал"}],
         [{"text": "💼 Позиции и SL"}, {"text": "🧠 AI-Радар"}],
-        [{"text": "🔗 Кошелек"}]
+        [{"text": "🐋 Киты Nado"}, {"text": "🔗 Кошелек"}]
     ],
     "resize_keyboard": True,
     "is_persistent": True
@@ -50,7 +51,7 @@ TRADER_KEYBOARD = {
     "keyboard": [
         [{"text": "▶️ Start"}, {"text": "📊 Терминал"}],
         [{"text": "💼 Позиции и SL"}, {"text": "🧠 AI-Радар"}],
-        [{"text": "🔗 Кошелек"}]
+        [{"text": "🐋 Киты Nado"}, {"text": "🔗 Кошелек"}]
     ],
     "resize_keyboard": True,
     "is_persistent": True
@@ -68,6 +69,15 @@ BUTTON_COMMAND_MAP = {
     "🧠 ai-радар": "/radar",
     "радар": "/radar",
     "ai-радар": "/radar",
+    "🐋 Киты Nado": "/whales",
+    "🐋 киты nado": "/whales",
+    "киты nado": "/whales",
+    "киты": "/whales",
+    "снайперы": "/whales",
+    "топ-снайперы": "/whales",
+    "whales": "/whales",
+    "/whales": "/whales",
+    "/snipers": "/whales",
     "🔗 Кошелек": "/wallet",
     "🔗 кошелек": "/wallet",
     "кошелек": "/wallet",
@@ -265,6 +275,10 @@ class TelegramBotListener:
             [
                 {"text": "🔄 Обновить", "callback_data": "dash_main_ref"},
                 {"text": "💼 Открытые позиции", "callback_data": "dash_positions"}
+            ],
+            [
+                {"text": "🧠 AI-Радар", "callback_data": "dash_radar"},
+                {"text": "🐋 Киты Nado", "callback_data": "radar_whales"}
             ],
             [
                 {"text": "📜 Журнал (5 последних)", "callback_data": "dash_journal"},
@@ -525,7 +539,7 @@ class TelegramBotListener:
             ],
             [
                 {"text": "🏛 Вердикты последнего цикла", "callback_data": "radar_verdicts"},
-                {"text": "🐋 Топ-Снайперы Nado", "callback_data": "radar_whales"}
+                {"text": "🐋 Киты Nado (Снайперы)", "callback_data": "radar_whales"}
             ],
             [
                 {"text": "⬅️ В Терминал", "callback_data": "dash_main"}
@@ -1525,6 +1539,11 @@ class TelegramBotListener:
             elif cmd in ["/radar", "радар"]:
                 text_r, markup_r = await self._get_radar_payload()
                 await self._send_reply(text_r, reply_markup=markup_r, target_chat_id=effective_chat_id)
+                return
+
+            elif cmd in ["/whales", "/snipers", "киты", "киты nado", "whales"]:
+                text_rw, markup_rw = await self._get_radar_whales_payload()
+                await self._send_reply(text_rw, reply_markup=markup_rw, target_chat_id=effective_chat_id)
                 return
 
             elif cmd in ["/wallet", "кошелек"]:
@@ -2787,6 +2806,7 @@ class TelegramBotListener:
                 {"command": "terminal", "description": "📊 Главный терминал и статус биржи"},
                 {"command": "positions", "description": "💼 Открытые позиции, SL/TP и Sentinel"},
                 {"command": "radar", "description": "🧠 AI-Радар и анализ 7 пар Nado DEX"},
+                {"command": "whales", "description": "🐋 Киты Nado и топ-снайперы лидерборда"},
                 {"command": "wallet", "description": "🔗 Кабинет кошелька (LinkSigner/Watch)"},
                 {"command": "start", "description": "▶️ Главное меню и модели AI синдиката"},
                 {"command": "settings", "description": "⚙️ Персональные настройки торговли (Q&A)"},
