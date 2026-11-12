@@ -289,7 +289,7 @@ class TelegramBotListener:
                 {"text": "💼 Открытые позиции", "callback_data": "dash_positions"}
             ],
             [
-                {"text": "🧠 AI-Радар", "callback_data": "dash_radar"},
+                {"text": "📡 AI-Радар", "callback_data": "dash_radar"},
                 {"text": "🐋 Киты Nado", "callback_data": "radar_whales"}
             ],
             [
@@ -533,13 +533,13 @@ class TelegramBotListener:
                 pass
 
         token_badges = {
-            "BTC-USD": "🪙 Bitcoin",
-            "ETH-USD": "💎 Ethereum",
-            "SOL-USD": "⚡ Solana",
-            "HYPE-USD": "🔥 Hyperliquid",
-            "ZEC-USD": "🛡️ Zcash",
-            "LIT-USD": "✨ Litentry",
-            "BNB-USD": "🔶 BNB Chain",
+            "BTC-USD": "🪙 BTC",
+            "ETH-USD": "💎 ETH",
+            "SOL-USD": "⚡ SOL",
+            "HYPE-USD": "🔥 HYPE",
+            "ZEC-USD": "🛡️ ZEC",
+            "LIT-USD": "✨ LIT",
+            "BNB-USD": "🔶 BNB",
         }
 
         def _get_trend_badge(adx_val: float) -> str:
@@ -548,45 +548,76 @@ class TelegramBotListener:
             elif adx_val >= 22.0:
                 return "В тренде 📈"
             else:
-                return "Флэт ↔️"
+                return "Боковик ↔️"
 
         def _translate_verdict(action: str, rej_tag: Optional[str]) -> str:
             if action in ["BUY", "ENTER", "LONG"]:
-                return "🟢 Вход в LONG (Подтвержден Синдикатом)"
+                return "🟢 Вход в LONG"
             elif action in ["SELL", "SHORT"]:
-                return "🔴 Вход в SHORT (Подтвержден Синдикатом)"
+                return "🔴 Вход в SHORT"
 
             if not rej_tag or rej_tag in ["CLEAN", "NO_SIGNAL", "OK"]:
-                return "👁 Сканирование паттернов входа"
+                return "Поиск точки входа"
 
             rej_map = {
-                "WAIT_PULLBACK": "⏳ Ожидание отката к поддержке (EMA-20)",
-                "PULLBACK_CANDIDATE": "⏳ Поиск оптимальной точки отката",
-                "VOLATILITY_BURST": "⚡ Всплеск волатильности (защита от ложного пробоя)",
-                "CHOP_FILTER": "🛡 Фильтр распила волатильности (боковик)",
-                "MACRO_REGIME_VETO": "🛡 Вето макро-режима (боковой тренд)",
-                "UNKNOWN_REGIME_VETO": "🛡 Вето режима: калибровка индикаторов",
-                "RANGE_BOUND": "↔️ Торговля в редже (без пробоя границ)",
-                "ORDER_BOOK_IMBALANCE": "⚖️ Дисбаланс глубины биржевого стакана",
-                "MIN_NOTIONAL": "🔍 Калибровка минимального лота Nado CLOB",
-                "MAX_DRAWDOWN": "🛑 Стоп-кран суточной просадки",
-                "TREND_EXHAUSTED": "⚠️ Затухание импульса тренда",
-                "OVERBOUGHT": "⚠️ Локальная перекупленность (риск разворота)",
-                "OVERSOLD": "⚠️ Локальная перепроданность (поиск дна)",
-                "SENTINEL_LOCKED": "🔒 Слот занят активной позицией",
+                "WAIT_PULLBACK": "Ожидание отката к EMA",
+                "PULLBACK_CANDIDATE": "Поиск точки отката",
+                "VOLATILITY_BURST": "Защита от всплеска",
+                "CHOP_FILTER": "Фильтр боковика (распил)",
+                "MACRO_REGIME_VETO": "Фильтр макро-тренда",
+                "UNKNOWN_REGIME_VETO": "Калибровка индикаторов",
+                "RANGE_BOUND": "Движение в рендже",
+                "ORDER_BOOK_IMBALANCE": "Дисбаланс стакана",
+                "MIN_NOTIONAL": "Калибровка лота Nado",
+                "MAX_DRAWDOWN": "Защита от просадки",
+                "TREND_EXHAUSTED": "Затухание тренда",
+                "OVERBOUGHT": "Локальная перекупленность",
+                "OVERSOLD": "Локальная перепроданность",
+                "SENTINEL_LOCKED": "В позиции рынка",
+                "DIRECTIONAL_CLUSTER_CAP": "Лимит кластера (2 SHORT)",
             }
             if rej_tag in rej_map:
                 return rej_map[rej_tag]
 
             clean_tag = str(rej_tag).replace("_", " ").title()
-            return f"⚪ Выжидание ({clean_tag})"
+            return f"Выжидание ({clean_tag})"
+
+        active_positions = getattr(self.trading_service, "active_positions", {})
+        if not active_positions:
+            try:
+                active_positions = StateStore.load("data/memory/active_positions.json", default={})
+            except Exception:
+                active_positions = {}
 
         lines = [
-            "🧠 *ARANEA AI | МАКРО-РАДАР РЫНКА*\n"
-            "_Мульти-таймфрейм анализ (15m, 1H, 4H) • 7 пар Nado DEX_\n"
+            "📡 *ARANEA AI | КВАНТОВЫЙ РАДАР РЫНКА*\n"
+            "_24/7 Автономный сканер • Мульти-таймфрейм (15m, 1H, 4H)_\n"
             "────────────────────────────────────────────"
         ]
 
+        if active_positions:
+            lines.append("💼 *ОТКРЫТЫЕ ПОЗИЦИИ В РЫНКЕ:*")
+            for sym, pos in active_positions.items():
+                side = str(pos.get("side", "UNKNOWN")).upper()
+                side_badge = "🟢 LONG" if side == "LONG" else "🔴 SHORT"
+                entry_p = float(pos.get("entry_price", 0.0) or 0.0)
+                sl_p = float(pos.get("stop_loss", 0.0) or pos.get("sl_price", 0.0) or 0.0)
+                sl_badge = f"SL: `${sl_p:,.2f}`" if sl_p > 0 else "Sentinel SL"
+                badge = token_badges.get(sym, sym)
+                lines.append(f"  • {badge}: `{side_badge}` │ Вход: `${entry_p:,.2f}` │ {sl_badge}")
+            lines.append("")
+
+        if pw_dict:
+            lines.append("⏳ *ЛИСТ ОЖИДАНИЯ ОТКАТА (PULLBACK):*")
+            for psym, pitem in pw_dict.items():
+                pbadge = token_badges.get(psym, psym)
+                pdir = pitem.get("direction", "WAIT")
+                pentry = float(pitem.get("entry_zone", 0.0) or pitem.get("target_price", 0.0) or 0.0)
+                entry_hint = f"цель `${pentry:,.2f}`" if pentry > 0 else "тест EMA"
+                lines.append(f"  • {pbadge}: `⏳ Ожидание {pdir}` ({entry_hint})")
+            lines.append("")
+
+        lines.append("🔍 *МОНИТОРИНГ ВСЕЛЕННОЙ АКТИВОВ:*")
         for sym in tracked_pairs:
             d = latest_by_sym.get(sym, {})
             mgi = d.get("market_guard_inputs") or {}
@@ -594,27 +625,29 @@ class TelegramBotListener:
             adx_num = float(adx_val) if isinstance(adx_val, (int, float)) else 28.5
             adx_str = f"{adx_num:.1f}"
 
-            bb_val = d.get("bb_pos") if d.get("bb_pos") is not None else (d.get("bb_pos_pct") if d.get("bb_pos_pct") is not None else mgi.get("bb_position_pct"))
-            bb_num = float(bb_val) if isinstance(bb_val, (int, float)) else 45.0
-            bb_str = f"{bb_num:.1f}%"
-
-            action = d.get("final_action", "NO_SIGNAL")
-            rej = d.get("rejection_tag")
-
             badge = token_badges.get(sym, sym)
             trend_str = _get_trend_badge(adx_num)
-            verdict_str = _translate_verdict(action, rej)
 
-            lines.append(
-                f"*{badge}* • {trend_str} (ADX `{adx_str}`)\n"
-                f"   └ _{verdict_str}_"
-            )
+            if sym in active_positions:
+                verdict_str = "🔒 Позиция в рынке"
+            elif sym in pw_dict:
+                verdict_str = "⏳ Ожидание ретеста"
+            else:
+                action = d.get("final_action", "NO_SIGNAL")
+                rej = d.get("rejection_tag")
+                verdict_str = _translate_verdict(action, rej)
 
-        pw_count = len(pw_dict)
-        pw_str = ", ".join(pw_dict.keys()) if pw_dict else "пуст (все пары в штатном режиме)"
+            lines.append(f"  • {badge:<7} │ {trend_str} (ADX `{adx_str}`) │ _{verdict_str}_")
+
+        from core.config import config
+        max_slots = int(getattr(config, "MAX_CONCURRENT_POSITIONS", 3))
+        active_count = len(active_positions)
+        slot_icons = "".join(["🟢" if i < active_count else "⚪" for i in range(max_slots)])
         lines.append("────────────────────────────────────────────")
-        lines.append(f"⏳ *Pullback Watchlist ({pw_count}):* `{pw_str}`")
-        lines.append("💡 _AI-Радар сверяет сетапы с позициями топ-снайперов Nado DEX._")
+        lines.append("📊 *СВОДКА СИНДИКАТА:*")
+        lines.append(f"  • Слоты риска: `[ {active_count} / {max_slots} ] {slot_icons}`")
+        lines.append("  • Быстрый импульсный радар: `Каждые 45с (0 токенов)`")
+        lines.append("  • Полный консилиум CEO: `Каждые 30 мин (DeepSeek + Llama)`")
 
         buttons = [
             [
@@ -995,40 +1028,159 @@ class TelegramBotListener:
         return text, markup
 
     async def _get_debates_payload(self) -> Tuple[str, dict]:
-        import glob, json
-        cycle_files = sorted(glob.glob("data/memory/cycle_*.json"))
-        cycle_data = None
-        if cycle_files:
+        from core.state_store import StateStore
+        import glob, json, os, time
+        from datetime import datetime, timezone
+
+        # 1. Search for candidate snapshots with CEO/Debate in decision_snapshots.jsonl
+        snap_path = StateStore._normalize_path("data/memory/decision_snapshots.jsonl")
+        latest_snap = None
+        if os.path.exists(snap_path):
             try:
-                with open(cycle_files[-1], "r", encoding="utf-8") as f:
-                    cycle_data = json.load(f)
+                with open(snap_path, "r", encoding="utf-8", errors="ignore") as f:
+                    lines = f.readlines()
+                    for line in reversed(lines):
+                        l = line.strip()
+                        if not l:
+                            continue
+                        try:
+                            d = json.loads(l)
+                            if d.get("ceo") or d.get("debate") or d.get("ceo_decision"):
+                                latest_snap = d
+                                break
+                        except Exception:
+                            continue
             except Exception:
                 pass
 
-        if cycle_data:
-            sym = cycle_data.get("symbol", "N/A")
-            ceo = cycle_data.get("ceo_decision", {})
-            action = ceo.get("trade_action") or ceo.get("action") or "HOLD"
+        # 2. Search for cycle_*.json files in both normalized and root storage paths
+        search_dirs = [
+            StateStore._normalize_path("data/memory"),
+            "data/memory"
+        ]
+        cycle_files = []
+        for s_dir in search_dirs:
+            if os.path.exists(s_dir):
+                cycle_files.extend(glob.glob(os.path.join(s_dir, "cycle_*.json")))
+
+        def _safe_mtime(f_path: str) -> float:
+            try:
+                return os.path.getmtime(f_path)
+            except Exception:
+                return 0.0
+
+        cycle_files = sorted(list(set(cycle_files)), key=_safe_mtime)
+
+        latest_cycle_data = None
+        latest_cycle_mtime = 0.0
+        if cycle_files:
+            latest_f = cycle_files[-1]
+            try:
+                latest_cycle_mtime = os.path.getmtime(latest_f)
+            except Exception:
+                latest_cycle_mtime = 0.0
+            try:
+                with open(latest_f, "r", encoding="utf-8") as f:
+                    latest_cycle_data = json.load(f)
+            except Exception:
+                pass
+
+        # 3. Determine which source is freshest
+        snap_ts = 0.0
+        if latest_snap:
+            snap_ts = float(latest_snap.get("timestamp") or 0.0)
+            if not snap_ts and latest_snap.get("iso_time"):
+                try:
+                    dt = datetime.fromisoformat(latest_snap["iso_time"])
+                    snap_ts = dt.timestamp()
+                except Exception:
+                    pass
+
+        # Compare timestamps: pick the newest record
+        chosen_source = "none"
+        if latest_snap and latest_cycle_data:
+            if snap_ts >= (latest_cycle_mtime - 5.0):
+                chosen_source = "snapshot"
+            else:
+                chosen_source = "cycle"
+        elif latest_snap:
+            chosen_source = "snapshot"
+        elif latest_cycle_data:
+            chosen_source = "cycle"
+
+        # 4. Extract data based on chosen source
+        if chosen_source == "snapshot":
+            sym = latest_snap.get("symbol", "N/A")
+            ceo = latest_snap.get("ceo") or {}
+            strat = (latest_snap.get("router") or {}).get("strategy_mode") or latest_snap.get("macro_regime", "TREND_FOLLOWING")
             decision = ceo.get("decision", "HOLD")
-            conf = ceo.get("directional_confidence", 0) or ceo.get("conviction", 0)
-            reason = ceo.get("reasoning_en") or ceo.get("reasoning_ru") or "Анализ завершен консилиумом."
-            safe_reason = str(reason)[:400].replace("_", "-").replace("*", "")
+            action = ceo.get("trade_action") or latest_snap.get("final_action", "HOLD")
+            conf = ceo.get("directional_confidence") or ceo.get("conviction", 0)
+            penalties = (ceo.get("risk_breakdown") or {}).get("total") or ceo.get("risk_penalties", 0)
+            reason = ceo.get("reasoning") or ceo.get("reasoning_en") or "Анализ завершен консилиумом."
+            ts_val = snap_ts
+            stage_info = latest_snap.get("stage", "CONSENSUS")
+            rej_tag = latest_snap.get("rejection_tag")
+        elif chosen_source == "cycle":
+            sym = latest_cycle_data.get("symbol", "N/A")
+            ceo = latest_cycle_data.get("ceo_decision") or {}
             strat = ceo.get("strategy_mode", "TREND_FOLLOWING")
-            penalties = ceo.get("risk_penalties", 0)
+            decision = ceo.get("decision", "HOLD")
+            action = ceo.get("trade_action") or ceo.get("action") or "HOLD"
+            conf = ceo.get("directional_confidence") or ceo.get("conviction", 0)
+            penalties = ceo.get("risk_penalties") or (ceo.get("risk_breakdown") or {}).get("total", 0)
+            reason = ceo.get("reasoning_en") or ceo.get("reasoning_ru") or "Анализ завершен консилиумом."
+            ts_val = latest_cycle_mtime
+            stage_info = latest_cycle_data.get("status", "CONSENSUS")
+            rej_tag = ceo.get("rejection_tag")
+        else:
+            sym = None
+
+        if sym:
+            # Format human readable time and elapsed
+            time_str = "Недавно"
+            elapsed_str = ""
+            if ts_val > 0:
+                dt_utc = datetime.fromtimestamp(ts_val, tz=timezone.utc)
+                time_str = dt_utc.strftime("%d.%m.%Y, %H:%M UTC")
+                diff_sec = max(0, int(time.time() - ts_val))
+                if diff_sec < 60:
+                    elapsed_str = f"({diff_sec} сек назад)"
+                elif diff_sec < 3600:
+                    elapsed_str = f"({diff_sec // 60} мин назад)"
+                elif diff_sec < 86400:
+                    elapsed_str = f"({diff_sec // 3600} ч назад)"
+
+            # Format status badge
+            if action in ["ENTER", "BUY", "SELL"] and stage_info in ["APPROVED", "EXECUTION"]:
+                status_badge = "🟢 Сделка одобрена и исполнена"
+            elif action == "WAIT_FOR_PULLBACK":
+                status_badge = "⏳ Помещен в лист ожидания отката (Pullback)"
+            elif rej_tag:
+                clean_rej = str(rej_tag).replace("_", " ")
+                status_badge = f"🛡️ Вето фильтра ({clean_rej})"
+            elif action == "HOLD":
+                status_badge = "⚪ Позиция не открыта (Выжидание сетапа)"
+            else:
+                status_badge = f"ℹ️ Статус: {action}"
+
+            safe_reason = str(reason)[:500].replace("_", "-").replace("*", "")
 
             text = (
                 "🧠 *СИНДИКАТ ИИ | ДЕБАТЫ И КОНСЕНСУС CEO*\n"
-                f"_Последний проверенный символ:_ *{sym}*\n"
+                f"🕒 _Время анализа:_ `{time_str}` {elapsed_str}\n"
+                f"🪙 _Рассмотренный актив:_ *{sym}*\n"
                 "────────────────────────────────────────────\n"
                 f"• *Стратегический режим:*    `{strat}`\n"
                 f"• *Направление и вердикт:*   `{decision}` (`{action}`)\n"
                 f"• *Уверенность (Conviction):* `{conf}%`\n"
                 f"• *Штрафы риска (Penalties):* `{penalties} pts`\n"
+                f"• *Статус пайплайна:*         {status_badge}\n"
                 "────────────────────────────────────────────\n"
                 f"📝 *Тезис решения (CEO Thesis):*\n"
                 f"_{safe_reason}_\n"
                 "────────────────────────────────────────────\n"
-                "⚖️ _Синдикат: Gemini 2.5 (Bull/Bear) • Llama 3.3 70B (OI/Depth) • DeepSeek-V3 (Consensus)_"
+                "⚖️ _Синдикат: DeepSeek-V3 (Bull/Bear/CEO) • Llama 3.3 70B (Arbitration)_"
             )
         else:
             text = (
