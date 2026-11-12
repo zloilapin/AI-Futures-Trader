@@ -2070,6 +2070,9 @@ class NadoTradingService(BaseTradingService):
         self._portfolio_summary_cache_time = 0
         if hasattr(self, "_portfolio_summary_cache"):
             delattr(self, "_portfolio_summary_cache")
+        if hasattr(self, "pending_reconciliations") and isinstance(self.pending_reconciliations, dict):
+            self.pending_reconciliations.clear()
+            self._save_pending_reconciliations()
         self._save_state()
         logger.info(f"[NadoTradingService] 🔄 Ledger reset. Initial balance re-anchored to ${self._initial_balance:.2f}. Win/Loss counters reset to 0W / 0L.")
 
