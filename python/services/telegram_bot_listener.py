@@ -220,7 +220,8 @@ class TelegramBotListener:
 
         positions = getattr(self.trading_service, "active_positions", {})
         active_count = len(positions)
-        max_slots = 2
+        from core.config import config
+        max_slots = int(getattr(config, "MAX_CONCURRENT_POSITIONS", 3))
 
         from core.state_store import StateStore
         import json
@@ -394,11 +395,13 @@ class TelegramBotListener:
 
         # 2. If user is guest/subscriber without open trades, or admin
         master_positions = getattr(self.trading_service, "active_positions", {})
+        from core.config import config
+        max_slots = int(getattr(config, "MAX_CONCURRENT_POSITIONS", 3))
         if not master_positions:
             text = (
                 "💼 *АКТИВНЫЕ ПОЗИЦИИ И SENTINEL GUARD*\n"
                 "────────────────────────────────────────────\n"
-                "⚪ *В данный момент экспозиция нулевая (0/2 слотов)*\n"
+                f"⚪ *В данный момент экспозиция нулевая (0/{max_slots} слотов)*\n"
                 "Капитал находится в 100% безопасности в USDC.\n\n"
                 "🛡 *СТАТУС КОНТУРОВ ЗАЩИТЫ:*\n"
                 "  • *Sentinel Execution:* `🟢 Активен (контроль 24/7 каждые 1.5с)`\n"
