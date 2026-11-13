@@ -637,14 +637,17 @@ class NadoTradingService(BaseTradingService):
         canonical_sym = f"{base_sym}-USD"
         symbol = canonical_sym  # Canonicalize symbol to prevent dual-key memory/disk desync
 
-        # Guard: Strict duplicate position prevention
-        if any(k in self.active_positions for k in [canonical_sym, base_sym, clean_sym]):
-            logger.warning(
-                f"[NadoTradingService] ⚠️ Позиция по {symbol} уже открыта в active_positions! "
-                f"Блокировка дублирующего ордера для защиты капитала."
-            )
-            self.last_execution_status = "DUPLICATE_POSITION_BLOCKED"
-            return False
+        # Guard: Strict duplicate position prevention across keys and dict values
+        for pos_k, pos_v in list(self.active_positions.items()):
+            p_sym = str(pos_v.get("symbol") or pos_k or "").replace('/', '-').strip().upper() if isinstance(pos_v, dict) else str(pos_k).replace('/', '-').strip().upper()
+            p_base = p_sym.split('-')[0].upper() if p_sym else ""
+            if any(cand in [pos_k, p_sym, p_base] for cand in [canonical_sym, base_sym, clean_sym]):
+                logger.warning(
+                    f"[NadoTradingService] ⚠️ Позиция по {symbol} (key={pos_k}, base={p_base}) уже открыта в active_positions! "
+                    f"Блокировка дублирующего ордера для защиты капитала."
+                )
+                self.last_execution_status = "DUPLICATE_POSITION_BLOCKED"
+                return False
 
         # Input numeric sanitization: reject NaN, Inf, or non-positive critical values
         if not math.isfinite(entry_price) or entry_price <= 0:
@@ -758,6 +761,21 @@ class NadoTradingService(BaseTradingService):
                 self.last_execution_details = {"reason": f"Unknown symbol {symbol}"}
                 return False
 
+            # BLOCK 05: Duplicate position prevention in execute_order
+            canonical_sym = symbol.replace('/', '-').strip().upper()
+            base_symbol = canonical_sym.split('-')[0].upper()
+            for pos_k, pos_v in list(self.active_positions.items()):
+                p_sym = str(pos_v.get("symbol") or pos_k or "").replace('/', '-').strip().upper() if isinstance(pos_v, dict) else str(pos_k).replace('/', '-').strip().upper()
+                p_base = p_sym.split('-')[0].upper() if p_sym else ""
+                if any(cand in [pos_k, p_sym, p_base] for cand in [canonical_sym, base_symbol]):
+                    logger.error(
+                        f"[NadoTradingService] ❌ DUPLICATE_POSITION_BLOCKED: Position for {symbol} ({base_symbol}) "
+                        f"already exists in active_positions (key: {pos_k}). Aborting execution."
+                    )
+                    self.last_execution_status = "DUPLICATE_POSITION_BLOCKED"
+                    self.last_execution_details = {"reason": "DUPLICATE_POSITION", "symbol": symbol, "active_key": pos_k}
+                    return False
+
             # Enforce Minimum Viable Floor ($35.00) in both Shadow and Live modes
             final_notional = float(notional_usd if notional_usd > 0 else (contracts * entry_price))
             min_viable_floor = float(getattr(config, "MIN_NOTIONAL_FLOOR_USD", 35.0) or 35.0)
@@ -782,6 +800,7 @@ class NadoTradingService(BaseTradingService):
                     f"at ${entry_price:.4f} (Notional: ${notional_usd:.2f}, L={leverage}x). Mock Digest: {mock_digest}"
                 )
                 self.active_positions[symbol] = {
+                    "position_id": f"{symbol}_{int(time.time()*1000)}",
                     "symbol": symbol,
                     "direction": direction,
                     "entry_price": entry_price,
@@ -806,6 +825,9 @@ class NadoTradingService(BaseTradingService):
                     "approved_risk_usd": approved_risk_usd,
                     "is_shadow": True,
                     "is_virtual": True,
+                    "three_stage_trailing": True,
+                    "half_risk_activation_r": 0.75,
+                    "be_activation_r": 1.15,
                     "use_software_tpsl": bool(use_software_tpsl or software_sl_tp_only or notional_usd < 100.0),
                     "software_sl_tp_only": bool(use_software_tpsl or software_sl_tp_only or notional_usd < 100.0),
                     "sl_protection_mode": "SOFTWARE_ONLY" if (use_software_tpsl or software_sl_tp_only or notional_usd < 100.0) else "EXCHANGE_PROTECTED",
@@ -901,31 +923,35 @@ class NadoTradingService(BaseTradingService):
                 price_x18 = ((price_x18 + price_increment - 1) // price_increment) * price_increment
             final_limit_price = float(Decimal(price_x18) / Decimal(10**18))
             
-            # CLOB Pre-dispatch Verification: abs(amount) * order_limit_price >= $101.00
+            # CLOB Pre-dispatch Verification: abs(amount) * order_limit_price >= $102.00 (Block 04)
             order_limit_price = final_limit_price
             current_order_contracts = float(Decimal(abs_amount_x18) / Decimal(10**18))
-            if order_limit_price > 0 and (current_order_contracts * order_limit_price) < 101.0:
+            if order_limit_price > 0 and (current_order_contracts * order_limit_price) < 102.0:
                 size_inc_float = float(Decimal(size_increment) / Decimal(10**18))
                 if size_inc_float > 0 and (notional_usd >= 95.0 or (current_order_contracts * order_limit_price) >= 35.0):
-                    needed_contracts = math.ceil(101.0 / order_limit_price / size_inc_float) * size_inc_float
+                    needed_contracts = math.ceil(102.0 / order_limit_price / size_inc_float) * size_inc_float
                     abs_amount_x18 = int(Decimal(str(round(needed_contracts, 8))) * Decimal(10**18))
                     abs_amount_x18 = (abs_amount_x18 // size_increment) * size_increment
                     amount_x18 = abs_amount_x18 if amount_x18 >= 0 else -abs_amount_x18
                     if needed_contracts > current_order_contracts:
                         taker_fee_val = float(taker_fee_pct or 0.0005)
                         bumped_risk = needed_contracts * abs(entry_price - float(sl_price)) + needed_contracts * (entry_price + float(sl_price)) * taker_fee_val
-                        max_allowed_risk = float(approved_risk_usd) * 1.35
+                        max_allowed_risk = 1.35 if (str(locals().get("trade_action", "")).upper() == "REDUCE_SIZE") else float(approved_risk_usd) * 1.35
+                        if (str(locals().get("trade_action", "")).upper() == "REDUCE_SIZE") and bumped_risk > 1.35:
+                            logger.error(f"[NadoTradingService] ❌ REDUCE_SIZE_RISK_CAP_VETO: Pre-dispatch bump risk (${bumped_risk:.2f}) exceeds $1.35 cap.")
+                            self.last_execution_status = "REDUCE_SIZE_RISK_CAP_VETO"
+                            return False
                         new_approved_risk = min(max_allowed_risk, max(float(approved_risk_usd), bumped_risk))
                         logger.info(
                             f"[NadoTradingService] ⚡ Predispatch CLOB adjustment: Adjusted order amount from {current_order_contracts} to {needed_contracts} "
-                            f"contracts (limit notional ${needed_contracts * order_limit_price:.2f} >= $101.00) to guarantee passing Nado DEX min_size. "
+                            f"contracts (limit notional ${needed_contracts * order_limit_price:.2f} >= $102.00) to guarantee passing Nado DEX min_size. "
                             f"Synchronized approved_risk_usd: ${float(approved_risk_usd):.2f} -> ${new_approved_risk:.2f}."
                         )
                         approved_risk_usd = new_approved_risk
                     else:
                         logger.info(
                             f"[NadoTradingService] ⚡ Predispatch CLOB adjustment: Adjusted order amount from {current_order_contracts} to {needed_contracts} "
-                            f"contracts (limit notional ${needed_contracts * order_limit_price:.2f} >= $101.00) to guarantee passing Nado DEX min_size."
+                            f"contracts (limit notional ${needed_contracts * order_limit_price:.2f} >= $102.00) to guarantee passing Nado DEX min_size."
                         )
             
             if amount_x18 == 0:
@@ -1519,6 +1545,7 @@ class NadoTradingService(BaseTradingService):
             notional_usd = actual_base_amount * actual_entry_price
             
             self.active_positions[symbol] = {
+                "position_id": f"{symbol}_{int(time.time()*1000)}",
                 "symbol": symbol,
                 "direction": direction.upper(),
                 "entry_price": actual_entry_price,
@@ -1857,8 +1884,10 @@ class NadoTradingService(BaseTradingService):
                 "native_sl_placed": has_native_sl,
                 "native_tp_placed": has_native_tp,
                 "native_triggers_placed": bool(has_native_sl and has_native_tp),
-                "be_activation_r": float(get_tuned_param("be_activation_r", 0.75)),
-                "tp1_r_mult": float(get_tuned_param("be_activation_r", 0.75))
+                "three_stage_trailing": True,
+                "half_risk_activation_r": 0.75,
+                "be_activation_r": float(get_tuned_param("be_activation_r", 1.15)),
+                "tp1_r_mult": float(get_tuned_param("be_activation_r", 1.15))
             })
             if tp_price > 0:
                 try:
@@ -2331,7 +2360,10 @@ class NadoTradingService(BaseTradingService):
         pnl_source = pos_data.get("pnl_source", "EXACT")
 
         trade_entry = {
+            "position_id": str(pos_data.get("position_id") or f"{symbol}_{int(pos_data.get('open_time', time.time())*1000)}"),
             "timestamp": time.time(),
+            "close_time": time.time(),
+            "close_reason": triggered_by,
             "symbol": symbol,
             "direction": direction,
             "entry_price": round(float(entry_price or 0.0), 6),
@@ -5739,11 +5771,72 @@ class NadoTradingService(BaseTradingService):
         except Exception as e:
             logger.error(f"[NadoTradingService] ❌ Failed to sync with Nado: {e}")
 
-    async def update_stop_loss_to_be(self, symbol: str) -> bool:
+    async def update_stop_loss_half_risk(self, symbol: str) -> bool:
         """
-        Moves the stop loss to Breakeven (+ maker/taker fee buffer) for a position
+        Stage 1 Half Risk Lock (+0.75R MFE):
+        Compresses initial risk by moving SL from -1.00R to -0.40R,
+        locking out 60% of initial risk while giving the trade room to survive 15m structural retests.
+        """
+        canonical_sym = symbol.replace('/', '-').strip().upper()
+        if '-' not in canonical_sym:
+            canonical_sym = f"{canonical_sym}-USD"
+
+        pos = self.active_positions.get(canonical_sym) or self.active_positions.get(symbol)
+        if not pos:
+            logger.warning(f"[NadoTradingService] Cannot move SL to Half Risk: position {symbol} not found.")
+            return False
+
+        entry_price = float(pos.get("entry_price") or 0.0)
+        direction = str(pos.get("direction", "LONG")).upper()
+        if entry_price <= 0:
+            return False
+
+        product_id = pos.get("product_id") or self.product_map.get(canonical_sym.split('-')[0].upper())
+        params = self._get_market_parameters(product_id) if product_id is not None else {}
+        price_inc = float(params.get("price_increment_x18", 0)) / 1e18 if params.get("price_increment_x18") else 0.001
+
+        p_risk = float(pos.get("planned_risk_usd", 0.0) or pos.get("approved_risk_usd", 0.0) or 0.0)
+        cnt = float(pos.get("contracts", 0.0) or pos.get("amount", 0.0) or 0.0)
+        sl_init = float(pos.get("initial_sl", 0.0) or 0.0)
+        if sl_init > 0:
+            planned_r_dist = abs(entry_price - sl_init)
+        elif p_risk > 0 and cnt > 0:
+            planned_r_dist = p_risk / cnt
+        else:
+            planned_r_dist = entry_price * 0.01
+
+        current_sl = float(pos.get("sl_price", 0.0) or 0.0)
+        if direction == "LONG":
+            raw_target = entry_price - (0.40 * planned_r_dist)
+            target_price = math.floor(raw_target / price_inc) * price_inc if price_inc > 0 else raw_target
+            if current_sl > 0 and current_sl >= target_price:
+                return True
+        else:
+            raw_target = entry_price + (0.40 * planned_r_dist)
+            target_price = math.ceil(raw_target / price_inc) * price_inc if price_inc > 0 else raw_target
+            if current_sl > 0 and current_sl <= target_price:
+                return True
+
+        target_price = round(target_price, 6)
+        logger.info(
+            f"[NadoTradingService] 🛡️ Activating Stage 1 Half Risk Lock (-0.40R) for {canonical_sym}: "
+            f"Entry: {entry_price:.4f} -> SL Target: {target_price:.4f}."
+        )
+        success = await self.update_stop_loss(
+            symbol=canonical_sym,
+            new_sl_price=target_price,
+            force_resize=False
+        )
+        if success:
+            pos["protection_state"] = "HALF_RISK_LOCK"
+            self._save_positions()
+        return success
+
+    async def update_stop_loss_to_be(self, symbol: str, buffer_r: float = 0.20) -> bool:
+        """
+        Moves the stop loss to Breakeven (+ maker/taker fee buffer and +0.20R buffer) for a position
         and resizes the exchange trigger order to the remaining contracts.
-        Phase 4: Triggered when Tier 2 (50% TP) is achieved.
+        Phase 4 / Stage 2: Triggered when +1.15R MFE is achieved.
         """
         canonical_sym = symbol.replace('/', '-').strip().upper()
         if '-' not in canonical_sym:
@@ -5763,14 +5856,26 @@ class NadoTradingService(BaseTradingService):
         params = self._get_market_parameters(product_id) if product_id is not None else {}
         price_inc = float(params.get("price_increment_x18", 0)) / 1e18 if params.get("price_increment_x18") else 0.001
 
-        # Calculate BE with fee buffer (0.1% round-trip fee)
+        # Calculate BE with fee buffer (0.1% round-trip fee) plus buffer_r
         fee_pct = 0.001
         cost_buffer = entry_price * fee_pct
+
+        p_risk = float(pos.get("planned_risk_usd", 0.0) or pos.get("approved_risk_usd", 0.0) or 0.0)
+        cnt = float(pos.get("contracts", 0.0) or pos.get("amount", 0.0) or 0.0)
+        sl_init = float(pos.get("initial_sl", 0.0) or 0.0)
+        if sl_init > 0:
+            planned_r_dist = abs(entry_price - sl_init)
+        elif p_risk > 0 and cnt > 0:
+            planned_r_dist = p_risk / cnt
+        else:
+            planned_r_dist = entry_price * 0.01
+
+        buffer_dist = max(cost_buffer, buffer_r * planned_r_dist) if buffer_r > 0 else cost_buffer
         if direction == "LONG":
-            raw_be = entry_price + cost_buffer
+            raw_be = entry_price + buffer_dist
             be_price = math.ceil(raw_be / price_inc) * price_inc if price_inc > 0 else raw_be
         else:
-            raw_be = entry_price - cost_buffer
+            raw_be = entry_price - buffer_dist
             be_price = math.floor(raw_be / price_inc) * price_inc if price_inc > 0 else raw_be
 
         be_price = round(be_price, 6)
@@ -6606,7 +6711,9 @@ class NadoTradingService(BaseTradingService):
                                 if cur_mfe_r > float(pos.get("max_favorable_excursion_r", 0.0) or 0.0):
                                     pos["max_favorable_excursion_r"] = cur_mfe_r
 
-                                be_trigger_r = float(pos.get("be_activation_r") or 0.75)
+                                # Three-Stage Profit Protection (Stage 1 @ 0.75R, Stage 2 @ 1.15R)
+                                half_risk_r = float(pos.get("half_risk_activation_r") or 0.75)
+                                be_trigger_r = float(pos.get("be_activation_r") or 1.15)
                                 prot_st = str(pos.get("protection_state") or "").upper()
                                 if (
                                     cur_mfe_r >= be_trigger_r
@@ -6618,6 +6725,18 @@ class NadoTradingService(BaseTradingService):
                                     pos["protection_state"] = "PENDING_BREAK_EVEN"
                                     self._save_positions()
                                     asyncio.create_task(self.update_stop_loss_to_be(symbol))
+                                elif (
+                                    cur_mfe_r >= half_risk_r
+                                    and cur_mfe_r < be_trigger_r
+                                    and not pos.get("half_risk_moved")
+                                    and not pos.get("be_moved")
+                                    and not pos.get("is_closing")
+                                    and prot_st not in ("HALF_RISK_LOCK", "BREAK_EVEN", "SOFTWARE_BREAK_EVEN", "TRAILING", "PENDING_BREAK_EVEN")
+                                ):
+                                    pos["half_risk_moved"] = True
+                                    pos["protection_state"] = "HALF_RISK_LOCK"
+                                    self._save_positions()
+                                    asyncio.create_task(self.update_stop_loss_half_risk(symbol))
 
                             # Software SL/TP Trigger Check (ALWAYS ACTIVE as a safety net)
                             # We check this regardless of sl_digest to cover exchange failures, dropped orders, or replacement windows

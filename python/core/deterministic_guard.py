@@ -141,6 +141,137 @@ class DeterministicGuard:
         }
 
     @staticmethod
+    def evaluate_analyst_quorum(
+        direction: str,
+        analyst_reports: Optional[Any]
+    ) -> Tuple[bool, Optional[str], Optional[str]]:
+        """
+        Deterministic ANALYST_QUORUM_GATE (Block 03 Post-Audit Patch):
+        Evaluates the 4 technical sub-agents (Candle_Agent, Order_Book_Agent, OI_Funding_Agent, Indicator_Agent):
+        1. Counter-Momentum Divergence Veto:
+           If BOTH Candle_Agent and Indicator_Agent explicitly oppose CEO direction with confidence > 50%,
+           strictly veto with COUNTER_MOMENTUM_DIVERGENCE_VETO.
+        2. Minimum Technical Quorum:
+           At least 2 technical sub-agents must match CEO direction with confidence >= 60%,
+           OR at least 1 technical sub-agent with confidence >= 75% and 0 opposing sub-agents.
+           If all 4 are NEUTRAL or insufficient quorum, strictly veto with QUORUM_INSUFFICIENT_VETO.
+        """
+        dir_clean = str(direction or "").upper().strip()
+        if dir_clean not in ("LONG", "SHORT"):
+            return True, None, None
+
+        if not analyst_reports:
+            return True, None, None
+
+        reports_map = {}
+        if isinstance(analyst_reports, dict):
+            for k, v in analyst_reports.items():
+                name_key = str((v.get("agent_name") or k) if isinstance(v, dict) else (getattr(v, "agent_name", None) or k)).strip().lower().replace(' ', '_')
+                reports_map[name_key] = v
+        elif isinstance(analyst_reports, list):
+            for idx, r in enumerate(analyst_reports):
+                if isinstance(r, dict):
+                    name_key = str(r.get("agent_name") or r.get("name") or f"agent_{idx}").strip().lower().replace(' ', '_')
+                    reports_map[name_key] = r
+                elif hasattr(r, "__dict__") or hasattr(r, "signal"):
+                    name_key = str(getattr(r, "agent_name", None) or getattr(r, "name", None) or f"agent_{idx}").strip().lower().replace(' ', '_')
+                    reports_map[name_key] = r
+
+        def get_agent_data(alias_list, fallback_idx=None):
+            for a in alias_list:
+                for k, v in reports_map.items():
+                    if a in k:
+                        if isinstance(v, dict):
+                            sig = str(v.get("signal") or v.get("direction") or "NEUTRAL").upper().strip()
+                            try:
+                                conf = float(v.get("confidence") or 0.0)
+                            except (ValueError, TypeError):
+                                conf = 0.0
+                        else:
+                            sig = str(getattr(v, "signal", None) or getattr(v, "direction", None) or "NEUTRAL").upper().strip()
+                            try:
+                                conf = float(getattr(v, "confidence", 0.0) or 0.0)
+                            except (ValueError, TypeError):
+                                conf = 0.0
+                        return sig, conf
+            if fallback_idx is not None and isinstance(analyst_reports, list) and len(analyst_reports) > fallback_idx:
+                r = analyst_reports[fallback_idx]
+                if isinstance(r, dict):
+                    sig = str(r.get("signal") or r.get("direction") or "NEUTRAL").upper().strip()
+                    try:
+                        conf = float(r.get("confidence") or 0.0)
+                    except (ValueError, TypeError):
+                        conf = 0.0
+                    return sig, conf
+                elif hasattr(r, "__dict__") or hasattr(r, "signal"):
+                    sig = str(getattr(r, "signal", None) or getattr(r, "direction", None) or "NEUTRAL").upper().strip()
+                    try:
+                        conf = float(getattr(r, "confidence", 0.0) or 0.0)
+                    except (ValueError, TypeError):
+                        conf = 0.0
+                    return sig, conf
+            return "NEUTRAL", 0.0
+
+        candle_sig, candle_conf = get_agent_data(["candle"], fallback_idx=0)
+        ob_sig, ob_conf = get_agent_data(["order_book", "orderbook", "depth"], fallback_idx=1)
+        oi_sig, oi_conf = get_agent_data(["oi_funding", "oi", "funding"], fallback_idx=2)
+        ind_sig, ind_conf = get_agent_data(["indicator"], fallback_idx=4 if (isinstance(analyst_reports, list) and len(analyst_reports) >= 5) else 3)
+
+        tech_agents_data = [
+            ("Candle_Agent", candle_sig, candle_conf),
+            ("Order_Book_Agent", ob_sig, ob_conf),
+            ("OI_Funding_Agent", oi_sig, oi_conf),
+            ("Indicator_Agent", ind_sig, ind_conf)
+        ]
+
+        target_matching = "BULLISH" if dir_clean == "LONG" else "BEARISH"
+        target_opposing = "BEARISH" if dir_clean == "LONG" else "BULLISH"
+
+        # 1. Counter-Momentum Divergence Veto:
+        # If BOTH Candle_Agent and Indicator_Agent explicitly oppose CEO direction with confidence > 50%
+        candle_opposes = (candle_sig == target_opposing and candle_conf > 50.0)
+        indicator_opposes = (ind_sig == target_opposing and ind_conf > 50.0)
+        if candle_opposes and indicator_opposes:
+            msg = (
+                f"COUNTER_MOMENTUM_DIVERGENCE_VETO: Both Candle_Agent ({candle_sig} {candle_conf:.0f}%) "
+                f"and Indicator_Agent ({ind_sig} {ind_conf:.0f}%) explicitly oppose proposed {dir_clean} entry."
+            )
+            return False, "COUNTER_MOMENTUM_DIVERGENCE_VETO", msg
+
+        # 2. Minimum Technical Quorum:
+        matching_ge_60 = 0
+        matching_ge_75 = 0
+        opposing_count = 0
+        all_neutral = True
+
+        for name, sig, conf in tech_agents_data:
+            if sig == target_matching:
+                all_neutral = False
+                if conf >= 60.0:
+                    matching_ge_60 += 1
+                if conf >= 75.0:
+                    matching_ge_75 += 1
+            elif sig == target_opposing:
+                all_neutral = False
+                if conf > 50.0:
+                    opposing_count += 1
+            elif sig == "NEUTRAL" and conf > 50.0:
+                all_neutral = False
+
+        has_quorum = (matching_ge_60 >= 2) or (matching_ge_75 >= 1 and opposing_count == 0)
+        if not has_quorum:
+            if all_neutral:
+                msg = f"QUORUM_INSUFFICIENT_VETO: All 4 technical sub-agents are NEUTRAL for proposed {dir_clean}. Apathetic entries strictly prohibited."
+            else:
+                msg = (
+                    f"QUORUM_INSUFFICIENT_VETO: Technical quorum not met for {dir_clean} "
+                    f"({matching_ge_60}/4 match with conf>=60%, {opposing_count} opposing). Requires >=2 matching >=60% OR >=1 >=75% with 0 opposing."
+                )
+            return False, "QUORUM_INSUFFICIENT_VETO", msg
+
+        return True, None, "Analyst quorum confirmed."
+
+    @staticmethod
     def evaluate(
         strategy_profile: StrategyProfile,
         ceo_proposal: Dict[str, Any],
@@ -148,7 +279,8 @@ class DeterministicGuard:
         risk_manager: Any,
         market_data: Optional[Dict[str, Any]] = None,
         symbol: str = "",
-        logger: Optional[Any] = None
+        logger: Optional[Any] = None,
+        analyst_reports: Optional[Any] = None
     ) -> FinalTradeDecision:
         strategy_mode = strategy_profile.strategy_mode
         direction_bias = strategy_profile.direction_bias
@@ -188,6 +320,22 @@ class DeterministicGuard:
                 guard_status = "BLOCKED"
                 rejection_tag = "STRATEGY_GUARD_VETO"
                 guard_reason = guard_msg
+                reasoning_en = f"{reasoning_en}\n\n{guard_msg}".strip()
+
+        # 1.1 Deterministic ANALYST_QUORUM_GATE (Block 03 Post-Audit Patch)
+        if decision in ["LONG", "SHORT"] and trade_action in ["ENTER", "REDUCE_SIZE"] and analyst_reports:
+            quorum_ok, quorum_tag, quorum_reason = DeterministicGuard.evaluate_analyst_quorum(decision, analyst_reports)
+            if not quorum_ok:
+                guard_msg = f"🛡️ [Analyst Quorum Gate] {symbol}: {quorum_reason}"
+                print(guard_msg)
+                if logger:
+                    logger.warning(f"[Pipeline] {guard_msg}")
+                decision = "HOLD"
+                conviction = 0
+                trade_action = "HOLD"
+                guard_status = "BLOCKED"
+                rejection_tag = quorum_tag
+                guard_reason = quorum_reason
                 reasoning_en = f"{reasoning_en}\n\n{guard_msg}".strip()
 
         # 2. Volatility Momentum & Breakout: Confirmed impulse breakdown/breakout enters immediately

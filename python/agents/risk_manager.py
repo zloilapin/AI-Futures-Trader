@@ -1053,7 +1053,53 @@ class RiskManager(BaseAgent):
                     or "RETEST" in str(_extract_cand_field(ceo_decision, "reasoning_en", "")).upper()
                     or "RETEST" in str(_extract_cand_field(ceo_decision, "reasoning", "")).upper()
                 )
-                max_sl_dist_allowed = 2.50 if is_retest else 1.95
+
+                # Asset-Tier Dynamic Ceilings (Block 02 Post-Audit Patch):
+                # Tier 1 (BTC-USD, ETH-USD): base 1.65%, floor 1.20%, cap 1.75%
+                # Tier 2 (SOL-USD, BNB-USD): base 2.35%, floor 1.60%, cap 2.50%
+                # Tier 3 (ZEC-USD, HYPE-USD, LIT-USD, and other high-beta alts): base 3.10%, floor 1.95%, cap 3.25%
+                clean_sym = str(symbol or _extract_cand_field(ceo_decision, "symbol", "")).replace('/', '-').upper()
+                base_coin = clean_sym.split('-')[0].strip()
+                if base_coin in ("BTC", "ETH"):
+                    tier_base_pct, tier_min_pct, tier_max_pct = 1.65, 1.20, 1.75
+                elif base_coin in ("SOL", "BNB"):
+                    tier_base_pct, tier_min_pct, tier_max_pct = 2.35, 1.60, 2.50
+                else:
+                    tier_base_pct, tier_min_pct, tier_max_pct = 3.10, 1.95, 3.25
+
+                # 1. Dynamic Formula (when 1h ATR % or 15m ATR is available in market context):
+                # max_sl_dist_pct = clip(1.8 * atr_1h_pct, tier_min_pct, tier_max_pct)
+                atr_1h_pct = float(
+                    indicators.get("atr_1h_pct")
+                    or (indicators.get("atr_pct") if float(indicators.get("atr_pct") or 0.0) > 0 else 0.0)
+                    or 0.0
+                )
+                if atr_1h_pct <= 0.0:
+                    atr_1h_val = float(indicators.get("atr_1h", 0.0) or indicators.get("atr_60m", 0.0) or 0.0)
+                    if atr_1h_val > 0.0 and current_price > 0.0:
+                        atr_1h_pct = (atr_1h_val / current_price) * 100.0
+                    elif atr_14 > 0.0 and current_price > 0.0:
+                        atr_1h_pct = (atr_14 / current_price) * 100.0
+
+                if atr_1h_pct > 0.0:
+                    max_sl_dist_allowed = min(max(1.8 * atr_1h_pct, tier_min_pct), tier_max_pct)
+                else:
+                    max_sl_dist_allowed = tier_base_pct
+
+                if is_retest:
+                    max_sl_dist_allowed = max(max_sl_dist_allowed, tier_max_pct)
+
+                # High-Conviction Grace Buffer (+0.05% / 5 bps)
+                ceo_conv = float(_extract_cand_field(ceo_decision, "conviction") or 0.0)
+                trend_aligned = bool(
+                    _extract_cand_field(ceo_decision, "mtf_aligned")
+                    or _extract_cand_field(ceo_decision, "trend_aligned")
+                    or "TREND" in str(_extract_cand_field(ceo_decision, "strategy_mode", "")).upper()
+                    or "TREND" in str(macro_regime).upper()
+                    or is_retest
+                )
+                if ceo_conv >= 82.0 and trend_aligned:
+                    max_sl_dist_allowed += 0.05
 
                 if decision == "SHORT":
                     structural_sl = swing_high_15m + atr_buffer
@@ -1552,22 +1598,38 @@ class RiskManager(BaseAgent):
             contracts = risk_amount_usd / effective_loss_per_contract
             notional_usd = contracts * execution_entry
             
-            # Nado DEX CLOB & Native Trigger Optimization ($104.00 Exchange Safe Bump):
-            # If notional is below the exchange CLOB threshold ($35.00 <= notional_usd < 103.50),
-            # conditionally bump notional to $104.00 to pass exchange limit (avoiding error 2094),
-            # provided the resulting risk does not exceed max(risk_amount_usd * 1.85, total_balance * bump_risk_cap_pct).
+            # Nado DEX CLOB & Native Trigger Optimization ($108.50 / $105.50 Exchange Safe Bump - Block 04):
+            # If notional is below the exchange CLOB threshold ($35.00 <= notional_usd < safe_bump_target),
+            # conditionally bump notional to safe bump target ($108.50 for BTC/ETH, $105.50 for others) to pass exchange limit (avoiding error 2094),
+            # provided the resulting risk does not exceed max_allowed_risk_budget ($1.35 cap for REDUCE_SIZE).
             min_bump_threshold = float(getattr(config, "MIN_NOTIONAL_FLOOR_USD", 35.0) or 35.0)
             bump_risk_cap_pct = max(0.034, float(getattr(config, "MIN_NOTIONAL_MAX_BUMP_RISK_PCT", 0.038) or 0.038))
-            target_bump_notional = 104.0
+            clean_sym_b = str(symbol or _extract_cand_field(ceo_decision, "symbol", "")).replace('/', '-').upper()
+            base_coin_b = clean_sym_b.split('-')[0].strip()
+            target_bump_notional = 108.50 if base_coin_b in ("BTC", "ETH") else 105.50
             is_trigger_bumped = False
             max_allowed_risk_budget = max(risk_amount_usd * 1.75, total_balance * bump_risk_cap_pct) if total_balance > 0 else (risk_amount_usd * 1.75)
+            if trade_action == "REDUCE_SIZE":
+                max_allowed_risk_budget = min(max_allowed_risk_budget, 1.35)
+
             is_production_mode = getattr(config, "SHADOW_MODE", False) or getattr(config, "NADO_LIVE_TRADING_ENABLED", False) or getattr(config, "LIVE_TRADING_ENABLED", False)
             raw_mn = derivatives_data.get("min_notional")
             needs_bump = (is_production_mode or raw_mn is None or float(raw_mn or 0.0) >= 100.0)
-            if needs_bump and min_bump_threshold <= notional_usd < 103.50:
+            if needs_bump and min_bump_threshold <= notional_usd < (target_bump_notional - 0.50):
                 bumped_notional = target_bump_notional
                 bumped_contracts = bumped_notional / execution_entry if execution_entry > 0 else contracts
                 bumped_risk = bumped_contracts * effective_loss_per_contract
+
+                # Block 04: If bumping a REDUCE_SIZE trade causes trade_risk_usd > $1.35, reject with REDUCE_SIZE_RISK_CAP_VETO
+                if trade_action == "REDUCE_SIZE" and bumped_risk > 1.35:
+                    msg = (
+                        f"REDUCE_SIZE_RISK_CAP_VETO: Bumping {clean_sym_b} to exchange min notional (${target_bump_notional:.2f}) "
+                        f"causes dollar risk (${bumped_risk:.2f} USDC) to exceed REDUCE_SIZE cap ($1.35 USDC). "
+                        f"Immediate market entry aborted. Recommend WAIT_FOR_PULLBACK closer to structure."
+                    )
+                    self.logger.warning(f"[{self.name}] 🚫 REDUCE_SIZE_RISK_CAP_VETO: {msg}")
+                    return self._build_veto_result("REDUCE_SIZE_RISK_CAP_VETO", msg, "WAIT_FOR_PULLBACK")
+
                 max_allowed_bump_risk = max_allowed_risk_budget
                 can_bump = (bumped_notional <= max_notional_usd) and (bumped_risk <= max_allowed_bump_risk)
                 if bumped_notional <= max_notional_usd and total_balance > 0 and can_bump:
@@ -1837,12 +1899,14 @@ class RiskManager(BaseAgent):
 
             step_str = f"{effective_inc:.10f}".rstrip("0")
             decimals = len(step_str.split(".")[1]) if "." in step_str else 0
-            target_min_clob = 101.20
+            clean_sym_b = canonical_sym.replace('/', '-').upper()
+            base_coin_b = clean_sym_b.split('-')[0].strip()
+            target_min_clob = 108.50 if base_coin_b in ("BTC", "ETH") else 105.50
             raw_bump_cntr = target_min_clob / execution_entry if execution_entry > 0 else 0.0
             bump_steps = math.ceil(round(raw_bump_cntr / effective_inc, 8))
             bump_contracts = round(bump_steps * effective_inc, min(decimals, 8))
             bump_notional = round(bump_contracts * execution_entry, 2)
-            if bump_notional < 101.00:
+            if bump_notional < 102.00:
                 bump_steps += 1
                 bump_contracts = round(bump_steps * effective_inc, min(decimals, 8))
                 bump_notional = round(bump_contracts * execution_entry, 2)
@@ -1851,6 +1915,19 @@ class RiskManager(BaseAgent):
 
             bump_risk_cap_pct = max(0.034, float(getattr(config, "MIN_NOTIONAL_MAX_BUMP_RISK_PCT", 0.038) or 0.038))
             max_allowed_risk_budget = max(risk_amount_usd * 1.75, total_balance * bump_risk_cap_pct) if total_balance > 0 else (risk_amount_usd * 1.75)
+            if trade_action == "REDUCE_SIZE":
+                max_allowed_risk_budget = min(max_allowed_risk_budget, 1.35)
+
+            # Block 04: If bumping a REDUCE_SIZE trade causes bump_risk > $1.35, reject with REDUCE_SIZE_RISK_CAP_VETO
+            if trade_action == "REDUCE_SIZE" and bump_risk > 1.35:
+                msg = (
+                    f"REDUCE_SIZE_RISK_CAP_VETO: Bumping {clean_sym_b} to exchange min notional (${bump_notional:.2f}) "
+                    f"causes dollar risk (${bump_risk:.2f} USDC) to exceed REDUCE_SIZE cap ($1.35 USDC). "
+                    f"Immediate market entry aborted. Recommend WAIT_FOR_PULLBACK closer to structure."
+                )
+                self.logger.warning(f"[{self.name}] 🚫 REDUCE_SIZE_RISK_CAP_VETO: {msg}")
+                return self._build_veto_result("REDUCE_SIZE_RISK_CAP_VETO", msg, "WAIT_FOR_PULLBACK")
+
             can_safely_bump = (
                 notional_usd >= min_bump_threshold
                 and bump_notional >= 101.0
@@ -1874,7 +1951,7 @@ class RiskManager(BaseAgent):
             else:
                 msg = (
                     f"VETO: MIN_NOTIONAL (${notional_usd:.2f} < $101.00 exchange CLOB min_size). "
-                    f"Calculated notional is below exchange minimum and cannot be safely bumped to $104.00 "
+                    f"Calculated notional is below exchange minimum and cannot be safely bumped to ${target_min_clob:.2f} "
                     f"(bump risk ${bump_risk:.2f} vs cap ${max_allowed_risk_budget:.2f}, margin ${bump_margin:.2f} vs usable ${usable_margin:.2f})."
                 )
                 self.logger.warning(f"[{self.name}] 🚫 MIN_NOTIONAL VETO: {msg}")
@@ -1892,6 +1969,22 @@ class RiskManager(BaseAgent):
             msg = f"VETO: MIN_NOTIONAL (${notional_usd:.2f} < $101.00 exchange CLOB min_size). Refusing order."
             self.logger.warning(f"[{self.name}] 🚫 MIN_NOTIONAL VETO: {msg}")
             return self._build_veto_result("MIN_NOTIONAL", msg, trade_action)
+
+        # Post-Quantization Guard for Nado CLOB (Block 04):
+        actual_notional = round(contracts * execution_entry, 2)
+        if actual_notional < 102.00 and (is_production_mode or raw_min_notional is not None):
+            bumped_contracts = round(contracts + effective_inc, min(decimals, 8))
+            bumped_notional = round(bumped_contracts * execution_entry, 2)
+            bumped_risk = round(bumped_contracts * effective_loss_per_contract, 2)
+            max_risk_allowed = 1.35 if trade_action == "REDUCE_SIZE" else max_allowed_risk_budget
+            if bumped_risk > max_risk_allowed:
+                veto_tag = "REDUCE_SIZE_RISK_CAP_VETO" if trade_action == "REDUCE_SIZE" else "MIN_NOTIONAL"
+                msg = f"Post-quantization notional bump (${bumped_notional:.2f}) causes risk (${bumped_risk:.2f}) to exceed max cap (${max_risk_allowed:.2f})."
+                self.logger.warning(f"[{self.name}] 🚫 {veto_tag}: {msg}")
+                return self._build_veto_result(veto_tag, msg, "WAIT_FOR_PULLBACK" if trade_action == "REDUCE_SIZE" else trade_action)
+            contracts = bumped_contracts
+            notional_usd = bumped_notional
+            risk_amount_usd = bumped_risk
 
         # Re-anchor risk_amount_usd to actual rounded contracts
         actual_planned_risk_usd = contracts * effective_loss_per_contract

@@ -283,12 +283,13 @@ class TradingPipeline:
         ceo_verdict: Dict[str, Any],
         profile: str,
         symbol: str = "",
-        market_data: Optional[Dict[str, Any]] = None
+        market_data: Optional[Dict[str, Any]] = None,
+        analyst_reports: Optional[Any] = None
     ) -> FinalTradeDecision:
         """
         Deterministic Guard:
         Enforces Strategy Direction Guards, Volatility Momentum pullback override,
-        funding rate protection, and conviction threshold validation.
+        funding rate protection, analyst quorum validation, and conviction threshold validation.
         Produces an immutable FinalTradeDecision (which also unpacks as a 4-tuple
         (decision, conviction, trade_action, min_conv) for backward compatibility).
         """
@@ -299,7 +300,8 @@ class TradingPipeline:
             risk_manager=self.agents.risk,
             market_data=market_data,
             symbol=symbol,
-            logger=self.services.logger
+            logger=self.services.logger,
+            analyst_reports=analyst_reports
         )
 
     def can_apply_profile_uplift(
@@ -409,6 +411,39 @@ class TradingPipeline:
 
             try:
                 candidate_id = f"{symbol}:c{cycle_number}_{int(time.time() * 1000)}"
+
+                # BLOCK 05: Pre-Analysis Same-Symbol Active Check
+                sym_clean = symbol.upper().replace('/', '-')
+                sym_base = sym_clean.split('-')[0].strip()
+                active_symbols = set()
+                cur_active_bases = set()
+                for pos_k, p in (cur_pos_dict.items() if isinstance(cur_pos_dict, dict) else []):
+                    p_sym = str(p.get("symbol") or pos_k or "").upper().replace('/', '-') if isinstance(p, dict) else str(pos_k).upper().replace('/', '-')
+                    if p_sym:
+                        active_symbols.add(p_sym)
+                        cur_active_bases.add(p_sym.split('-')[0].strip())
+                if sym_clean in active_symbols or sym_base in cur_active_bases:
+                    msg = f"🛡️ Позиция по активу {symbol} (база {sym_base}) уже открыта. Пропуск дублирующего анализа."
+                    print(msg)
+                    self.services.logger.info(f"[System_Core] 🛡️ SAME_SYMBOL_ACTIVE_VETO: {msg}")
+                    if hasattr(tracker, "record_rejection"):
+                        try:
+                            tracker.record_rejection("SAME_SYMBOL_ACTIVE_VETO")
+                        except Exception:
+                            pass
+                    self._record_candidate_snapshot(
+                        candidate_id=candidate_id,
+                        symbol=symbol,
+                        cycle_number=cycle_number,
+                        macro_regime=detected_regime if 'detected_regime' in locals() else "UNKNOWN",
+                        profile=profile if 'profile' in locals() else "BALANCED",
+                        stage="PRE_ANALYSIS_GUARD",
+                        final_action="REJECTED",
+                        rejection_tag="SAME_SYMBOL_ACTIVE_VETO",
+                        rejection_reason=msg
+                    )
+                    return False
+
                 is_retest = (symbol == retest_symbol)
                 print(f"\n🔍 ПОЛНЫЙ АНАЛИЗ (15m, 1H, 4H) NADO DEX: {symbol}" + (" [PULLBACK_RETEST]" if is_retest else ""))
                 tracker.record_scan()
@@ -574,6 +609,39 @@ class TradingPipeline:
                 
                 if has_directional_signal:
                     self.services.logger.info(f"[System_Core] Strategy Router: {symbol} допущен ({strategy_profile.reasoning})")
+
+                    # Pre-Debate Same-Symbol Active Gate (Save 100% LLM tokens if position already open)
+                    active_positions = getattr(self.services.trading_service, "active_positions", {})
+                    sym_clean = symbol.upper().replace('/', '-')
+                    sym_base = sym_clean.split('-')[0].strip()
+                    if isinstance(active_positions, dict):
+                        for pos_k, p in active_positions.items():
+                            p_sym = str(p.get("symbol") or pos_k or "").upper().replace('/', '-') if isinstance(p, dict) else str(pos_k).upper().replace('/', '-')
+                            p_base = p_sym.split('-')[0].strip() if p_sym else ""
+                            if sym_clean == p_sym or sym_base == p_base:
+                                msg = f"⏸️ Пропуск {symbol}. Позиция по активу {sym_base} уже активна в портфеле. Дебаты LLM пропущены (экономия токенов 100%)."
+                                print(msg)
+                                self.services.logger.info(f"[System_Core] {msg}")
+                                if hasattr(tracker, "record_rejection"):
+                                    try:
+                                        tracker.record_rejection("SAME_SYMBOL_ACTIVE_VETO")
+                                    except Exception:
+                                        pass
+                                self._record_candidate_snapshot(
+                                    candidate_id=candidate_id,
+                                    symbol=symbol,
+                                    cycle_number=cycle_number,
+                                    macro_regime=detected_regime,
+                                    profile=profile,
+                                    stage="SAME_SYMBOL_ACTIVE_GATE",
+                                    final_action="REJECTED",
+                                    rejection_tag="SAME_SYMBOL_ACTIVE_VETO",
+                                    rejection_reason=f"Position for {symbol} ({sym_base}) already open in active_positions",
+                                    strategy_profile=strategy_profile,
+                                    analyst_reports=valid_reports,
+                                    market_data=market_data
+                                )
+                                return False
 
                     # Pre-Debate Directional Cluster Cap Gate (Save 100% LLM tokens when direction slot is full)
                     active_positions = getattr(self.services.trading_service, "active_positions", {})
@@ -954,7 +1022,8 @@ class TradingPipeline:
 
                 # STAGE 4.5: DETERMINISTIC GUARD -> FINAL TRADE DECISION
                 final_trade_decision = self.apply_pipeline_guards_and_sync(
-                    strategy_profile, ceo_verdict, effective_asset_profile, symbol=symbol, market_data=market_data
+                    strategy_profile, ceo_verdict, effective_asset_profile, symbol=symbol, market_data=market_data,
+                    analyst_reports=valid_reports
                 )
                 decision = final_trade_decision.decision
                 conviction = final_trade_decision.conviction
@@ -1103,6 +1172,45 @@ class TradingPipeline:
                         print(msg)
                         self.services.logger.info(f"[System_Core] {msg}")
                         return False
+
+                    # 1.1. Атомарная проверка дублирующей позиции по тому же активу (Same-Symbol Duplicate Guard)
+                    sym_clean = symbol.upper().replace('/', '-')
+                    sym_base = sym_clean.split('-')[0].strip()
+                    for pos_k, p in (cur_pos_dict.items() if isinstance(cur_pos_dict, dict) else []):
+                        p_sym = str(p.get("symbol") or pos_k or "").upper().replace('/', '-') if isinstance(p, dict) else str(pos_k).upper().replace('/', '-')
+                        p_base = p_sym.split('-')[0].strip() if p_sym else ""
+                        if sym_clean == p_sym or sym_base == p_base:
+                            msg = f"🛡️ Вход {symbol} отклонен: актив (база {sym_base}) уже открыт в активных позициях Nado."
+                            print(msg)
+                            self.services.logger.warning(f"[System_Core] 🛡️ SAME_SYMBOL_ACTIVE_VETO: {msg}")
+                            if hasattr(tracker, "record_rejection"):
+                                try:
+                                    tracker.record_rejection("SAME_SYMBOL_ACTIVE_VETO")
+                                except Exception:
+                                    pass
+                            self._record_candidate_snapshot(
+                                candidate_id=candidate_id,
+                                symbol=symbol,
+                                cycle_number=cycle_number,
+                                macro_regime=detected_regime,
+                                profile=profile,
+                                stage="ATOMIC_EXECUTION_LOCK",
+                                final_action="REJECTED",
+                                rejection_tag="SAME_SYMBOL_ACTIVE_VETO",
+                                rejection_reason=msg,
+                                strategy_profile=strategy_profile,
+                                analyst_reports=valid_reports,
+                                debate_info={
+                                    "bull_status": bull_status,
+                                    "bear_status": bear_status,
+                                    "debate_status": debate_status
+                                },
+                                ceo_verdict=ceo_verdict,
+                                final_trade_decision=final_trade_decision,
+                                market_data=market_data,
+                                min_conviction=min_conv
+                            )
+                            return False
 
                     # 2. Атомарная проверка направленного Cluster Cap
                     target_dir = str(final_trade_decision.decision).upper()
@@ -1908,6 +2016,11 @@ class TradingPipeline:
 
         # Фильтруем активы: не сканируем то, что уже открыто
         active_bases = {k.replace('/', '-').split('-')[0].upper() for k in self.services.trading_service.active_positions}
+        for pos_v in self.services.trading_service.active_positions.values():
+            if isinstance(pos_v, dict):
+                v_sym = str(pos_v.get("symbol", "")).replace('/', '-').strip().upper()
+                if v_sym:
+                    active_bases.add(v_sym.split('-')[0].upper())
         selected_assets = [
             s for s in selected_assets 
             if s not in self.services.trading_service.active_positions 
@@ -1949,6 +2062,12 @@ class TradingPipeline:
         else:
             self._last_full_scan_ts = now_ts
 
+        # BLOCK 05: Re-filter selected_assets to strictly prevent scanning assets already open in active_positions
+        selected_assets = [
+            s for s in selected_assets 
+            if s not in self.services.trading_service.active_positions 
+            and s.replace('/', '-').split('-')[0].upper() not in active_bases
+        ]
         self._last_universe_symbols = list(selected_assets)
 
         # ИТЕРАЦИЯ ПО ВСЕМ АКТИВАМ

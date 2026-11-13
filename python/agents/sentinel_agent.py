@@ -182,8 +182,20 @@ class SentinelAgent:
                     except (ValueError, TypeError):
                         pass
 
-        # Break-Even threshold defaults strictly to 0.75R (Free Ride corridor 0.75R <= R < 1.35R)
-        tuned_be_r = float(profile_rules.get("be_activation_r") or pos.get("be_activation_r") or 0.75)
+        # Break-Even & Three-Stage Profit Protection Parameters
+        # Stage 1: HALF_RISK_LOCK at +0.75R MFE (compresses SL to -0.40R)
+        # Stage 2: BE_SCRATCH_LOCK at +1.15R MFE (moves SL to BE + 0.20R)
+        # Stage 3: STEPPED_ATR_TRAIL at +1.50R+ MFE
+        use_three_stage = bool(
+            pos.get("three_stage_trailing")
+            or profile_rules.get("three_stage_trailing")
+            or float(profile_rules.get("be_activation_r") or pos.get("be_activation_r") or 0.0) >= 1.15
+        )
+        half_risk_r = float(profile_rules.get("half_risk_activation_r") or pos.get("half_risk_activation_r") or 0.75)
+        be_scratch_r = float(profile_rules.get("be_activation_r") or pos.get("be_activation_r") or 1.15)
+        stepped_trail_r = float(profile_rules.get("trail_activation_r") or pos.get("trail_activation_r") or 1.50)
+
+        tuned_be_r = be_scratch_r if use_three_stage else float(profile_rules.get("be_activation_r") or pos.get("be_activation_r") or 0.75)
         if has_pending_tp1 and tp1_target_dist is not None and tp1_target_dist > 0:
             required_be_distance = max(tp1_target_dist, cost_buffer * 2.0)
         elif planned_r_dist > 0:
@@ -197,21 +209,61 @@ class SentinelAgent:
             current_r = (profit_distance / planned_r_dist) if planned_r_dist > 0 else (profit_distance / eval_atr)
             peak_r = (peak_profit / planned_r_dist) if planned_r_dist > 0 else (peak_profit / eval_atr)
             effective_r = max(current_r, peak_r)
+            tp1_blocked = has_pending_tp1 and tp1_target_dist is not None and tp1_target_dist > 0 and profit_distance < required_be_distance
 
-            # 1. Break-Even Check: strictly for 0.75R <= effective_r < 1.35R (single move to BE)
-            if has_pending_tp1 and tp1_target_dist is not None and tp1_target_dist > 0:
-                is_be_reached = profit_distance >= required_be_distance
+            # 1. Three-Stage Profit Protection (or Legacy BE)
+            if use_three_stage and not tp1_blocked and not is_runner:
+                # Stage 3: Stepped ATR Trail at effective_r >= 1.50R
+                if effective_r >= stepped_trail_r:
+                    floor_r = 1.20 if effective_r >= 2.00 else 0.75
+                    stepped_floor = entry + (floor_r * planned_r_dist) if planned_r_dist > 0 else (entry + (floor_r * eval_atr))
+                    atr_trail = highest - (1.2 * eval_atr)
+                    trail_target = max(stepped_floor, atr_trail)
+                    be_floor = entry + max(cost_buffer, 0.20 * planned_r_dist)
+                    trail_target = max(trail_target, be_floor)
+                    if candidate_sl is None or trail_target > candidate_sl:
+                        candidate_sl = trail_target
+                        new_state = "TRAILING"
+                        reasoning = (
+                            f"Stage 3 Stepped ATR Trail: effective_r={effective_r:.2f}R >= {stepped_trail_r:.2f}R. "
+                            f"SL trailed to {candidate_sl:.4f} (floor=+{floor_r:.2f}R, 1.2x ATR behind high={highest:.4f})."
+                        )
+                # Stage 2: BE_SCRATCH_LOCK at 1.15R <= effective_r < 1.50R
+                elif effective_r >= be_scratch_r:
+                    be_buf = max(cost_buffer, 0.20 * planned_r_dist) if planned_r_dist > 0 else cost_buffer
+                    be_target = entry + be_buf
+                    if candidate_sl is None or be_target > candidate_sl:
+                        candidate_sl = be_target
+                        new_state = "BREAK_EVEN"
+                        reasoning = (
+                            f"Stage 2 BE Scratch Lock: effective_r={effective_r:.2f}R >= {be_scratch_r:.2f}R. "
+                            f"SL moved to BE + buffer ({be_target:.4f}, +0.20R) protecting trade from noise."
+                        )
+                # Stage 1: HALF_RISK_LOCK at 0.75R <= effective_r < 1.15R
+                elif effective_r >= half_risk_r:
+                    half_risk_target = entry - (0.40 * planned_r_dist) if planned_r_dist > 0 else (entry - (0.60 * eval_atr))
+                    if candidate_sl is None or half_risk_target > candidate_sl:
+                        candidate_sl = half_risk_target
+                        new_state = "HALF_RISK_LOCK"
+                        reasoning = (
+                            f"Stage 1 Half Risk Lock: effective_r={effective_r:.2f}R >= {half_risk_r:.2f}R. "
+                            f"Initial risk compressed from -1.00R to -0.40R ({half_risk_target:.4f}) to allow structural retests."
+                        )
             else:
-                is_be_reached = (profit_distance >= required_be_distance) or (effective_r >= tuned_be_r)
+                # Legacy 1-Stage Break-Even
+                if has_pending_tp1 and tp1_target_dist is not None and tp1_target_dist > 0:
+                    is_be_reached = profit_distance >= required_be_distance
+                else:
+                    is_be_reached = (profit_distance >= required_be_distance) or (effective_r >= tuned_be_r)
 
-            if is_be_reached:
-                be_target = entry + cost_buffer
-                if current_sl < be_target:
-                    candidate_sl = be_target
-                    new_state = "BREAK_EVEN"
-                    r_str = f" ({current_r:.2f}R, peak={peak_r:.2f}R)" if planned_r_dist > 0 else ""
-                    tp1_note = " (TP1 synchronized)" if has_pending_tp1 else ""
-                    reasoning = f"Price reached BE trigger{r_str}{tp1_note} (dist: {profit_distance:.4f} >= required {required_be_distance:.4f}). SL moved to Break-Even + cost buffer."
+                if is_be_reached:
+                    be_target = entry + cost_buffer
+                    if current_sl < be_target:
+                        candidate_sl = be_target
+                        new_state = "BREAK_EVEN"
+                        r_str = f" ({current_r:.2f}R, peak={peak_r:.2f}R)" if planned_r_dist > 0 else ""
+                        tp1_note = " (TP1 synchronized)" if has_pending_tp1 else ""
+                        reasoning = f"Price reached BE trigger{r_str}{tp1_note} (dist: {profit_distance:.4f} >= required {required_be_distance:.4f}). SL moved to Break-Even + cost buffer."
 
             # 1.5. Breakout Stagnation Guard (Breakout Momentum Decay at 75 min - strictly skipped for Anti-Bot / MR)
             max_mfe = float(pos.get("max_favorable_excursion_r", 0.0) or 0.0)
@@ -267,7 +319,7 @@ class SentinelAgent:
                         reasoning = f"Time-Stop: Позиция удерживается {age_minutes:.0f}м (>={t2_age:.0f}м) без импульса. Риск урезан на 50% (SL подтянут до -0.50R)."
 
             # 3. Dynamic Parabolic Trailing Check (strictly at effective_r >= 1.35R or runner)
-            can_trail = (
+            can_trail = not (use_three_stage and not is_runner and effective_r < stepped_trail_r) and (
                 (is_runner and effective_r >= 1.35)
                 or (
                     current_state == "TRAILING"
@@ -313,8 +365,9 @@ class SentinelAgent:
             # Enforce Monotonic SL (Never worsen)
             if candidate_sl is not None:
                 new_sl = max(current_sl, candidate_sl) if current_sl > 0 else candidate_sl
-                # Check minimum improvement threshold
-                if current_sl == 0 or (new_sl - current_sl) >= effective_min_improve:
+                # Check minimum improvement threshold (>= 0.15R hysteresis when three_stage_trailing is explicitly set)
+                min_hysteresis = max(effective_min_improve, 0.15 * planned_r_dist) if (bool(pos.get("three_stage_trailing")) and planned_r_dist > 0) else effective_min_improve
+                if current_sl == 0 or (new_sl - current_sl) >= min_hysteresis:
                     return {"new_sl": new_sl, "state": new_state, "reasoning": reasoning}
 
         else: # SHORT
@@ -323,21 +376,61 @@ class SentinelAgent:
             current_r = (profit_distance / planned_r_dist) if planned_r_dist > 0 else (profit_distance / eval_atr)
             peak_r = (trough_profit / planned_r_dist) if planned_r_dist > 0 else (trough_profit / eval_atr)
             effective_r = max(current_r, peak_r)
+            tp1_blocked = has_pending_tp1 and tp1_target_dist is not None and tp1_target_dist > 0 and profit_distance < required_be_distance
 
-            # 1. Break-Even Check: strictly for 0.75R <= effective_r < 1.35R (single move to BE)
-            if has_pending_tp1 and tp1_target_dist is not None and tp1_target_dist > 0:
-                is_be_reached = profit_distance >= required_be_distance
+            # 1. Three-Stage Profit Protection (or Legacy BE)
+            if use_three_stage and not tp1_blocked and not is_runner:
+                # Stage 3: Stepped ATR Trail at effective_r >= 1.50R
+                if effective_r >= stepped_trail_r:
+                    floor_r = 1.20 if effective_r >= 2.00 else 0.75
+                    stepped_ceiling = entry - (floor_r * planned_r_dist) if planned_r_dist > 0 else (entry - (floor_r * eval_atr))
+                    atr_trail = lowest + (1.2 * eval_atr)
+                    trail_target = min(stepped_ceiling, atr_trail)
+                    be_floor = entry - max(cost_buffer, 0.20 * planned_r_dist)
+                    trail_target = min(trail_target, be_floor)
+                    if candidate_sl is None or trail_target < candidate_sl:
+                        candidate_sl = trail_target
+                        new_state = "TRAILING"
+                        reasoning = (
+                            f"Stage 3 Stepped ATR Trail: effective_r={effective_r:.2f}R >= {stepped_trail_r:.2f}R. "
+                            f"SL trailed to {candidate_sl:.4f} (floor=+{floor_r:.2f}R, 1.2x ATR above low={lowest:.4f})."
+                        )
+                # Stage 2: BE_SCRATCH_LOCK at 1.15R <= effective_r < 1.50R
+                elif effective_r >= be_scratch_r:
+                    be_buf = max(cost_buffer, 0.20 * planned_r_dist) if planned_r_dist > 0 else cost_buffer
+                    be_target = entry - be_buf
+                    if candidate_sl is None or be_target < candidate_sl:
+                        candidate_sl = be_target
+                        new_state = "BREAK_EVEN"
+                        reasoning = (
+                            f"Stage 2 BE Scratch Lock: effective_r={effective_r:.2f}R >= {be_scratch_r:.2f}R. "
+                            f"SL moved to BE - buffer ({be_target:.4f}, +0.20R) protecting trade from noise."
+                        )
+                # Stage 1: HALF_RISK_LOCK at 0.75R <= effective_r < 1.15R
+                elif effective_r >= half_risk_r:
+                    half_risk_target = entry + (0.40 * planned_r_dist) if planned_r_dist > 0 else (entry + (0.60 * eval_atr))
+                    if candidate_sl is None or half_risk_target < candidate_sl:
+                        candidate_sl = half_risk_target
+                        new_state = "HALF_RISK_LOCK"
+                        reasoning = (
+                            f"Stage 1 Half Risk Lock: effective_r={effective_r:.2f}R >= {half_risk_r:.2f}R. "
+                            f"Initial risk compressed from -1.00R to -0.40R ({half_risk_target:.4f}) to allow structural retests."
+                        )
             else:
-                is_be_reached = (profit_distance >= required_be_distance) or (effective_r >= tuned_be_r)
+                # Legacy 1-Stage Break-Even
+                if has_pending_tp1 and tp1_target_dist is not None and tp1_target_dist > 0:
+                    is_be_reached = profit_distance >= required_be_distance
+                else:
+                    is_be_reached = (profit_distance >= required_be_distance) or (effective_r >= tuned_be_r)
 
-            if is_be_reached:
-                be_target = entry - cost_buffer
-                if current_sl > be_target or current_sl == 0:
-                    candidate_sl = be_target
-                    new_state = "BREAK_EVEN"
-                    r_str = f" ({current_r:.2f}R, peak={peak_r:.2f}R)" if planned_r_dist > 0 else ""
-                    tp1_note = " (TP1 synchronized)" if has_pending_tp1 else ""
-                    reasoning = f"Price reached BE trigger{r_str}{tp1_note} (dist: {profit_distance:.4f} >= required {required_be_distance:.4f}). SL moved to Break-Even - cost buffer."
+                if is_be_reached:
+                    be_target = entry - cost_buffer
+                    if current_sl > be_target or current_sl == 0:
+                        candidate_sl = be_target
+                        new_state = "BREAK_EVEN"
+                        r_str = f" ({current_r:.2f}R, peak={peak_r:.2f}R)" if planned_r_dist > 0 else ""
+                        tp1_note = " (TP1 synchronized)" if has_pending_tp1 else ""
+                        reasoning = f"Price reached BE trigger{r_str}{tp1_note} (dist: {profit_distance:.4f} >= required {required_be_distance:.4f}). SL moved to Break-Even - cost buffer."
 
             # 1.5. Breakout Stagnation Guard (Breakout Momentum Decay at 75 min - strictly skipped for Anti-Bot / MR)
             max_mfe = float(pos.get("max_favorable_excursion_r", 0.0) or 0.0)
@@ -393,7 +486,7 @@ class SentinelAgent:
                         reasoning = f"Time-Stop: Позиция удерживается {age_minutes:.0f}м (>={t2_age:.0f}м) без импульса. Риск урезан на 50% (SL подтянут до -0.50R)."
 
             # 3. Dynamic Parabolic Trailing Check (strictly at effective_r >= 1.35R or runner)
-            can_trail = (
+            can_trail = not (use_three_stage and not is_runner and effective_r < stepped_trail_r) and (
                 (is_runner and effective_r >= 1.35)
                 or (
                     current_state == "TRAILING"
@@ -439,8 +532,9 @@ class SentinelAgent:
             # Enforce Monotonic SL (Never worsen)
             if candidate_sl is not None:
                 new_sl = min(current_sl, candidate_sl) if current_sl > 0 else candidate_sl
-                # Check minimum improvement threshold
-                if current_sl == 0 or (current_sl - new_sl) >= effective_min_improve:
+                # Check minimum improvement threshold (>= 0.15R hysteresis when three_stage_trailing is explicitly set)
+                min_hysteresis = max(effective_min_improve, 0.15 * planned_r_dist) if (bool(pos.get("three_stage_trailing")) and planned_r_dist > 0) else effective_min_improve
+                if current_sl == 0 or (current_sl - new_sl) >= min_hysteresis:
                     return {"new_sl": new_sl, "state": new_state, "reasoning": reasoning}
 
         return {"new_sl": None, "state": current_state, "reasoning": "No update required."}

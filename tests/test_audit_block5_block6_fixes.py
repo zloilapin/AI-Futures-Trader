@@ -80,8 +80,8 @@ async def test_distance_to_structure_gate_checks_structural_sl_not_atr(mock_logg
     # Must NOT veto on distance to structure!
     assert res.get("approved") is True
     assert res.get("veto_category") is None
-    # Verify sl_price stays within max_sl_dist_allowed (1.95% => <= 101.95)
-    assert res["sl_price"] <= 101.95
+    # Verify sl_price stays within max_sl_dist_allowed (Tier 2 SOL ceiling is 2.35% => <= 102.35)
+    assert res["sl_price"] <= 102.35
     assert res["sl_price"] >= swing_high_15m
 
 
