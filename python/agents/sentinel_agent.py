@@ -186,16 +186,24 @@ class SentinelAgent:
         # Stage 1: HALF_RISK_LOCK at +0.75R MFE (compresses SL to -0.40R)
         # Stage 2: BE_SCRATCH_LOCK at +1.15R MFE (moves SL to BE + 0.20R)
         # Stage 3: STEPPED_ATR_TRAIL at +1.50R+ MFE
-        use_three_stage = bool(
-            pos.get("three_stage_trailing")
-            or profile_rules.get("three_stage_trailing")
-            or float(profile_rules.get("be_activation_r") or pos.get("be_activation_r") or 0.0) >= 1.15
-        )
+        if pos.get("three_stage_trailing") is not None:
+            use_three_stage = bool(pos["three_stage_trailing"])
+        elif profile_rules.get("three_stage_trailing") is not None:
+            use_three_stage = bool(profile_rules["three_stage_trailing"])
+        else:
+            use_three_stage = float(profile_rules.get("be_activation_r") or pos.get("be_activation_r") or 0.0) >= 1.15
         half_risk_r = float(profile_rules.get("half_risk_activation_r") or pos.get("half_risk_activation_r") or 0.75)
-        be_scratch_r = float(profile_rules.get("be_activation_r") or pos.get("be_activation_r") or 1.15)
+        if use_three_stage:
+            be_scratch_r = float(
+                pos.get("be_activation_r")
+                or (profile_rules.get("be_activation_r") if float(profile_rules.get("be_activation_r") or 0.0) >= 1.15 else None)
+                or 1.15
+            )
+        else:
+            be_scratch_r = float(profile_rules.get("be_activation_r") or pos.get("be_activation_r") or 0.75)
         stepped_trail_r = float(profile_rules.get("trail_activation_r") or pos.get("trail_activation_r") or 1.50)
 
-        tuned_be_r = be_scratch_r if use_three_stage else float(profile_rules.get("be_activation_r") or pos.get("be_activation_r") or 0.75)
+        tuned_be_r = be_scratch_r
         if has_pending_tp1 and tp1_target_dist is not None and tp1_target_dist > 0:
             required_be_distance = max(tp1_target_dist, cost_buffer * 2.0)
         elif planned_r_dist > 0:

@@ -88,7 +88,11 @@ class RiskManager(BaseAgent):
                 "sentinel_trail_atr": 2.5,
                 "sentinel_trail_activation_atr": 2.5,
                 "sentinel_trail_distance_atr": 2.0,
-                "sentinel_min_improve_atr": 0.25
+                "sentinel_min_improve_atr": 0.25,
+                "three_stage_trailing": True,
+                "half_risk_activation_r": 0.75,
+                "be_activation_r": 1.15,
+                "trail_activation_r": 1.50
             }
         elif profile == "CONSERVATIVE":
             rules = {
@@ -108,7 +112,11 @@ class RiskManager(BaseAgent):
                 "sentinel_trail_atr": 2.2,
                 "sentinel_trail_activation_atr": 2.2,
                 "sentinel_trail_distance_atr": 1.8,
-                "sentinel_min_improve_atr": 0.30
+                "sentinel_min_improve_atr": 0.30,
+                "three_stage_trailing": True,
+                "half_risk_activation_r": 0.75,
+                "be_activation_r": 1.15,
+                "trail_activation_r": 1.50
             }
         else: # BALANCED
             rules = {
@@ -128,7 +136,11 @@ class RiskManager(BaseAgent):
                 "sentinel_trail_atr": 2.5,
                 "sentinel_trail_activation_atr": 2.5,
                 "sentinel_trail_distance_atr": 2.0,
-                "sentinel_min_improve_atr": 0.25
+                "sentinel_min_improve_atr": 0.25,
+                "three_stage_trailing": True,
+                "half_risk_activation_r": 0.75,
+                "be_activation_r": 1.15,
+                "trail_activation_r": 1.50
             }
             
         # --- CENTRALIZED STRATEGY ROUTING ---

@@ -450,3 +450,156 @@ def test_block05_trade_logger_records_unique_id_and_close_metadata():
         assert entry["close_reason"] == "BE_SCRATCH_LOCK"
         assert "close_time" in entry
         assert entry["net_pnl_usd"] == 0.5595
+
+@pytest.mark.asyncio
+async def test_initial_sl_immutability_across_stage_transitions():
+    """
+    Verifies that initial_sl (the original 1R denominator) is strictly immutable
+    when Stage 1 moves SL to -0.40R, and subsequent Sentinel evaluations calculate
+    R-multiples against the original 1R distance (|entry - initial_sl|), NOT against
+    the compressed current_sl.
+    """
+    agent = SentinelAgent(logger=MagicMock())
+    entry = 100.0
+    orig_sl = 90.0  # 1R = 10.0
+    pos = {
+        "symbol": "SOL-USD",
+        "direction": "LONG",
+        "entry_price": entry,
+        "sl_price": orig_sl,
+        "initial_sl": orig_sl,
+        "highest_price": 108.0,  # +8.0 = +0.80R (Stage 1 Half Risk Lock)
+        "three_stage_trailing": True,
+        "protection_state": "PROTECTED"
+    }
+    market_data = {"price_data": {"current_price": 107.5}}
+    profile_rules = {"be_activation_r": 1.15}
+
+    # Cycle 1: Triggers Stage 1 (SL moves from 90.0 to 96.0 = -0.40R)
+    res1 = await agent.analyze(pos, market_data, profile_rules, 2.0)
+    assert res1["state"] == "HALF_RISK_LOCK"
+    assert abs(res1["new_sl"] - 96.0) < 1e-4
+
+    # Simulate trading service applying new SL to pos['sl_price']
+    pos["sl_price"] = res1["new_sl"]
+    pos["protection_state"] = res1["state"]
+    # Verify initial_sl was NOT mutated in pos
+    assert pos["initial_sl"] == 90.0
+
+    # Cycle 2: Price reaches 112.0 (+1.20R based on initial 1R=10.0)
+    # If 1R were mistakenly recalculated from current_sl=96.0, planned_r would be 4.0,
+    # and effective_r would be (112-100)/4 = 3.0R (Stage 3).
+    # But with immutable initial_sl=90.0, effective_r is (112-100)/10 = 1.20R (Stage 2 BE Scratch Lock).
+    pos["highest_price"] = 112.0
+    market_data["price_data"]["current_price"] = 112.0
+    res2 = await agent.analyze(pos, market_data, profile_rules, 2.0)
+    assert res2["state"] == "BREAK_EVEN"
+    # Stage 2 sets SL to BE + 0.20R = 100.0 + 2.0 = 102.0
+    assert abs(res2["new_sl"] - 102.0) < 1e-4
+    assert pos["initial_sl"] == 90.0
+
+@pytest.mark.asyncio
+async def test_use_three_stage_precedence_and_override():
+    """
+    Verifies the exact precedence hierarchy of use_three_stage:
+    1. Explicit pos['three_stage_trailing'] (can override profile_rules to False).
+    2. Explicit profile_rules['three_stage_trailing'].
+    3. Fallback based on be_activation_r >= 1.15.
+    """
+    agent = SentinelAgent(logger=MagicMock())
+    market_data = {"price_data": {"current_price": 100.8}}
+    
+    # Test 1: Explicit pos['three_stage_trailing'] = False forces legacy BE even if profile_rules says True
+    pos_legacy = {
+        "symbol": "SOL-USD",
+        "direction": "LONG",
+        "entry_price": 100.0,
+        "sl_price": 99.0,
+        "highest_price": 100.8, # +0.8R
+        "three_stage_trailing": False,
+        "protection_state": "PROTECTED"
+    }
+    rules_three_stage = {
+        "three_stage_trailing": True,
+        "be_activation_r": 0.75
+    }
+    res_legacy = await agent.analyze(pos_legacy, market_data, rules_three_stage, 0.5)
+    # Because three_stage_trailing is False, at +0.8R it triggers legacy BREAK_EVEN (not HALF_RISK_LOCK)
+    assert res_legacy["state"] == "BREAK_EVEN"
+
+    # Test 2: Explicit pos['three_stage_trailing'] = True activates three-stage
+    pos_three = {
+        "symbol": "SOL-USD",
+        "direction": "LONG",
+        "entry_price": 100.0,
+        "sl_price": 99.0,
+        "highest_price": 100.8,
+        "three_stage_trailing": True,
+        "protection_state": "PROTECTED"
+    }
+    res_three = await agent.analyze(pos_three, market_data, {"be_activation_r": 0.75}, 0.5)
+    assert res_three["state"] == "HALF_RISK_LOCK"
+
+    # Test 3: Fallback when neither has explicit bool: be_activation_r = 0.75 falls back to legacy
+    pos_fallback_legacy = {
+        "symbol": "SOL-USD",
+        "direction": "LONG",
+        "entry_price": 100.0,
+        "sl_price": 99.0,
+        "highest_price": 100.8,
+        "protection_state": "PROTECTED"
+    }
+    res_fallback = await agent.analyze(pos_fallback_legacy, market_data, {"be_activation_r": 0.75}, 0.5)
+    assert res_fallback["state"] == "BREAK_EVEN"
+
+@pytest.mark.asyncio
+async def test_sync_with_exchange_restores_and_preserves_initial_sl():
+    """
+    Verifies that sync_with_exchange preserves initial_sl, position_id, and three-stage
+    metadata across restarts and sync cycles without overwriting initial_sl with current_sl.
+    """
+    mock_client = MagicMock()
+    service = NadoTradingService(nado_client=mock_client)
+    service.is_connected = True
+    service.default_subaccount_id = "0xSubaccount1"
+    service.product_map = {"SOL": 3, "SOL-USD": 3}
+
+    # Mock on-chain positions returned by exchange
+    on_chain_positions = [{
+        "symbol": "SOL-USD",
+        "entry_price": 100.0,
+        "direction": "LONG",
+        "amount": 1.5,
+        "size_usd": 150.0,
+        "leverage": 5,
+        "_product_id": 3
+    }]
+    service.get_active_positions = AsyncMock(return_value=on_chain_positions)
+    service._fetch_trigger_orders = AsyncMock(return_value=[])
+
+    # Saved position on disk has initial_sl = 90.0, current sl_price = 96.0 (moved to -0.40R)
+    saved_state = {
+        "SOL-USD": {
+            "position_id": "SOL-USD_1731512345000",
+            "entry_price": 100.0,
+            "sl_price": 96.0,
+            "initial_sl": 90.0,
+            "three_stage_trailing": True,
+            "half_risk_activation_r": 0.75,
+            "be_activation_r": 1.15
+        }
+    }
+
+    with patch("core.state_store.StateStore.load", return_value=saved_state), \
+         patch("core.state_store.StateStore.save"):
+        # Run sync_with_exchange (simulating startup recovery)
+        await service.sync_with_exchange(is_startup=True, force=True)
+        
+        pos = service.active_positions.get("SOL-USD")
+        assert pos is not None
+        assert pos["initial_sl"] == 90.0
+        assert pos["sl_price"] == 96.0
+        assert pos["position_id"] == "SOL-USD_1731512345000"
+        assert pos["three_stage_trailing"] is True
+        assert pos["half_risk_activation_r"] == 0.75
+        assert pos["be_activation_r"] == 1.15

@@ -5523,6 +5523,25 @@ class NadoTradingService(BaseTradingService):
                                 elif tracked.get("sl_price", 0.0) > 0 and tracked.get("entry_price", 0.0) > 0:
                                     tracked["atr_reference"] = round(abs(float(tracked["entry_price"]) - float(tracked["sl_price"])) / 1.5, 6)
                                     logger.info(f"[NadoTradingService] 📐 Reconstructed ATR {tracked['atr_reference']:.4f} from SL distance for tracked {canonical_symbol}.")
+                        
+                        # Preserve and restore initial_sl immutability across syncs
+                        saved_positions = self._load_positions()
+                        saved_p = saved_positions.get(canonical_symbol) or saved_positions.get(base_symbol) or {}
+                        if float(tracked.get("initial_sl", 0.0) or 0.0) <= 0.0:
+                            if float(saved_p.get("initial_sl", 0.0) or 0.0) > 0.0:
+                                tracked["initial_sl"] = float(saved_p["initial_sl"])
+                            elif float(tracked.get("sl_price", 0.0) or 0.0) > 0.0:
+                                tracked["initial_sl"] = float(tracked["sl_price"])
+                        if float(tracked.get("initial_tp", 0.0) or 0.0) <= 0.0 and float(saved_p.get("initial_tp", 0.0) or 0.0) > 0.0:
+                            tracked["initial_tp"] = float(saved_p["initial_tp"])
+                        if "position_id" not in tracked and saved_p.get("position_id"):
+                            tracked["position_id"] = saved_p["position_id"]
+                        if "three_stage_trailing" not in tracked:
+                            tracked["three_stage_trailing"] = saved_p.get("three_stage_trailing", True)
+                        if "half_risk_activation_r" not in tracked:
+                            tracked["half_risk_activation_r"] = float(saved_p.get("half_risk_activation_r", 0.75))
+                        if "be_activation_r" not in tracked:
+                            tracked["be_activation_r"] = float(saved_p.get("be_activation_r", 1.15))
                             dir_str = str(tracked.get("direction", "LONG")).upper()
                             entry_val = float(tracked.get("entry_price", 0.0) or 0.0)
                             if "highest_price" not in tracked or tracked.get("highest_price", 0.0) <= 0:
@@ -5732,13 +5751,33 @@ class NadoTradingService(BaseTradingService):
                             f"Динамическое подтягивание стопа приостановлено до сверки."
                         )
 
+                init_sl = float(saved_p.get("initial_sl") or 0.0)
+                if init_sl <= 0.0 and sl_price > 0.0:
+                    init_sl = sl_price
+                init_tp = float(saved_p.get("initial_tp") or 0.0)
+                if init_tp <= 0.0 and tp_price > 0.0:
+                    init_tp = tp_price
+
+                pos_amount = abs(float(pos.get("amount", 0.0)))
                 self.active_positions[canonical_symbol] = {
+                    "position_id": saved_p.get("position_id") or f"{canonical_symbol}_{int(time.time()*1000)}",
+                    "symbol": canonical_symbol,
                     "direction": direction,
                     "entry_price": entry,
                     "size_usd": pos.get("size_usd", 0.0),
                     "notional_usd": pos.get("size_usd", 0.0),
+                    "contracts": pos_amount,
+                    "amount": pos_amount,
                     "tp_price": tp_price,
                     "sl_price": sl_price,
+                    "initial_sl": init_sl,
+                    "initial_tp": init_tp,
+                    "three_stage_trailing": saved_p.get("three_stage_trailing", True),
+                    "half_risk_activation_r": float(saved_p.get("half_risk_activation_r", 0.75)),
+                    "be_activation_r": float(saved_p.get("be_activation_r", 1.15)),
+                    "tp1_r_mult": float(saved_p.get("tp1_r_mult", 1.15)),
+                    "strategy_mode": saved_p.get("strategy_mode", "TREND_FOLLOWING"),
+                    "is_anti_bot": bool(saved_p.get("is_anti_bot", False)),
                     "leverage": pos.get("leverage", 1),
                     "highest_price": highest_price,
                     "lowest_price": lowest_price,
