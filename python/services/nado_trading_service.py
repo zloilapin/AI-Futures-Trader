@@ -2791,11 +2791,12 @@ class NadoTradingService(BaseTradingService):
                         if success:
                             close_info = getattr(self, "_last_close_info", {}).get(symbol) or {}
                             exit_p = close_info.get("exit_price") or current_price
+                            actual_close_tag = close_info.get("close_reason") or reason_tag
                             closed_reports.append({
                                 "symbol": symbol,
                                 "direction": direction,
-                                "triggered_by": f"SOFTWARE_{reason}",
-                                "close_reason": f"SOFTWARE_{reason}",
+                                "triggered_by": actual_close_tag,
+                                "close_reason": actual_close_tag,
                                 "strategy_mode": pos.get("strategy_mode", "UNKNOWN"),
                                 "is_anti_bot": bool(pos.get("is_anti_bot", False) or pos.get("strategy_mode") == "MEAN_REVERSION"),
                                 "entry_price": pos.get("entry_price", current_price),
@@ -3700,11 +3701,24 @@ class NadoTradingService(BaseTradingService):
         if not self.is_connected:
             return False, 0.0
             
-        if getattr(config, "SHADOW_MODE", False):
-            canonical_sym = symbol.replace('/', '-').strip().upper()
-            if '-' not in canonical_sym:
-                canonical_sym = f"{canonical_sym}-USD"
-            pos = self.active_positions.get(canonical_sym)
+        canonical_sym = symbol.replace('/', '-').strip().upper()
+        if '-' not in canonical_sym:
+            canonical_sym = f"{canonical_sym}-USD"
+        base_symbol = canonical_sym.split('-')[0].upper()
+        pos = self.active_positions.get(symbol) or self.active_positions.get(canonical_sym) or self.active_positions.get(base_symbol) or {}
+
+        # CRITICAL SAFETY INVARIANT: An on-chain position (having product_id/sender or restored on-chain)
+        # must NEVER be virtually closed, even if SHADOW_MODE is set in config.
+        # Virtual close is permitted ONLY for purely simulated/paper positions.
+        is_explicitly_virtual = bool(pos.get("is_virtual") or pos.get("is_shadow"))
+        is_on_chain_position = bool(
+            pos.get("sender")
+            or pos.get("product_id")
+            or pos.get("native_triggers_placed")
+            or "restored" in str(pos.get("original_thesis", "")).lower()
+        )
+
+        if (is_explicitly_virtual or getattr(config, "SHADOW_MODE", False)) and not is_on_chain_position:
             if not pos:
                 return False, 0.0
             cur_price = float(pos.get("current_price", pos.get("entry_price", 0.0)) or 0.0)
