@@ -1004,6 +1004,7 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
             "directional_confidence": directional_confidence,
             "dir_conf": directional_confidence,
             "entry_quality": entry_quality,
+            "location_quality": score_res.get("location_quality", 100.0),
             "risk_score": risk_score,
             "risk_penalties": total_penalty,
             "risk_penalty": total_penalty,
@@ -1434,12 +1435,23 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
         # Category B: Macro Sentiment (Fear & Greed, euphoria/panic)
         fg_pen = 0
         if fear_greed is not None:
-            if dec == "LONG":
-                if fear_greed >= 80: fg_pen = -10
-                elif fear_greed >= 70: fg_pen = -5
-            elif dec == "SHORT":
-                if fear_greed <= 20: fg_pen = -10
-                elif fear_greed <= 30: fg_pen = -5
+            # Contextual Sentiment Bypass: In active trend expansion within a TRENDING regime,
+            # high fear/greed reflects healthy momentum rather than exhaustion reversal.
+            macro_reg = str((market_context or {}).get("macro_regime") or ((market_context or {}).get("market_data") or {}).get("macro_regime") or "").upper()
+            ctx_ind = ((market_context or {}).get("market_data") or {}).get("indicators") or (market_context or {}).get("indicators") or {}
+            bb_pos = float(ctx_ind.get("bb_pos_pct") or 50.0)
+            in_exhaustion_band = (bb_pos > 85.0 if dec == "LONG" else (bb_pos < 15.0 if dec == "SHORT" else False))
+            is_trending = ("TREND" in macro_reg)
+            trend_expanding = float(ctx_ind.get("trend_strength_1h") or ctx_ind.get("adx") or 30.0) >= 20.0
+
+            bypass_fg = is_trending and trend_expanding and not in_exhaustion_band
+            if not bypass_fg:
+                if dec == "LONG":
+                    if fear_greed >= 80: fg_pen = -10
+                    elif fear_greed >= 70: fg_pen = -5
+                elif dec == "SHORT":
+                    if fear_greed <= 20: fg_pen = -10
+                    elif fear_greed <= 30: fg_pen = -5
 
         llm_sent = 0
         for k in MACRO_SENTIMENT_KEYS:
@@ -1864,10 +1876,14 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
         else: # 65 <= entry_quality < 73 (or 60-64 with dir_conf < 70)
             trade_action = "REDUCE_SIZE"
 
+        ext_pen = abs(float((risk_breakdown or {}).get("price_extension", 0.0) or 0.0))
+        location_quality = max(0.0, min(100.0, 100.0 - (ext_pen * 4.0)))
+
         return ScoreResult({
             "decision": calculated_decision,
             "directional_confidence": directional_confidence,
             "entry_quality": entry_quality,
+            "location_quality": location_quality,
             "conviction": conviction,
             "risk_score": risk_score,
             "risk_penalties": total_penalty,

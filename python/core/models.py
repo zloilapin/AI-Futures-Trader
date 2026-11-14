@@ -4,6 +4,8 @@ from types import MappingProxyType
 import copy
 from pydantic import BaseModel, Field
 
+EntryTriggerType = Literal["REGULAR_SCAN", "WATCHLIST_RETEST", "IMPULSE_BREAKOUT"]
+
 def _make_deep_immutable(val: Any) -> Any:
     """Recursively converts mappings and collections into strictly immutable structures."""
     if isinstance(val, (dict, Mapping)):
@@ -70,11 +72,16 @@ class FinalTradeDecision:
     conviction_for_risk: Optional[float] = None
     volume_explosion_override: bool = False
     action_size_mult_override: Optional[float] = None
+    entry_trigger_type: EntryTriggerType = "REGULAR_SCAN"
+    watchlist_metadata: Optional[Mapping[str, Any]] = None
+    target_pullback_price: Optional[float] = None
 
     def __post_init__(self):
         # Deep defensive conversion of raw_ceo_verdict to guarantee nested immutability
         if self.raw_ceo_verdict:
             object.__setattr__(self, "raw_ceo_verdict", _make_deep_immutable(self.raw_ceo_verdict))
+        if self.watchlist_metadata:
+            object.__setattr__(self, "watchlist_metadata", _make_deep_immutable(self.watchlist_metadata))
 
     def get(self, key: str, default: Any = None) -> Any:
         if hasattr(self, key):
@@ -116,6 +123,9 @@ class FinalTradeDecision:
             "conviction_for_risk": self.conviction_for_risk,
             "volume_explosion_override": self.volume_explosion_override,
             "action_size_mult_override": self.action_size_mult_override,
+            "entry_trigger_type": self.entry_trigger_type,
+            "watchlist_metadata": _make_mutable(self.watchlist_metadata) if self.watchlist_metadata else None,
+            "target_pullback_price": self.target_pullback_price,
             "reasoning_en": self.reasoning_en,
             "reasoning_ru": self.reasoning_ru,
         })

@@ -143,18 +143,25 @@ class DeterministicGuard:
     @staticmethod
     def evaluate_analyst_quorum(
         direction: str,
-        analyst_reports: Optional[Any]
+        analyst_reports: Optional[Any],
+        entry_trigger_type: str = "REGULAR_SCAN",
+        market_data: Optional[Dict[str, Any]] = None,
+        watchlist_metadata: Optional[Dict[str, Any]] = None
     ) -> Tuple[bool, Optional[str], Optional[str]]:
         """
-        Deterministic ANALYST_QUORUM_GATE (Block 03 Post-Audit Patch):
-        Evaluates the 4 technical sub-agents (Candle_Agent, Order_Book_Agent, OI_Funding_Agent, Indicator_Agent):
-        1. Counter-Momentum Divergence Veto:
-           If BOTH Candle_Agent and Indicator_Agent explicitly oppose CEO direction with confidence > 50%,
-           strictly veto with COUNTER_MOMENTUM_DIVERGENCE_VETO.
-        2. Minimum Technical Quorum:
-           At least 2 technical sub-agents must match CEO direction with confidence >= 60%,
-           OR at least 1 technical sub-agent with confidence >= 75% and 0 opposing sub-agents.
-           If all 4 are NEUTRAL or insufficient quorum, strictly veto with QUORUM_INSUFFICIENT_VETO.
+        Deterministic ANALYST_QUORUM_GATE (Systemic Module 01 Upgrade):
+        Multi-Timeframe Aware Quorum & Counter-Momentum Divergence Logic.
+
+        For REGULAR_SCAN / IMPULSE_BREAKOUT:
+          - Requires LTF + HTF momentum alignment.
+          - Vetoes if BOTH Candle_Agent and Indicator_Agent oppose with >= 60% conviction.
+          - Standard Quorum: >= 2 technical agents matching >= 60% OR >= 1 matching >= 75% with 0 opposing.
+
+        For WATCHLIST_RETEST:
+          - Structural Validity: Validates price has not breached invalidation_price, HTF structure intact.
+          - LTF Retracement Tolerance: Retracement momentum is expected; only vetoes on FULL structural breakout
+            (Candle >= 72% AND Indicator >= 72% AND OrderBook >= 65% opposing).
+          - Retest Quorum: Requires at least 1 technical/microstructure agent confirming absorption/rejection (>= 60%).
         """
         dir_clean = str(direction or "").upper().strip()
         if dir_clean not in ("LONG", "SHORT"):
@@ -227,8 +234,77 @@ class DeterministicGuard:
         target_matching = "BULLISH" if dir_clean == "LONG" else "BEARISH"
         target_opposing = "BEARISH" if dir_clean == "LONG" else "BULLISH"
 
+        trigger_type_str = str(entry_trigger_type or "REGULAR_SCAN").upper().strip()
+        is_watchlist_retest = (trigger_type_str == "WATCHLIST_RETEST")
+
+        # ══════════════════════════════════════════════════════════════════════════
+        # BRANCH A: WATCHLIST_RETEST (Mean-Reversion into HTF Trend)
+        # ══════════════════════════════════════════════════════════════════════════
+        if is_watchlist_retest:
+            # 1. Structural Validity Check
+            cur_px = 0.0
+            if market_data:
+                cur_px = float((market_data.get("price_data") or {}).get("current_price") or (market_data.get("indicators") or {}).get("current_price") or 0.0)
+
+            inval_px = 0.0
+            if watchlist_metadata:
+                inval_px = float(watchlist_metadata.get("invalidation_price") or 0.0)
+            elif market_data:
+                inval_px = float(market_data.get("invalidation_price") or 0.0)
+
+            if cur_px > 0 and inval_px > 0:
+                if dir_clean == "LONG" and cur_px < inval_px:
+                    msg = f"WATCHLIST_RETEST_INVALIDATION_VETO: Price ({cur_px:.4f}) breached structural invalidation level ({inval_px:.4f}) for LONG retest."
+                    return False, "WATCHLIST_RETEST_INVALIDATION_VETO", msg
+                elif dir_clean == "SHORT" and cur_px > inval_px:
+                    msg = f"WATCHLIST_RETEST_INVALIDATION_VETO: Price ({cur_px:.4f}) breached structural invalidation level ({inval_px:.4f}) for SHORT retest."
+                    return False, "WATCHLIST_RETEST_INVALIDATION_VETO", msg
+
+            # Verify HTF structure remains aligned
+            htf_dir = ""
+            if watchlist_metadata:
+                htf_dir = str(watchlist_metadata.get("htf_direction") or "").upper().strip()
+            if not htf_dir and market_data:
+                htf_dir = str(market_data.get("htf_direction") or market_data.get("macro_trend") or "").upper().strip()
+            if htf_dir in ("LONG", "SHORT", "UPTREND", "DOWNTREND", "BULLISH", "BEARISH"):
+                htf_norm = "LONG" if htf_dir in ("LONG", "UPTREND", "BULLISH") else "SHORT"
+                if htf_norm != dir_clean:
+                    msg = f"WATCHLIST_RETEST_INVALIDATION_VETO: Higher timeframe structure ({htf_dir}) opposes retest direction {dir_clean}."
+                    return False, "WATCHLIST_RETEST_INVALIDATION_VETO", msg
+
+            # 2. LTF Retracement Tolerance:
+            # Retracement momentum is natural during pullback. Only veto if FULL structural breakout occurs:
+            # Candle >= 72% AND Indicator >= 72% AND OrderBook >= 65% opposing.
+            candle_breakout = (candle_sig == target_opposing and candle_conf >= 72.0)
+            indicator_breakout = (ind_sig == target_opposing and ind_conf >= 72.0)
+            ob_breakout = (ob_sig == target_opposing and ob_conf >= 65.0)
+            if candle_breakout and indicator_breakout and ob_breakout:
+                msg = (
+                    f"COUNTER_MOMENTUM_DIVERGENCE_VETO: Full structural breakout against retest detected "
+                    f"(Candle {candle_conf:.0f}%, Indicator {ind_conf:.0f}%, OrderBook {ob_conf:.0f}% opposing {dir_clean})."
+                )
+                return False, "COUNTER_MOMENTUM_DIVERGENCE_VETO", msg
+
+            # 3. Retest Quorum Requirement:
+            # Require at least 1 technical or microstructure agent confirming absorption/rejection in trade direction (>= 60%).
+            retest_confirmed = any(
+                sig == target_matching and conf >= 60.0
+                for _, sig, conf in tech_agents_data
+            )
+            if not retest_confirmed:
+                msg = (
+                    f"QUORUM_INSUFFICIENT_VETO: Retest quorum not met for {dir_clean}. "
+                    f"Requires at least 1 technical or microstructure agent confirming absorption/rejection with >= 60% conviction."
+                )
+                return False, "QUORUM_INSUFFICIENT_VETO", msg
+
+            return True, None, "Watchlist retest quorum confirmed."
+
+        # ══════════════════════════════════════════════════════════════════════════
+        # BRANCH B: REGULAR_SCAN / IMPULSE_BREAKOUT (Momentum Continuation)
+        # ══════════════════════════════════════════════════════════════════════════
         # 1. Counter-Momentum Divergence Veto:
-        # If BOTH Candle_Agent and Indicator_Agent explicitly oppose CEO direction with confidence > 50%
+        # If BOTH Candle_Agent and Indicator_Agent explicitly oppose CEO direction with conviction > 50%
         candle_opposes = (candle_sig == target_opposing and candle_conf > 50.0)
         indicator_opposes = (ind_sig == target_opposing and ind_conf > 50.0)
         if candle_opposes and indicator_opposes:
@@ -322,9 +398,26 @@ class DeterministicGuard:
                 guard_reason = guard_msg
                 reasoning_en = f"{reasoning_en}\n\n{guard_msg}".strip()
 
-        # 1.1 Deterministic ANALYST_QUORUM_GATE (Block 03 Post-Audit Patch)
+        # 1.1 Deterministic ANALYST_QUORUM_GATE (Systemic Module 01 Upgrade)
+        is_pullback_retest = bool((market_data or {}).get("is_pullback_retest") or (ceo_proposal or {}).get("is_pullback_retest"))
+        trigger_type = (
+            (market_data or {}).get("entry_trigger_type")
+            or ceo_proposal.get("entry_trigger_type")
+            or ("WATCHLIST_RETEST" if is_pullback_retest else "REGULAR_SCAN")
+        )
+        wl_meta = (
+            (market_data or {}).get("watchlist_metadata")
+            or ceo_proposal.get("watchlist_metadata")
+        )
+
         if decision in ["LONG", "SHORT"] and trade_action in ["ENTER", "REDUCE_SIZE"] and analyst_reports:
-            quorum_ok, quorum_tag, quorum_reason = DeterministicGuard.evaluate_analyst_quorum(decision, analyst_reports)
+            quorum_ok, quorum_tag, quorum_reason = DeterministicGuard.evaluate_analyst_quorum(
+                direction=decision,
+                analyst_reports=analyst_reports,
+                entry_trigger_type=trigger_type,
+                market_data=market_data,
+                watchlist_metadata=wl_meta
+            )
             if not quorum_ok:
                 guard_msg = f"🛡️ [Analyst Quorum Gate] {symbol}: {quorum_reason}"
                 print(guard_msg)
@@ -831,6 +924,29 @@ class DeterministicGuard:
                     guard_status = "PASSED"
                     guard_reason = "Passed deterministic guard (Anti-Bot Predator bypass of analyst disagreement)."
 
+        # ── Step 2.9: Module 03 Systemic Routing (Decoupled C_dir vs Q_loc) ──
+        risk_bd = (ceo_proposal.get("risk_breakdown") or {})
+        ext_pen = abs(float(risk_bd.get("price_extension", 0.0) or 0.0))
+        calc_q_loc = max(0.0, min(100.0, 100.0 - (ext_pen * 4.0)))
+        q_loc = float(ceo_proposal.get("location_quality", calc_q_loc) or calc_q_loc)
+
+        if decision in ["LONG", "SHORT"] and not is_anti_bot_mr and not is_pullback_retest and not volume_explosion_triggered:
+            if dir_conf < 65:
+                # Case 3: Low C_dir < 65% => HOLD (No structural edge, discarded)
+                decision = "HOLD"
+                trade_action = "HOLD"
+                is_actionable = False
+                guard_status = "HOLD"
+                rejection_tag = "LOW_DIRECTIONAL_CONVICTION"
+                guard_reason = f"Directional conviction ({dir_conf}% < 65%) insufficient for directional trade. Routed to HOLD."
+            elif q_loc < 60.0:
+                # Case 2: High C_dir >= 65% AND Low Q_loc < 60% => WAIT_FOR_PULLBACK
+                trade_action = "WAIT_FOR_PULLBACK"
+                is_actionable = False
+                guard_status = "PULLBACK_WATCHLIST"
+                rejection_tag = "WAIT_FOR_PULLBACK"
+                guard_reason = f"Location quality ({q_loc:.1f}% < 60%) extended from value. Routed to WAIT_FOR_PULLBACK at calculated P*."
+
         # ── Step 3: Hard ban on immediate market entry for REDUCE_SIZE / weak conviction / poor quality ──
         # Only signals with ENTER (conviction >= 75%, entry_quality >= 73%) are allowed for immediate market execution.
         if is_actionable and decision in ["LONG", "SHORT"]:
@@ -894,7 +1010,10 @@ class DeterministicGuard:
             raw_ceo_verdict=ceo_proposal,
             conviction_for_risk=float(ceo_proposal.get("conviction_for_risk", conviction) or conviction),
             volume_explosion_override=volume_explosion_triggered,
-            action_size_mult_override=0.50 if volume_explosion_triggered else None
+            action_size_mult_override=0.50 if volume_explosion_triggered else None,
+            entry_trigger_type=trigger_type,
+            watchlist_metadata=wl_meta,
+            target_pullback_price=ceo_proposal.get("target_pullback_price")
         )
 
 

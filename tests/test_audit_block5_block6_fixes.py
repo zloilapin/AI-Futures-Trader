@@ -435,12 +435,12 @@ def test_bayesian_optimizer_objective_be_activation_r_range():
 
     optimizer.objective(trial)
 
-    # Verify suggest_float was called for be_activation_r with low=0.70, high=0.90
+    # Verify suggest_float was called for be_activation_r with low=1.10, high=1.40
     calls = trial.suggest_float.call_args_list
     be_call = next((c for c in calls if c[0][0] == "be_activation_r"), None)
     assert be_call is not None
-    assert be_call[0][1] == 0.70
-    assert be_call[0][2] == 0.90
+    assert be_call[0][1] == 1.10
+    assert be_call[0][2] == 1.40
 
 
 # ─── 6. SentinelAgent Trailing & Time-Stop Fixes ─────────────────────────────
@@ -834,3 +834,93 @@ async def test_booster3_sentinel_stepped_runner_atr_floor(mock_logger):
     assert res_4r["state"] == "TRAILING"
     # trail_target = 54000 - 0.50 * 1000 = 53500.0
     assert abs(res_4r["new_sl"] - 53500.0) < 1.0
+
+
+@pytest.mark.asyncio
+async def test_force_close_position_preserves_manual_exit_reason_and_metadata(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+    from services.nado_trading_service import NadoTradingService
+
+    svc = NadoTradingService()
+    svc.is_connected = True
+    svc.product_map = {"HYPE": 100}
+    svc.wallet = MagicMock()
+    svc.wallet.get_address.return_value = "0x12345"
+    svc.client = MagicMock()
+
+    mock_sub = MagicMock()
+    mock_sub.subaccount = "0xsubaccount"
+    svc.client.subaccount.get_subaccounts.return_value = MagicMock(subaccounts=[mock_sub])
+    svc.client.market.close_position.return_value = "0xtxhash"
+
+    pos_data = {
+        "symbol": "HYPE-USD",
+        "direction": "SHORT",
+        "entry_price": 69.748,
+        "contracts": 1.6,
+        "planned_risk_usd": 2.06,
+        "strategy_mode": "TREND_FOLLOWING",
+        "is_anti_bot": False,
+        "open_time": time.time() - 600
+    }
+    svc.active_positions = {"HYPE-USD": pos_data}
+
+    # Mock get_active_positions to simulate position found on engine
+    async def mock_get_active_positions(bypass_cache=False):
+        return [dict(pos_data)]
+    svc.get_active_positions = mock_get_active_positions
+
+    # Mock _fetch_verified_close_metrics
+    async def mock_metrics(sym, p_data):
+        return {
+            "symbol": sym,
+            "direction": p_data.get("direction", "SHORT"),
+            "entry_price": 69.748,
+            "exit_price": 69.252,
+            "closed_qty": 1.6,
+            "gross_pnl_usd": 0.7936,
+            "entry_fee_usd": 0.0391,
+            "exit_fee_usd": 0.0779,
+            "total_fee_usd": 0.0779,
+            "net_pnl_usd": 0.7157,
+            "pnl": 0.7157,
+            "pnl_usd": 0.7157,
+            "fee": 0.0779,
+            "is_exact": True,
+            "realized_r": 0.35,
+            "planned_risk_usd": 2.06,
+            "pnl_source": "EXACT",
+            "close_reason": p_data.get("close_reason", "SOFTWARE_FORCE_CLOSE"),
+            "triggered_by": p_data.get("triggered_by", "SOFTWARE_FORCE_CLOSE"),
+            "strategy_mode": p_data.get("strategy_mode", "UNKNOWN"),
+            "is_anti_bot": bool(p_data.get("is_anti_bot", False)),
+            "accumulated_slices_pnl": 0.0
+        }
+    svc._fetch_verified_close_metrics = mock_metrics
+
+    recorded_journal = []
+    def mock_record_closed(symbol, direction, entry_price, exit_price, net_pnl, pos_data, fee, triggered_by):
+        recorded_journal.append({
+            "symbol": symbol,
+            "direction": direction,
+            "triggered_by": triggered_by,
+            "net_pnl": net_pnl
+        })
+    svc._record_closed_trade_journal = mock_record_closed
+    svc._cancel_trigger_digests = AsyncMock(return_value=True)
+
+    success, pnl = await svc.force_close_position("HYPE-USD", exit_reason="MANUAL_TG_CLOSE")
+    assert success is True
+    assert abs(pnl - 0.7157) < 0.01
+
+    # Check journal triggered_by is MANUAL_TG_CLOSE
+    assert len(recorded_journal) == 1
+    assert recorded_journal[0]["triggered_by"] == "MANUAL_TG_CLOSE"
+
+    # Check _last_close_info contains MANUAL_TG_CLOSE
+    close_info = svc._last_close_info.get("HYPE-USD")
+    assert close_info is not None
+    assert close_info["close_reason"] == "MANUAL_TG_CLOSE"
+    assert close_info["triggered_by"] == "MANUAL_TG_CLOSE"
+    assert close_info["strategy_mode"] == "TREND_FOLLOWING"
+

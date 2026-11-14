@@ -472,14 +472,23 @@ class TradingPipeline:
 
                     if is_retest:
                         market_data["is_pullback_retest"] = True
+                        market_data["entry_trigger_type"] = "WATCHLIST_RETEST"
                         pb_ctx = getattr(self, "_pullback_context", {}).get(symbol, {})
                         if pb_ctx:
                             market_data["invalidation_price"] = pb_ctx.get("invalidation_price", 0.0)
                             market_data["target_pullback_price"] = pb_ctx.get("target_pullback_price", 0.0)
                             market_data["signal_price"] = pb_ctx.get("signal_price", 0.0)
+                            market_data["watchlist_metadata"] = {
+                                "signal_price": pb_ctx.get("signal_price", 0.0),
+                                "target_entry_price": pb_ctx.get("target_pullback_price", 0.0),
+                                "invalidation_price": pb_ctx.get("invalidation_price", 0.0),
+                                "htf_direction": pb_ctx.get("direction", retest_direction),
+                            }
                         if retest_direction:
                             market_data["pullback_retest_direction"] = retest_direction
                             market_data["retest_direction"] = retest_direction
+                    else:
+                        market_data["entry_trigger_type"] = "REGULAR_SCAN"
 
                 except Exception as e:
                     print(f"❌ Ошибка загрузки данных для {symbol}: {e}. Пропускаем.")
@@ -1109,7 +1118,8 @@ class TradingPipeline:
                             market_data=market_data,
                             ceo_verdict=ceo_verdict,
                             strategy_profile=strategy_profile,
-                            reason=final_trade_decision.guard_reason
+                            reason=final_trade_decision.guard_reason,
+                            target_pullback_price=final_trade_decision.get("target_pullback_price")
                         )
 
                     print(f"⏸️ Пропуск {symbol}. {final_trade_decision.guard_reason}")
@@ -1585,7 +1595,8 @@ class TradingPipeline:
                                 market_data=market_data,
                                 ceo_verdict=ceo_verdict,
                                 strategy_profile=strategy_profile,
-                                reason=risk_verdict.get("reasoning", "")
+                                reason=risk_verdict.get("reasoning", ""),
+                                target_pullback_price=risk_verdict.get("target_pullback_price")
                             )
 
                         execution_result = ExecutionResult(
@@ -2587,7 +2598,8 @@ class TradingPipeline:
         ceo_verdict: Dict[str, Any],
         strategy_profile: Any,
         reason: str = "",
-        ttl_seconds: int = 2700  # 45 minutes
+        ttl_seconds: int = 2700,  # 45 minutes
+        target_pullback_price: Optional[float] = None
     ):
         """
         Registers a high-conviction setup where price is temporarily extended from base (WAIT_FOR_PULLBACK).
@@ -2605,22 +2617,49 @@ class TradingPipeline:
         min_pullback_dist = max(0.5 * atr_14, current_price * 0.004) if atr_14 > 0 else (current_price * 0.008)
         inval_dist = 1.2 * atr_14 if atr_14 > 0 else (current_price * 0.015)
 
-        # Dynamic pullback target calculation tied to 15m EMA-20
-        if decision == "LONG":
-            target_pullback_price = round(
-                min(ema_20, current_price - min_pullback_dist) if (ema_20 > 0 and ema_20 < current_price) else (current_price - min_pullback_dist),
-                6
+        # Mathematical Inverse Solver P* Integration
+        if target_pullback_price is None or target_pullback_price <= 0:
+            from agents.risk_manager import solve_optimal_pullback_entry, get_normalized_atr_pct
+            norm_atr_pct = get_normalized_atr_pct(market_data, current_price)
+            max_sl_pct = max(1.25, min(3.50, 1.85 * norm_atr_pct))
+
+            struct_sl = (swing_low_15m - (0.30 * atr_14)) if decision == "LONG" else (swing_high_15m + (0.30 * atr_14))
+            tentative_tp_dist = max(atr_14 * 2.5, current_price * 0.035)
+            tentative_tp = current_price + tentative_tp_dist if decision == "LONG" else current_price - tentative_tp_dist
+
+            p_star = solve_optimal_pullback_entry(
+                direction=decision,
+                current_price=current_price,
+                structural_sl=struct_sl,
+                target_tp=tentative_tp,
+                atr_15m=atr_14,
+                max_sl_dist_pct=max_sl_pct,
+                max_risk_usd=float(getattr(config, "MAX_RISK_PER_TRADE_USD", 2.0) or 2.0),
+                min_notional_usd=100.0,
+                min_net_rr=1.40,
+                taker_fee_pct=0.0005
             )
+            if p_star is not None:
+                target_pullback_price = p_star
+            else:
+                if decision == "LONG":
+                    target_pullback_price = round(
+                        min(ema_20, current_price - min_pullback_dist) if (ema_20 > 0 and ema_20 < current_price) else (current_price - min_pullback_dist),
+                        6
+                    )
+                else:  # SHORT
+                    target_pullback_price = round(
+                        max(ema_20, current_price + min_pullback_dist) if (ema_20 > current_price) else (current_price + min_pullback_dist),
+                        6
+                    )
+
+        if decision == "LONG":
             raw_inval = target_pullback_price - inval_dist
             if swing_low_15m > 0:
                 invalidation_price = round(min(raw_inval, swing_low_15m - 0.30 * atr_14), 6)
             else:
                 invalidation_price = round(raw_inval, 6)
         else:  # SHORT
-            target_pullback_price = round(
-                max(ema_20, current_price + min_pullback_dist) if (ema_20 > current_price) else (current_price + min_pullback_dist),
-                6
-            )
             raw_inval = target_pullback_price + inval_dist
             if swing_high_15m > 0:
                 invalidation_price = round(max(raw_inval, swing_high_15m + 0.30 * atr_14), 6)

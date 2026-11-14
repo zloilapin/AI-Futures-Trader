@@ -161,20 +161,130 @@ except Exception as e:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# ⚡ Bayesian Tuned Hyperparameters Loader with Hot-Reload and Safety Clamps
+# ⚡ Bayesian Tuned Hyperparameters Loader with Hot-Reload and Invariant Schema Bounds
 # ═════════════════════════════════════════════════════════════════════════════
 
-_TUNED_CACHE: Dict[str, Any] = {"mtime": 0.0, "params": {}}
+SCHEMA_VERSION: int = 2
+
+PARAMETER_INVARIANTS: Dict[str, Dict[str, Any]] = {
+    "half_risk_activation_r": {
+        "bounds": (0.50, 0.95),
+        "default": 0.75,
+        "type": float,
+    },
+    "be_activation_r": {
+        "bounds": (1.10, 1.40),
+        "default": 1.15,
+        "type": float,
+        "relational_check": lambda p: p.get("be_activation_r", 1.15) >= p.get("half_risk_activation_r", 0.75) + 0.35,
+        "heal": lambda p: max(p.get("be_activation_r", 1.15), p.get("half_risk_activation_r", 0.75) + 0.35)
+    },
+    "trail_activation_r": {
+        "bounds": (1.40, 2.50),
+        "default": 1.50,
+        "type": float,
+        "relational_check": lambda p: p.get("trail_activation_r", 1.50) >= p.get("be_activation_r", 1.15) + 0.25,
+        "heal": lambda p: max(p.get("trail_activation_r", 1.50), p.get("be_activation_r", 1.15) + 0.25)
+    },
+    "chop_range_threshold": {"bounds": (50.0, 72.0), "default": 59.0, "type": float},
+    "anti_chop_bb_max": {"bounds": (68.0, 90.0), "default": 89.0, "type": float},
+    "min_reduce_size_conv": {"bounds": (60.0, 75.0), "default": 71.0, "type": float},
+    "trailing_atr_mult": {"bounds": (1.50, 3.00), "default": 2.00, "type": float},
+    "min_kelly_mult": {"bounds": (0.50, 1.00), "default": 1.00, "type": float},
+}
 
 # Hard safety bounds (Safety Clamps) that Optuna / tuned values can never exceed
 _SAFETY_BOUNDS: Dict[str, Tuple[float, float]] = {
-    "chop_range_threshold": (50.0, 72.0),
-    "anti_chop_bb_max": (68.0, 90.0),
-    "min_reduce_size_conv": (60.0, 75.0),
-    "be_activation_r": (0.70, 0.90),
-    "trailing_atr_mult": (1.50, 3.00),
-    "min_kelly_mult": (0.50, 1.00),
+    k: v["bounds"] for k, v in PARAMETER_INVARIANTS.items()
 }
+
+_TUNED_CACHE: Dict[str, Any] = {"mtime": 0.0, "params": {}}
+
+
+def validate_and_clamp_params(
+    params: Dict[str, Any],
+    auto_heal_disk: bool = False,
+    source_path: Optional[Path] = None
+) -> Dict[str, Any]:
+    """
+    Centralized Parameter Invariant Validator (Module 04 Guard):
+    Clamps parameters to hard [min_val, max_val] bounds and enforces relational invariants:
+      1. be_activation_r in [1.10, 1.40] and be_activation_r >= half_risk_activation_r + 0.35
+      2. trail_activation_r in [1.40, 2.50] and trail_activation_r >= be_activation_r + 0.25
+    If auto_heal_disk is True and violations or schema version mismatches are found, heals disk file.
+    """
+    if not isinstance(params, dict):
+        return {}
+
+    clamped = dict(params)
+    modified = False
+
+    # 1. Individual Bounds Clamping
+    for key, spec in PARAMETER_INVARIANTS.items():
+        if key in clamped:
+            try:
+                val = float(clamped[key])
+                lo, hi = spec["bounds"]
+                bounded_val = max(lo, min(hi, val))
+                if abs(bounded_val - val) > 1e-6:
+                    print(f"⚠️ [ConfigGuard] Clamped parameter '{key}' from {val} to {bounded_val} within bounds [{lo}, {hi}].")
+                    clamped[key] = bounded_val
+                    modified = True
+            except (ValueError, TypeError):
+                clamped[key] = spec["default"]
+                modified = True
+
+    # 2. Relational Invariants (half_risk -> be -> trail)
+    if "half_risk_activation_r" in clamped or "be_activation_r" in clamped or "trail_activation_r" in clamped:
+        hr = float(clamped.get("half_risk_activation_r", 0.75))
+        lo_hr, hi_hr = PARAMETER_INVARIANTS["half_risk_activation_r"]["bounds"]
+        hr = max(lo_hr, min(hi_hr, hr))
+        if abs(hr - float(clamped.get("half_risk_activation_r", 0.75))) > 1e-6:
+            clamped["half_risk_activation_r"] = hr
+            modified = True
+
+        be = float(clamped.get("be_activation_r", 1.15))
+        lo_be, hi_be = PARAMETER_INVARIANTS["be_activation_r"]["bounds"]
+        be = max(lo_be, min(hi_be, be))
+        min_be = hr + 0.35
+        if be < min_be:
+            be = min_be
+            clamped["be_activation_r"] = be
+            modified = True
+            print(f"⚠️ [ConfigGuard] Healed relational invariant: be_activation_r set to {be:.2f} (>= half_risk {hr:.2f} + 0.35).")
+        clamped["be_activation_r"] = be
+
+        tr = float(clamped.get("trail_activation_r", 1.50))
+        lo_tr, hi_tr = PARAMETER_INVARIANTS["trail_activation_r"]["bounds"]
+        tr = max(lo_tr, min(hi_tr, tr))
+        min_tr = be + 0.25
+        if tr < min_tr:
+            tr = min_tr
+            clamped["trail_activation_r"] = tr
+            modified = True
+            print(f"⚠️ [ConfigGuard] Healed relational invariant: trail_activation_r set to {tr:.2f} (>= be {be:.2f} + 0.25).")
+        clamped["trail_activation_r"] = tr
+
+    # 3. Disk Auto-Heal
+    if auto_heal_disk and source_path and source_path.exists():
+        try:
+            raw_text = source_path.read_text(encoding="utf-8")
+            raw_json = json.loads(raw_text)
+            schema_ver = raw_json.get("schema_version", 1)
+            if modified or schema_ver < SCHEMA_VERSION:
+                raw_json["schema_version"] = SCHEMA_VERSION
+                if "best_params" in raw_json and isinstance(raw_json["best_params"], dict):
+                    raw_json["best_params"].update(clamped)
+                elif "params" in raw_json and isinstance(raw_json["params"], dict):
+                    raw_json["params"].update(clamped)
+                else:
+                    raw_json["best_params"] = clamped
+                source_path.write_text(json.dumps(raw_json, indent=4), encoding="utf-8")
+                print(f"✅ [ConfigGuard] Auto-healed parameter schema to v{SCHEMA_VERSION} on disk: {source_path}")
+        except Exception as e:
+            print(f"⚠️ [ConfigGuard] Error auto-healing {source_path}: {e}")
+
+    return clamped
 
 
 def _resolve_tuned_path() -> Optional[Path]:
@@ -207,7 +317,7 @@ def reset_tuned_param_cache() -> None:
 def get_tuned_param(key: str, default: float) -> float:
     """
     Reads calibrated hyperparameter from tuned_hyperparams.json with hot reloading
-    via mtime and strict bounding within _SAFETY_BOUNDS.
+    via mtime and strict bounding within PARAMETER_INVARIANTS.
     """
     resolved_path = _resolve_tuned_path()
     if resolved_path is not None and resolved_path.exists():
@@ -217,7 +327,8 @@ def get_tuned_param(key: str, default: float) -> float:
                 raw = json.loads(resolved_path.read_text(encoding="utf-8"))
                 params = raw.get("best_params") or raw.get("params") or {}
                 if isinstance(params, dict):
-                    _TUNED_CACHE["params"] = params
+                    clamped = validate_and_clamp_params(params, auto_heal_disk=True, source_path=resolved_path)
+                    _TUNED_CACHE["params"] = clamped
                     _TUNED_CACHE["mtime"] = mtime
         except Exception:
             pass

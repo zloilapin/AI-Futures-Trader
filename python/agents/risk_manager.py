@@ -35,11 +35,207 @@ def _is_finite_non_negative(val: Any) -> bool:
     except (TypeError, ValueError):
         return False
 
+
+def get_normalized_atr_pct(market_data: Optional[Dict[str, Any]], entry_price: float) -> float:
+    """
+    Module 02: Unified ATR_1h_pct Data Contract.
+    Standardizes ATR_1h_pct across all assets as a percentage of entry price in range [0.25%, 20.0%].
+    Priority resolution:
+      a. market_data["volatility_metrics"]["atr_1h_pct"]
+      b. (market_data["indicators"]["atr_1h"] / entry_price) * 100
+      c. Fallback to atr_15m scaled by sqrt(4) = 2.0: (atr_15m * 2.0 / entry_price) * 100
+      d. Clamped to [0.25, 20.0].
+    """
+    if not isinstance(market_data, dict):
+        return 1.50
+
+    try:
+        cur_px = float(entry_price or 0.0)
+    except (ValueError, TypeError):
+        cur_px = 0.0
+
+    if cur_px <= 0.0:
+        try:
+            cur_px = float(
+                (market_data.get("price_data") or {}).get("current_price")
+                or (market_data.get("indicators") or {}).get("current_price")
+                or 0.0
+            )
+        except (ValueError, TypeError):
+            cur_px = 0.0
+
+    # a. Check volatility_metrics["atr_1h_pct"]
+    vol_metrics = market_data.get("volatility_metrics") or {}
+    if isinstance(vol_metrics, dict):
+        val = vol_metrics.get("atr_1h_pct")
+        if val is not None:
+            try:
+                f_val = float(val)
+                if math.isfinite(f_val) and f_val > 0.0:
+                    return max(0.25, min(20.0, f_val))
+            except (ValueError, TypeError):
+                pass
+
+    indicators = market_data.get("indicators") or {}
+    if isinstance(indicators, dict):
+        # Explicit percentage field in indicators
+        for k in ("atr_1h_pct", "atr_pct"):
+            val = indicators.get(k)
+            if val is not None:
+                try:
+                    f_val = float(val)
+                    if math.isfinite(f_val) and f_val > 0.0:
+                        return max(0.25, min(20.0, f_val))
+                except (ValueError, TypeError):
+                    pass
+
+        # b. Absolute 1h ATR divided by entry_price * 100
+        for k in ("atr_1h", "atr_60m", "atr_1h_val"):
+            val = indicators.get(k)
+            if val is not None and cur_px > 0.0:
+                try:
+                    f_val = float(val)
+                    if math.isfinite(f_val) and f_val > 0.0:
+                        pct = (f_val / cur_px) * 100.0
+                        return max(0.25, min(20.0, pct))
+                except (ValueError, TypeError):
+                    pass
+
+        # c. Fallback to atr_15m scaled by sqrt(4) = 2.0
+        for k in ("atr_15m", "atr_14", "atr"):
+            val = indicators.get(k)
+            if val is not None and cur_px > 0.0:
+                try:
+                    f_val = float(val)
+                    if math.isfinite(f_val) and f_val > 0.0:
+                        pct = ((f_val * 2.0) / cur_px) * 100.0
+                        return max(0.25, min(20.0, pct))
+                except (ValueError, TypeError):
+                    pass
+
+    return 1.50
+
+
+def solve_optimal_pullback_entry(
+    direction: str,
+    current_price: float,
+    structural_sl: float,
+    target_tp: float,
+    atr_15m: float,
+    max_sl_dist_pct: float,
+    max_risk_usd: float,
+    min_notional_usd: float = 100.0,
+    min_net_rr: float = 1.40,
+    taker_fee_pct: float = 0.0005,
+) -> Optional[float]:
+    """
+    Module 02: Mathematical Inverse Pullback Price Solver (P*).
+    Derives the closed-form boundary for the optimal limit entry price P* that simultaneously satisfies:
+      (1) Stop Distance Invariant: abs(P* - S) / P* <= 0.90 * (max_sl_dist_pct / 100.0)
+      (2) Minimum Notional Risk Cap: (min_notional_usd / P*) * abs(P* - S) <= 0.95 * max_risk_usd
+      (3) Minimum Net R:R Invariant: abs(T - P*) / abs(P* - S) >= min_net_rr (accounting for 2*taker_fee_pct)
+      (4) Breathing Room: abs(P* - S) >= 0.60 * atr_15m
+    Returns P* if a solution exists in the pullback zone between current_price and structural_sl, or None.
+    """
+    dir_clean = str(direction or "").upper().strip()
+    if dir_clean not in ("LONG", "SHORT"):
+        return None
+
+    try:
+        p_mkt = float(current_price)
+        s = float(structural_sl)
+        t = float(target_tp)
+        atr = float(atr_15m)
+        max_sl_pct = float(max_sl_dist_pct)
+        risk_usd = float(max_risk_usd)
+        min_notional = float(min_notional_usd)
+        k_rr = float(min_net_rr)
+        fee = float(taker_fee_pct)
+    except (ValueError, TypeError):
+        return None
+
+    if p_mkt <= 0 or s <= 0 or t <= 0 or max_sl_pct <= 0 or risk_usd <= 0 or min_notional <= 0 or k_rr <= 0:
+        return None
+
+    if atr <= 0:
+        atr = p_mkt * 0.005
+
+    # 1. Stop Distance Invariant limit:
+    d_max = 0.90 * (max_sl_pct / 100.0)
+
+    # 2. Risk on Min Notional limit:
+    r_max = (0.95 * risk_usd) / min_notional
+
+    # Combined fractional stop cap:
+    d_cap = min(d_max, r_max)
+    if d_cap <= 0.0 or d_cap >= 1.0:
+        return None
+
+    # 4. Breathing Room:
+    b_min = 0.60 * atr
+
+    # Round-trip fee fraction:
+    f_fee = 2.0 * fee
+
+    if dir_clean == "SHORT":
+        # Price is expected to pull back UP towards S before resuming DOWN towards T.
+        # Required order: T < p_mkt < S. Pullback entry: p_mkt <= P* < S.
+        if s <= p_mkt or t >= p_mkt:
+            return None
+
+        # Stop distance is S - P*.
+        # (S - P*) / P* <= d_cap  =>  P* >= S / (1 + d_cap)
+        p_stop_bound = s / (1.0 + d_cap)
+
+        # Net R:R: (P* - T) / (S - P*) >= k_rr with fees
+        denom_rr = (1.0 + k_rr) * max(0.001, (1.0 - f_fee))
+        p_rr_bound = (k_rr * s + t) / denom_rr
+
+        # Lower bound on P*:
+        p_min = max(p_mkt, p_stop_bound, p_rr_bound)
+
+        # Breathing room upper bound: S - P* >= b_min  =>  P* <= S - b_min
+        p_max = s - b_min
+
+        if p_min > p_max:
+            return None
+
+        return round(p_min, 6)
+
+    elif dir_clean == "LONG":
+        # Price is expected to pull back DOWN towards S before resuming UP towards T.
+        # Required order: S < p_mkt < T. Pullback entry: S < P* <= p_mkt.
+        if s >= p_mkt or t <= p_mkt:
+            return None
+
+        # Stop distance is P* - S.
+        # (P* - S) / P* <= d_cap  =>  P* <= S / (1.0 - d_cap)
+        p_stop_bound = s / (1.0 - d_cap)
+
+        # Net R:R: (T - P*) / (P* - S) >= k_rr with fees
+        denom_rr = (1.0 + k_rr) * (1.0 + f_fee)
+        p_rr_bound = (k_rr * s + t) / denom_rr
+
+        # Upper bound on P*:
+        p_max = min(p_mkt, p_stop_bound, p_rr_bound)
+
+        # Breathing room lower bound: P* - S >= b_min  =>  P* >= S + b_min
+        p_min = s + b_min
+
+        if p_min > p_max:
+            return None
+
+        return round(p_max, 6)
+
+    return None
+
 class RiskManager(BaseAgent):
     """
     Gatekeeper agent responsible for capital preservation, risk profiles, and position sizing.
     Calculates exact Take Profit (TP), Stop Loss (SL), position amount (USD / %), and risk/reward ratio.
     """
+    get_normalized_atr_pct = staticmethod(get_normalized_atr_pct)
+    solve_optimal_pullback_entry = staticmethod(solve_optimal_pullback_entry)
     def __init__(self, logger: TradeLogger, llm_client: LLMClient, default_macro_regime: str = "UNKNOWN"):
         super().__init__("Risk_Manager", logger, llm_client)
         self.default_macro_regime = default_macro_regime
@@ -480,7 +676,14 @@ class RiskManager(BaseAgent):
         info_str = f"Beta({alpha:.1f}, {beta:.1f}) -> p={posterior_win_prob:.2f} [Bucket: {key}]"
         return bayes_mult, round(posterior_win_prob, 4), info_str
 
-    def _build_veto_result(self, veto_category: str, reason: str, trade_action: str = "HOLD") -> Dict[str, Any]:
+    def _build_veto_result(
+        self,
+        veto_category: str,
+        reason: str,
+        trade_action: str = "HOLD",
+        target_pullback_price: Optional[float] = None,
+        watchlist_metadata: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """Uniform dictionary constructor for rejected / vetoed trade candidates."""
         return {
             "approved": False,
@@ -501,7 +704,9 @@ class RiskManager(BaseAgent):
             "stop_loss_pct": 0.0,
             "risk_reward_ratio": 0.0,
             "liquidation_price": 0.0,
-            "position_size_pct": 0.0
+            "position_size_pct": 0.0,
+            "target_pullback_price": target_pullback_price,
+            "watchlist_metadata": watchlist_metadata or {}
         }
 
     async def analyze(self, ceo_decision: Dict[str, Any], portfolio_data: Dict[str, Any], market_data: Dict[str, Any], effective_profile: str = "BALANCED", macro_regime: Optional[str] = None, strategy_mode: str = "TREND_FOLLOWING") -> Dict[str, Any]:
@@ -1079,27 +1284,13 @@ class RiskManager(BaseAgent):
                 else:
                     tier_base_pct, tier_min_pct, tier_max_pct = 3.10, 1.95, 3.25
 
-                # 1. Dynamic Formula (when 1h ATR % or 15m ATR is available in market context):
-                # max_sl_dist_pct = clip(1.8 * atr_1h_pct, tier_min_pct, tier_max_pct)
-                atr_1h_pct = float(
-                    indicators.get("atr_1h_pct")
-                    or (indicators.get("atr_pct") if float(indicators.get("atr_pct") or 0.0) > 0 else 0.0)
-                    or 0.0
-                )
-                if atr_1h_pct <= 0.0:
-                    atr_1h_val = float(indicators.get("atr_1h", 0.0) or indicators.get("atr_60m", 0.0) or 0.0)
-                    if atr_1h_val > 0.0 and current_price > 0.0:
-                        atr_1h_pct = (atr_1h_val / current_price) * 100.0
-                    elif atr_14 > 0.0 and current_price > 0.0:
-                        atr_1h_pct = (atr_14 / current_price) * 100.0
-
-                if atr_1h_pct > 0.0:
-                    max_sl_dist_allowed = min(max(1.8 * atr_1h_pct, tier_min_pct), tier_max_pct)
-                else:
-                    max_sl_dist_allowed = tier_base_pct
+                # 1. Dynamic Formula (Unified ATR_1h_pct contract):
+                # max_sl_dist_allowed = clip(1.85 * atr_1h_pct, 1.25, 3.50)
+                atr_1h_pct = get_normalized_atr_pct(market_data, current_price)
+                max_sl_dist_allowed = max(1.25, min(3.50, 1.85 * atr_1h_pct))
 
                 if is_retest:
-                    max_sl_dist_allowed = max(max_sl_dist_allowed, tier_max_pct)
+                    max_sl_dist_allowed = max(max_sl_dist_allowed, 2.50)
 
                 # High-Conviction Grace Buffer (+0.05% / 5 bps)
                 ceo_conv = float(_extract_cand_field(ceo_decision, "conviction") or 0.0)
@@ -1121,17 +1312,45 @@ class RiskManager(BaseAgent):
                     struct_dist_pct = ((current_price - structural_sl) / current_price) * 100.0 if current_price > 0 and structural_sl < current_price else 0.0
 
                 # Distance-to-Structure Gate (Step 4):
-                # If distance to structural SL > max_sl_dist_allowed (1.95% or 2.50% for retest),
-                # do NOT compress stop into noise zone! Reject immediate market entry and route to WAIT_FOR_PULLBACK.
+                # If distance to structural SL > max_sl_dist_allowed,
+                # do NOT compress stop into noise zone! Check mathematical inverse solver P*.
                 if struct_dist_pct > max_sl_dist_allowed:
                     lvl_ref = swing_high_15m if decision == "SHORT" else swing_low_15m
-                    msg = (
-                        f"Distance-to-Structure Gate: Расстояние до структурного стопа ({struct_dist_pct:.2f}% > {max_sl_dist_allowed:.2f}%) "
-                        f"слишком велико из-за позднего входа (структурный SL={structural_sl:.4f} за уровнем {lvl_ref:.4f}). "
-                        f"Сжатие стопа внутрь зоны шума запрещено. Рекомендуется WAIT_FOR_PULLBACK ближе к уровню ретеста."
+                    
+                    effective_min_rr = float(min_rr_required if ('min_rr_required' in locals() and min_rr_required > 0) else profile_rules.get("min_rr", 1.40))
+                    tentative_tp_dist = max(atr_14 * tp_mult, (current_price * (max_sl_dist_allowed / 100.0)) * effective_min_rr)
+                    tentative_tp = current_price + tentative_tp_dist if decision == "LONG" else current_price - tentative_tp_dist
+                    
+                    calc_risk_budget = float(ceo_decision.get("approved_risk_usd") or remaining_risk_budget_usd or (total_balance * 0.02) or 2.0)
+                    p_star = solve_optimal_pullback_entry(
+                        direction=decision,
+                        current_price=current_price,
+                        structural_sl=structural_sl,
+                        target_tp=float(ceo_decision.get("tp_price") or tentative_tp),
+                        atr_15m=atr_14,
+                        max_sl_dist_pct=max_sl_dist_allowed,
+                        max_risk_usd=calc_risk_budget,
+                        min_notional_usd=float(derivatives_data.get("min_notional", 100.0) or 100.0),
+                        min_net_rr=effective_min_rr,
+                        taker_fee_pct=fee_pct / 2.0 if ('fee_pct' in locals() and fee_pct > 0) else 0.0005,
                     )
-                    self.logger.warning(f"[{self.name}] ❌ DISTANCE_TO_STRUCTURE_VETO: {msg}")
-                    return self._build_veto_result("DISTANCE_TO_STRUCTURE_VETO", msg, "WAIT_FOR_PULLBACK")
+                    if p_star is not None:
+                        msg = (
+                            f"Distance-to-Structure Gate: Расстояние до структурного стопа ({struct_dist_pct:.2f}% > {max_sl_dist_allowed:.2f}%) "
+                            f"слишком велико из-за позднего входа (структурный SL={structural_sl:.4f} за уровнем {lvl_ref:.4f}). "
+                            f"Сжатие стопа внутрь зоны шума запрещено. Математический инверсный солвер P* рассчитал оптимальную цену "
+                            f"отката P*=${p_star:.4f}. Маршрутизировано в WAIT_FOR_PULLBACK."
+                        )
+                        self.logger.warning(f"[{self.name}] ❌ DISTANCE_TO_STRUCTURE_VETO: {msg}")
+                        return self._build_veto_result("DISTANCE_TO_STRUCTURE_VETO", msg, "WAIT_FOR_PULLBACK", target_pullback_price=p_star)
+                    else:
+                        msg = (
+                            f"Distance-to-Structure Gate: Расстояние до структурного стопа ({struct_dist_pct:.2f}% > {max_sl_dist_allowed:.2f}%) "
+                            f"слишком велико, и математический инверсный солвер P* подтвердил невозможность удовлетворить "
+                            f"инварианты риска и стопа на данном уровне. Сетап отклонен (DISCARD)."
+                        )
+                        self.logger.warning(f"[{self.name}] ❌ DISTANCE_TO_STRUCTURE_VETO: {msg}")
+                        return self._build_veto_result("DISTANCE_TO_STRUCTURE_VETO", msg, "HOLD")
 
                 # Capped ATR distance so that 1.75*ATR multiplier never pushes a valid structural entry beyond max_sl_dist_allowed
                 capped_atr_dist = min(sl_dist_clamped, current_price * (max_sl_dist_allowed / 100.0))
@@ -1267,13 +1486,32 @@ class RiskManager(BaseAgent):
         # Strict Risk/Reward Floor Validation (UNIVERSAL — applies to ALL strategy modes):
         # min_rr_required is loaded from profile rules and MUST be enforced here.
         if candidate_net_rr < min_rr_required:
-            msg = (f"{strategy_mode} net RR ({candidate_net_rr:.2f}) is below minimum required "
-                   f"{min_rr_required:.2f}:1 for {profile_name} profile "
-                   f"(after slippage and fees). "
-                   f"TP dist={distance_to_tp:.4f}, SL dist={distance_to_sl:.4f}, "
-                   f"fees={unit_entry_fee + unit_tp_exit_fee:.4f}, funding={unit_funding_cost:.4f}. Routed to WAIT_FOR_PULLBACK.")
-            self.logger.warning(f"[{self.name}] ❌ POOR_RISK_REWARD VETO: {msg}")
-            return self._build_veto_result("POOR_RISK_REWARD", msg, "WAIT_FOR_PULLBACK")
+            p_star = solve_optimal_pullback_entry(
+                direction=decision,
+                current_price=current_price,
+                structural_sl=sl_price,
+                target_tp=tp_price,
+                atr_15m=atr_14,
+                max_sl_dist_pct=max_sl_dist_allowed,
+                max_risk_usd=approved_risk_usd if ('approved_risk_usd' in locals() and approved_risk_usd > 0) else approved_budget,
+                min_notional_usd=float(derivatives_data.get("min_notional", 100.0) or 100.0),
+                min_net_rr=min_rr_required,
+                taker_fee_pct=fee_pct / 2.0 if ('fee_pct' in locals() and fee_pct > 0) else 0.0005,
+            )
+            if p_star is not None:
+                msg = (f"{strategy_mode} net RR ({candidate_net_rr:.2f}) is below minimum required "
+                       f"{min_rr_required:.2f}:1 for {profile_name} profile "
+                       f"(after slippage and fees). "
+                       f"TP dist={distance_to_tp:.4f}, SL dist={distance_to_sl:.4f}. "
+                       f"Инверсный солвер P* рассчитал цену входа ${p_star:.4f} с целевым R:R >= {min_rr_required:.2f}:1. "
+                       f"Маршрутизировано в WAIT_FOR_PULLBACK.")
+                self.logger.warning(f"[{self.name}] ❌ POOR_RISK_REWARD VETO: {msg}")
+                return self._build_veto_result("POOR_RISK_REWARD", msg, "WAIT_FOR_PULLBACK", target_pullback_price=p_star)
+            else:
+                msg = (f"{strategy_mode} net RR ({candidate_net_rr:.2f}) is below minimum required "
+                       f"{min_rr_required:.2f}:1 and solver confirmed no valid P* satisfies risk invariants. Discarded.")
+                self.logger.warning(f"[{self.name}] ❌ POOR_RISK_REWARD VETO: {msg}")
+                return self._build_veto_result("POOR_RISK_REWARD", msg, "HOLD")
 
         # Pre-compute Bayesian Strategy Multiplier before Expectancy Gate
         strat_tag = str(strategy_mode or "TREND_FOLLOWING").upper()
@@ -1961,13 +2199,34 @@ class RiskManager(BaseAgent):
                 margin_pct = round((margin_usd / total_balance) * 100 if total_balance > 0 else 0, 2)
                 is_trigger_bumped = True
             else:
-                msg = (
-                    f"VETO: MIN_NOTIONAL (${notional_usd:.2f} < $101.00 exchange CLOB min_size). "
-                    f"Calculated notional is below exchange minimum and cannot be safely bumped to ${target_min_clob:.2f} "
-                    f"(bump risk ${bump_risk:.2f} vs cap ${max_allowed_risk_budget:.2f}, margin ${bump_margin:.2f} vs usable ${usable_margin:.2f})."
+                p_star = solve_optimal_pullback_entry(
+                    direction=decision,
+                    current_price=current_price,
+                    structural_sl=sl_price,
+                    target_tp=tp_price,
+                    atr_15m=atr_14,
+                    max_sl_dist_pct=max_sl_dist_allowed,
+                    max_risk_usd=max_allowed_risk_budget,
+                    min_notional_usd=target_min_clob,
+                    min_net_rr=float(min_rr_required if ('min_rr_required' in locals() and min_rr_required > 0) else profile_rules.get("min_rr", 1.40)),
+                    taker_fee_pct=fee_pct / 2.0 if ('fee_pct' in locals() and fee_pct > 0) else 0.0005,
                 )
-                self.logger.warning(f"[{self.name}] 🚫 MIN_NOTIONAL VETO: {msg}")
-                return self._build_veto_result("MIN_NOTIONAL", msg, trade_action)
+                if p_star is not None:
+                    msg = (
+                        f"VETO: MIN_NOTIONAL (${notional_usd:.2f} < $101.00 exchange CLOB min_size). "
+                        f"Инверсный солвер P* рассчитал цену отката ${p_star:.4f}, позволяющую открыть минимальный лот "
+                        f"без превышения лимита риска (${max_allowed_risk_budget:.2f}). Маршрутизировано в WAIT_FOR_PULLBACK."
+                    )
+                    self.logger.warning(f"[{self.name}] 🚫 MIN_NOTIONAL VETO: {msg}")
+                    return self._build_veto_result("MIN_NOTIONAL", msg, "WAIT_FOR_PULLBACK", target_pullback_price=p_star)
+                else:
+                    msg = (
+                        f"VETO: MIN_NOTIONAL (${notional_usd:.2f} < $101.00 exchange CLOB min_size). "
+                        f"Calculated notional is below exchange minimum and cannot be safely bumped to ${target_min_clob:.2f} "
+                        f"(bump risk ${bump_risk:.2f} vs cap ${max_allowed_risk_budget:.2f}, margin ${bump_margin:.2f} vs usable ${usable_margin:.2f})."
+                    )
+                    self.logger.warning(f"[{self.name}] 🚫 MIN_NOTIONAL VETO: {msg}")
+                    return self._build_veto_result("MIN_NOTIONAL", msg, trade_action)
         elif notional_usd > max_notional_usd:
             msg = f"Required notional ${notional_usd:.2f} exceeds max allowed ${max_notional_usd:.2f}."
             self.logger.warning(f"[{self.name}] 🚫 MAX NOTIONAL VETO: {msg}")

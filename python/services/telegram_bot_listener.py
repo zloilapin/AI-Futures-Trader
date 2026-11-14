@@ -2668,6 +2668,66 @@ class TelegramBotListener:
             print(f"❌ [TelegramListener] Ошибка обработки команды '{cmd}': {type(e).__name__}: {e}")
             traceback.print_exc()
 
+    async def _notify_manual_position_closed(self, sym: str, success: bool, pnl: float, chat_id: Optional[str] = None):
+        """
+        Dispatches formatted position closure card to triggering user, admin, and public channel.
+        Ensures full financial transparency matching Sentinel / Fast Price Monitor notifications.
+        """
+        from services.telegram_service import TelegramService
+        tg = TelegramService()
+        if success:
+            base_sym = sym.split('-')[0].upper()
+            canonical_sym = f"{base_sym}-USD"
+            close_info = (
+                getattr(self.trading_service, "_last_close_info", {}).get(sym)
+                or getattr(self.trading_service, "_last_close_info", {}).get(canonical_sym)
+                or getattr(self.trading_service, "_last_close_info", {}).get(base_sym)
+                or {}
+            )
+            try:
+                from agents.telegram_agent import TelegramAgent
+                from core.logger import TradeLogger
+                tg_agent = TelegramAgent(TradeLogger("TelegramBot"), None)
+                msg = tg_agent.format_position_closed_message(close_info)
+                if not msg or not msg.strip():
+                    raise ValueError("Empty format_position_closed_message")
+            except Exception:
+                mode = "⚡ [БОЕВАЯ]"
+                emoji = "🎉" if pnl >= 0 else "🔻"
+                msg = (
+                    f"{emoji} {mode} *ПОЗИЦИЯ ЗАКРЫТА ВРУЧНУЮ (MANUAL)*\n\n"
+                    f"🪙 *Монета:* `{sym}`\n"
+                    f"💰 *PnL:* `${pnl:+.4f}`\n"
+                    f"🏷 *Причина:* `MANUAL_TG_CLOSE`"
+                )
+
+            # 1. Send to current user chat
+            target_chat = str(chat_id or "").strip()
+            if target_chat:
+                try:
+                    await tg.send_message(msg, chat_id=target_chat)
+                except Exception as e:
+                    print(f"⚠️ [TelegramListener] Error sending close notification to user chat: {e}")
+
+            # 2. Also send to primary admin chat if different
+            admin_chat = str(getattr(tg, "chat_id", "") or "").strip()
+            if admin_chat and admin_chat != target_chat:
+                try:
+                    await tg.send_message(msg, chat_id=admin_chat)
+                except Exception as e:
+                    print(f"⚠️ [TelegramListener] Error sending close notification to admin chat: {e}")
+
+            # 3. Broadcast to public channel if configured
+            try:
+                await tg.broadcast_to_channel(msg)
+            except Exception as e:
+                print(f"⚠️ [TelegramListener] Error broadcasting close notification to channel: {e}")
+        else:
+            err_msg = f"❌ Ошибка при попытке принудительного закрытия {sym}."
+            target_chat = str(chat_id or "").strip()
+            if target_chat:
+                await tg.send_message(err_msg, chat_id=target_chat)
+
     async def handle_callback(self, callback_id: str, callback_data: str, chat_id: str, message_id: Optional[int] = None):
         print(f"🔘 [TelegramListener] Нажата кнопка: {callback_data} (chat_id={chat_id})")
         from services.telegram_service import TelegramService
@@ -2805,8 +2865,13 @@ class TelegramBotListener:
         elif callback_data.startswith("close_confirm:"):
             sym = callback_data.replace("close_confirm:", "")
             if is_admin:
-                await self.trading_service.force_close_position(sym, exit_reason="MANUAL_TG_CLOSE")
-                await tg.answer_callback_query(callback_id, f"🚨 Позиция {sym} закрыта по рынку!")
+                await tg.answer_callback_query(callback_id, f"Закрываю {sym}... ⏳")
+                success, pnl = await self.trading_service.force_close_position(sym, exit_reason="MANUAL_TG_CLOSE")
+                if success:
+                    await tg.answer_callback_query(callback_id, f"🚨 Позиция {sym} закрыта по рынку!")
+                else:
+                    await tg.answer_callback_query(callback_id, f"❌ Ошибка закрытия {sym}", show_alert=True)
+                await self._notify_manual_position_closed(sym, success, pnl, chat_id=chat_id)
             else:
                 await tg.answer_callback_query(callback_id, "🔒 Доступно только администратору.", show_alert=True)
             text_p, markup_p = await self._get_positions_payload(chat_id, is_admin)
@@ -3055,23 +3120,9 @@ class TelegramBotListener:
                 await tg.answer_callback_query(callback_id, "Ошибка: Не указан символ.")
                 return
             await tg.answer_callback_query(callback_id, f"Закрываю {symbol}... ⏳")
-            
-            success, pnl = await self.trading_service.force_close_position(symbol)
-            if success:
-                close_info = getattr(self.trading_service, "_last_close_info", {}).get(symbol) or {}
-                try:
-                    from agents.telegram_agent import TelegramAgent
-                    from core.logger import TradeLogger
-                    tg_agent = TelegramAgent(TradeLogger("TelegramBot"), None)
-                    msg = tg_agent.format_position_closed_message(close_info)
-                except Exception:
-                    mode = "⚡ [БОЕВАЯ]"
-                    emoji = "🎉" if pnl >= 0 else "🔻"
-                    msg = f"{emoji} {mode} Сделка по {symbol} ЗАКРЫТА ВРУЧНУЮ!\n💰 PnL: `${pnl:+.2f}`"
-                await tg.send_message(msg)
-                await tg.broadcast_to_channel(msg)
-            else:
-                await tg.send_message(f"❌ Ошибка закрытия {symbol}.")
+            success, pnl = await self.trading_service.force_close_position(symbol, exit_reason="MANUAL_TG_CLOSE")
+            await self._notify_manual_position_closed(symbol, success, pnl, chat_id=chat_id)
+            return
                 
         elif callback_data == "toggle_predator":
             from core.config import config

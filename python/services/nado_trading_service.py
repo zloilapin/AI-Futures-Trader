@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Dict, Any, List, Optional, Tuple, Set, Union
 from core.interfaces import BaseTradingService
 from core.web3_wallet import Web3Wallet
-from core.config import config, get_tuned_param
+from core.config import config, get_tuned_param, validate_and_clamp_params
 
 logger = logging.getLogger("System_Core")
 
@@ -799,7 +799,7 @@ class NadoTradingService(BaseTradingService):
                     f"[NadoTradingService] 👻 [SHADOW MODE] Virtual order executed: {direction} {contracts} {symbol} "
                     f"at ${entry_price:.4f} (Notional: ${notional_usd:.2f}, L={leverage}x). Mock Digest: {mock_digest}"
                 )
-                self.active_positions[symbol] = {
+                self.active_positions[symbol] = validate_and_clamp_params({
                     "position_id": f"{symbol}_{int(time.time()*1000)}",
                     "symbol": symbol,
                     "direction": direction,
@@ -832,7 +832,7 @@ class NadoTradingService(BaseTradingService):
                     "software_sl_tp_only": bool(use_software_tpsl or software_sl_tp_only or notional_usd < 100.0),
                     "sl_protection_mode": "SOFTWARE_ONLY" if (use_software_tpsl or software_sl_tp_only or notional_usd < 100.0) else "EXCHANGE_PROTECTED",
                     "protection_state": "SOFTWARE_PROTECTED" if (use_software_tpsl or software_sl_tp_only or notional_usd < 100.0) else "NATIVE_SL_CONFIRMED"
-                }
+                })
                 self._save_state()
                 self.last_execution_status = "FILLED"
                 self.last_execution_details = {"symbol": symbol, "direction": direction, "shadow": True}
@@ -1889,6 +1889,7 @@ class NadoTradingService(BaseTradingService):
                 "be_activation_r": float(get_tuned_param("be_activation_r", 1.15)),
                 "tp1_r_mult": float(get_tuned_param("be_activation_r", 1.15))
             })
+            self.active_positions[symbol].update(validate_and_clamp_params(self.active_positions[symbol]))
             if tp_price > 0:
                 try:
                     self.initialize_partial_tp_plan(symbol)
@@ -2219,7 +2220,7 @@ class NadoTradingService(BaseTradingService):
             logger.error(f"[NadoTradingService] ⚠️ Failed to save active positions to disk: {e}")
 
     def _load_positions(self) -> dict:
-        """Loads persisted active positions from disk, ensuring deduplication to canonical symbols."""
+        """Loads persisted active positions from disk, ensuring deduplication to canonical symbols and invariant validation."""
         try:
             from core.state_store import StateStore
             state_file = "data/memory/active_positions.json"
@@ -2232,7 +2233,7 @@ class NadoTradingService(BaseTradingService):
                 if isinstance(v, dict):
                     canon_k = f"{k.replace('/', '-').split('-')[0].upper()}-USD"
                     if canon_k not in clean_positions or k == canon_k:
-                        clean_positions[canon_k] = v
+                        clean_positions[canon_k] = validate_and_clamp_params(v)
             return clean_positions
         except Exception as e:
             logger.error(f"[NadoTradingService] ⚠️ Failed to load active positions from disk: {e}")
@@ -3688,6 +3689,8 @@ class NadoTradingService(BaseTradingService):
             "pnl_source": pnl_source,
             "close_reason": close_reason,
             "triggered_by": close_reason,
+            "strategy_mode": pos_data.get("strategy_mode", "UNKNOWN"),
+            "is_anti_bot": bool(pos_data.get("is_anti_bot", False) or pos_data.get("strategy_mode") == "MEAN_REVERSION"),
             "accumulated_slices_pnl": accumulated_slices
         }
 
@@ -3839,7 +3842,9 @@ class NadoTradingService(BaseTradingService):
                     if open_d:
                         excluded_digests.add(str(open_d).lower())
 
-                    pos_data["close_reason"] = "SOFTWARE_FORCE_CLOSE"
+                    actual_exit_reason = str(exit_reason or "SOFTWARE_FORCE_CLOSE")
+                    pos_data["close_reason"] = actual_exit_reason
+                    pos_data["triggered_by"] = actual_exit_reason
                     pos_data["closed_at"] = close_time
                     metrics = await self._fetch_verified_close_metrics(canonical_sym, pos_data)
 
@@ -3881,7 +3886,7 @@ class NadoTradingService(BaseTradingService):
                                 net_pnl=pnl,
                                 pos_data=pos_data,
                                 fee=actual_fee,
-                                triggered_by="SOFTWARE_FORCE_CLOSE"
+                                triggered_by=actual_exit_reason
                             )
                         except Exception as j_err:
                             logger.warning(f"[NadoTradingService] ⚠️ Failed recording force-closed trade to journal: {j_err}")
@@ -5542,16 +5547,17 @@ class NadoTradingService(BaseTradingService):
                             tracked["half_risk_activation_r"] = float(saved_p.get("half_risk_activation_r", 0.75))
                         if "be_activation_r" not in tracked:
                             tracked["be_activation_r"] = float(saved_p.get("be_activation_r", 1.15))
-                            dir_str = str(tracked.get("direction", "LONG")).upper()
-                            entry_val = float(tracked.get("entry_price", 0.0) or 0.0)
-                            if "highest_price" not in tracked or tracked.get("highest_price", 0.0) <= 0:
-                                tracked["highest_price"] = float(saved_p.get("highest_price", entry_val))
-                            if "lowest_price" not in tracked or tracked.get("lowest_price", 0.0) <= 0:
-                                tracked["lowest_price"] = float(saved_p.get("lowest_price", entry_val))
-                            if dir_str == "LONG":
-                                tracked["highest_price"] = max(float(tracked["highest_price"]), entry_val)
-                            else:
-                                if float(tracked["lowest_price"]) > 0 and entry_val > 0:
+                        tracked.update(validate_and_clamp_params(tracked))
+                        dir_str = str(tracked.get("direction", "LONG")).upper()
+                        entry_val = float(tracked.get("entry_price", 0.0) or 0.0)
+                        if "highest_price" not in tracked or tracked.get("highest_price", 0.0) <= 0:
+                            tracked["highest_price"] = float(saved_p.get("highest_price", entry_val))
+                        if "lowest_price" not in tracked or tracked.get("lowest_price", 0.0) <= 0:
+                            tracked["lowest_price"] = float(saved_p.get("lowest_price", entry_val))
+                        if dir_str == "LONG":
+                            tracked["highest_price"] = max(float(tracked["highest_price"]), entry_val)
+                        else:
+                            if float(tracked["lowest_price"]) > 0 and entry_val > 0:
                                     tracked["lowest_price"] = min(float(tracked["lowest_price"]), entry_val)
                             if "protection_state" not in tracked:
                                 tracked["protection_state"] = saved_p.get("protection_state", "PROTECTED")
@@ -5759,7 +5765,7 @@ class NadoTradingService(BaseTradingService):
                     init_tp = tp_price
 
                 pos_amount = abs(float(pos.get("amount", 0.0)))
-                self.active_positions[canonical_symbol] = {
+                self.active_positions[canonical_symbol] = validate_and_clamp_params({
                     "position_id": saved_p.get("position_id") or f"{canonical_symbol}_{int(time.time()*1000)}",
                     "symbol": canonical_symbol,
                     "direction": direction,
@@ -5794,7 +5800,7 @@ class NadoTradingService(BaseTradingService):
                     "planned_risk_usd": float(saved_p.get("planned_risk_usd") or 0.0),
                     "cohort": saved_p.get("cohort", "UNKNOWN"),
                     "unverified_triggers": (tp_price == 0.0 or sl_price == 0.0)
-                }
+                })
                 if saved_p.get("partial_tp_plan"):
                     self.active_positions[canonical_symbol]["partial_tp_plan"] = saved_p["partial_tp_plan"]
                     self.active_positions[canonical_symbol]["accumulated_realized_pnl"] = float(saved_p.get("accumulated_realized_pnl", 0.0))

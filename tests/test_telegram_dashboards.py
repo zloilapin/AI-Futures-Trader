@@ -92,3 +92,70 @@ async def test_radar_payload_structure():
     assert "radar_verdicts" in callbacks
     assert "radar_whales" in callbacks
     assert "dash_main" in callbacks
+
+
+@pytest.mark.asyncio
+async def test_close_confirm_triggers_force_close_and_dispatches_notification(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    mock_service = MagicMock()
+    mock_service.force_close_position = AsyncMock(return_value=(True, 0.7157))
+    mock_service.active_positions = {}
+    mock_service._last_close_info = {
+        "HYPE-USD": {
+            "symbol": "HYPE-USD",
+            "direction": "SHORT",
+            "entry_price": 69.748,
+            "exit_price": 69.252,
+            "closed_qty": 1.6,
+            "gross_pnl_usd": 0.7936,
+            "entry_fee_usd": 0.0391,
+            "exit_fee_usd": 0.0779,
+            "total_fee_usd": 0.0779,
+            "net_pnl_usd": 0.7157,
+            "realized_r": 0.35,
+            "planned_risk_usd": 2.06,
+            "pnl_source": "EXACT",
+            "close_reason": "MANUAL_TG_CLOSE",
+            "triggered_by": "MANUAL_TG_CLOSE",
+            "strategy_mode": "TREND_FOLLOWING",
+            "is_anti_bot": False
+        }
+    }
+
+    listener = TelegramBotListener(trading_service=mock_service)
+    listener.allowed_chat_ids = ["12345"]
+
+    mock_send_message = AsyncMock(return_value=True)
+    mock_broadcast = AsyncMock(return_value=True)
+    mock_answer_cb = AsyncMock(return_value=True)
+    listener._edit_reply = AsyncMock(return_value=True)
+
+    from services.telegram_service import TelegramService
+    monkeypatch.setattr(TelegramService, "send_message", mock_send_message)
+    monkeypatch.setattr(TelegramService, "broadcast_to_channel", mock_broadcast)
+    monkeypatch.setattr(TelegramService, "answer_callback_query", mock_answer_cb)
+
+    await listener.handle_callback(
+        callback_id="cb_999",
+        callback_data="close_confirm:HYPE-USD",
+        chat_id="12345",
+        message_id=456
+    )
+
+    # 1. Verification: force_close_position invoked with symbol and exit_reason
+    mock_service.force_close_position.assert_awaited_once_with("HYPE-USD", exit_reason="MANUAL_TG_CLOSE")
+
+    # 2. Verification: send_message and broadcast_to_channel were dispatched
+    assert mock_send_message.await_count >= 1
+    sent_text = mock_send_message.await_args_list[0].args[0]
+    assert "ПОЗИЦИЯ ЗАКРЫТА: HYPE-USD (SHORT)" in sent_text
+    assert "69.7480" in sent_text
+    assert "+0.7157$" in sent_text
+    assert "MANUAL_TG_CLOSE" in sent_text
+    assert "EXACT" in sent_text
+
+    mock_broadcast.assert_awaited_once()
+    broadcast_text = mock_broadcast.await_args[0][0]
+    assert "HYPE-USD" in broadcast_text
+

@@ -179,7 +179,7 @@ class TradingBayesianOptimizer:
             "chop_range_threshold": trial.suggest_float("chop_range_threshold", 50.0, 75.0, step=1.0),
             "anti_chop_bb_max": trial.suggest_float("anti_chop_bb_max", 65.0, 90.0, step=1.0),
             "min_reduce_size_conv": trial.suggest_float("min_reduce_size_conv", 58.0, 75.0, step=1.0),
-            "be_activation_r": trial.suggest_float("be_activation_r", 0.70, 0.90, step=0.05),
+            "be_activation_r": trial.suggest_float("be_activation_r", 1.10, 1.40, step=0.05),
         }
         obj_val, _, _ = self.evaluate_cv(params)
         return obj_val
