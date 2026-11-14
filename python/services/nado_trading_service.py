@@ -5542,6 +5542,67 @@ class NadoTradingService(BaseTradingService):
                                 elif tracked.get("sl_price", 0.0) > 0 and tracked.get("entry_price", 0.0) > 0:
                                     tracked["atr_reference"] = round(abs(float(tracked["entry_price"]) - float(tracked["sl_price"])) / 1.5, 6)
                                     logger.info(f"[NadoTradingService] 📐 Reconstructed ATR {tracked['atr_reference']:.4f} from SL distance for tracked {canonical_symbol}.")
+
+                        # If SL/TP or trigger digest is still uninitialized (0.0), query on-chain triggers directly from Nado DEX
+                        if tracked.get("sl_price", 0.0) == 0.0 or not tracked.get("sl_digest") or tracked.get("tp_price", 0.0) == 0.0:
+                            prod_id = tracked.get("product_id") or pos.get("_product_id") or self.product_map.get(base_symbol)
+                            if prod_id is not None:
+                                try:
+                                    dir_clean = str(tracked.get("direction", "LONG")).upper()
+                                    entry_px = float(tracked.get("entry_price", 0.0) or 0.0)
+                                    trg_orders = await self._fetch_trigger_orders(prod_id)
+                                    for o in trg_orders:
+                                        t_price = 0.0
+                                        req = getattr(getattr(getattr(o.order, "trigger", None), "price_trigger", None), "price_requirement", None)
+                                        if req:
+                                            for field in ["oracle_price_above", "oracle_price_below", "last_price_above", "last_price_below", "mid_price_above", "mid_price_below"]:
+                                                val = getattr(req, field, None)
+                                                if isinstance(val, (str, int, float)) and not isinstance(val, bool):
+                                                    try:
+                                                        t_price = float(val) / 1e18
+                                                        break
+                                                    except (ValueError, TypeError):
+                                                        pass
+                                        if t_price <= 0:
+                                            continue
+                                        o_digest = getattr(o.order, "digest", getattr(o, "digest", None))
+                                        o_data = getattr(getattr(o, "order", None), "order", None)
+                                        o_amt_x18 = getattr(o_data, "amount", None) if o_data else None
+                                        sub_or_sender = getattr(o_data, "sender", None) or getattr(o_data, "subaccount", None) or getattr(getattr(o, "order", None), "sender", None)
+                                        if sub_or_sender and str(sub_or_sender).lower() != str(self.default_subaccount_id).lower():
+                                            continue
+                                        o_amt = float(o_amt_x18) / 1e18 if o_amt_x18 else 0
+                                        is_opp = (dir_clean == "LONG" and o_amt < 0) or (dir_clean == "SHORT" and o_amt > 0)
+                                        if not is_opp:
+                                            continue
+                                        if dir_clean == "SHORT":
+                                            if t_price >= entry_px and (tracked.get("sl_price", 0.0) == 0.0 or not tracked.get("sl_digest")):
+                                                tracked["sl_price"] = t_price
+                                                tracked["sl_digest"] = o_digest
+                                                tracked["protection_state"] = "NATIVE_SL_CONFIRMED"
+                                                tracked["native_sl_placed"] = True
+                                                tracked["unverified_triggers"] = False
+                                                logger.info(f"[NadoTradingService] 🎯 Recovered on-chain SL trigger {o_digest} (${t_price:.2f}) for tracked {canonical_symbol}.")
+                                            elif t_price < entry_px and (tracked.get("tp_price", 0.0) == 0.0 or not tracked.get("tp_digest")):
+                                                tracked["tp_price"] = t_price
+                                                tracked["tp_digest"] = o_digest
+                                                tracked["native_tp_placed"] = True
+                                                logger.info(f"[NadoTradingService] 🎯 Recovered on-chain TP trigger {o_digest} (${t_price:.2f}) for tracked {canonical_symbol}.")
+                                        else: # LONG
+                                            if t_price <= entry_px and (tracked.get("sl_price", 0.0) == 0.0 or not tracked.get("sl_digest")):
+                                                tracked["sl_price"] = t_price
+                                                tracked["sl_digest"] = o_digest
+                                                tracked["protection_state"] = "NATIVE_SL_CONFIRMED"
+                                                tracked["native_sl_placed"] = True
+                                                tracked["unverified_triggers"] = False
+                                                logger.info(f"[NadoTradingService] 🎯 Recovered on-chain SL trigger {o_digest} (${t_price:.2f}) for tracked {canonical_symbol}.")
+                                            elif t_price > entry_px and (tracked.get("tp_price", 0.0) == 0.0 or not tracked.get("tp_digest")):
+                                                tracked["tp_price"] = t_price
+                                                tracked["tp_digest"] = o_digest
+                                                tracked["native_tp_placed"] = True
+                                                logger.info(f"[NadoTradingService] 🎯 Recovered on-chain TP trigger {o_digest} (${t_price:.2f}) for tracked {canonical_symbol}.")
+                                except Exception as trg_err:
+                                    logger.warning(f"[NadoTradingService] ⚠️ Failed on-chain trigger recovery for tracked {canonical_symbol}: {trg_err}")
                         
                         # Preserve and restore initial_sl immutability across syncs
                         saved_positions = self._load_positions()
@@ -5551,8 +5612,11 @@ class NadoTradingService(BaseTradingService):
                                 tracked["initial_sl"] = float(saved_p["initial_sl"])
                             elif float(tracked.get("sl_price", 0.0) or 0.0) > 0.0:
                                 tracked["initial_sl"] = float(tracked["sl_price"])
-                        if float(tracked.get("initial_tp", 0.0) or 0.0) <= 0.0 and float(saved_p.get("initial_tp", 0.0) or 0.0) > 0.0:
-                            tracked["initial_tp"] = float(saved_p["initial_tp"])
+                        if float(tracked.get("initial_tp", 0.0) or 0.0) <= 0.0:
+                            if float(saved_p.get("initial_tp", 0.0) or 0.0) > 0.0:
+                                tracked["initial_tp"] = float(saved_p["initial_tp"])
+                            elif float(tracked.get("tp_price", 0.0) or 0.0) > 0.0:
+                                tracked["initial_tp"] = float(tracked["tp_price"])
                         if "position_id" not in tracked and saved_p.get("position_id"):
                             tracked["position_id"] = saved_p["position_id"]
                         if "three_stage_trailing" not in tracked:
@@ -5663,7 +5727,8 @@ class NadoTradingService(BaseTradingService):
                         amt_x18 = getattr(order_data, "amount", None) if order_data else None
                         
                         # 1. Verification: Subaccount Match
-                        if str(getattr(order_data, "subaccount", None)) != str(self.default_subaccount_id):
+                        sub_or_sender = getattr(order_data, "sender", None) or getattr(order_data, "subaccount", None) or getattr(getattr(o, "order", None), "sender", None)
+                        if sub_or_sender and str(sub_or_sender).lower() != str(self.default_subaccount_id).lower():
                             continue
                             
                         # 2. Verification: Opposite Direction Check
@@ -6185,7 +6250,7 @@ class NadoTradingService(BaseTradingService):
                             
                             sub_ok = True
                             if target_sender:
-                                t_sub = str(getattr(trg_order, "subaccount", "") or getattr(found_order, "subaccount", "") or "")
+                                t_sub = str(getattr(trg_order, "sender", "") or getattr(trg_order, "subaccount", "") or getattr(found_order, "sender", "") or getattr(found_order, "subaccount", "") or "")
                                 if t_sub and t_sub != str(target_sender):
                                     logger.warning(f"[NadoTradingService] ⚠️ Trigger subaccount mismatch: {t_sub} != {target_sender}")
                                     sub_ok = False
