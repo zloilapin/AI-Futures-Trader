@@ -1933,6 +1933,17 @@ class TradingPipeline:
             print(f"⚠️ [Macro Regime] Ошибка при определении режима: {e}. Применён защитный профиль CONSERVATIVE (режим UNKNOWN).")
             self.services.logger.error(f"[Macro Regime] Failed to detect regime: {e}. Failsafe CONSERVATIVE engaged.")
 
+        # Module C: Market Breadth Reversal Check & PullbackWatchlist Direction Purge
+        try:
+            breadth_shift = self.check_cross_asset_reversal_breadth(macro_cache, macro_regime=detected_regime)
+            if breadth_shift in ["BULLISH_RECOVERY", "BEARISH_FLUSH"]:
+                purged_symbols = self.purge_watchlist_on_breadth_shift(breadth_shift)
+                if purged_symbols:
+                    print(f"🧹 [Breadth Squeeze Purge] {breadth_shift}: очищен вотчлист от противоположных сетапов: {', '.join(purged_symbols)}")
+                    self.services.logger.info(f"[Breadth Squeeze Purge] {breadth_shift}: purged {len(purged_symbols)} setups from watchlist.")
+        except Exception as breadth_err:
+            self.services.logger.debug(f"[Pipeline] Breadth check error: {breadth_err}")
+
         # СТАДИЯ 1: UNIVERSE (Выбор активов)
         target_list = []
         if targeted_symbol:
@@ -2719,6 +2730,134 @@ class TradingPipeline:
             self._save_pullback_watchlist()
         return bool(keys_to_remove)
 
+    @staticmethod
+    def check_cross_asset_reversal_breadth(
+        universe_market_data: Dict[str, Any],
+        macro_regime: str = ""
+    ) -> str:
+        """
+        Module C: Cross-Asset Breadth Squeeze Detector.
+        Evaluates structural reversal breadth across monitored pairs (BTC, ETH, SOL, BNB, ZEC, HYPE, LIT):
+        - If BTC-USD AND ETH-USD both exhibit is_bullish_reversal == True (or price > ema_20_15m with bullish momentum),
+          OR if >= 4 out of 7 pairs simultaneously trigger is_bullish_reversal == True:
+            Returns 'BULLISH_RECOVERY'.
+        - Symmetrically, if BTC-USD AND ETH-USD both exhibit is_bearish_reversal == True (or price < ema_20_15m with bearish momentum),
+          OR if >= 4 out of 7 pairs trigger is_bearish_reversal == True:
+            Returns 'BEARISH_FLUSH'.
+        - Otherwise returns 'NEUTRAL'.
+        """
+        if not universe_market_data or not isinstance(universe_market_data, dict):
+            return "NEUTRAL"
+
+        from core.deterministic_guard import DeterministicGuard
+
+        monitored_pairs = ["BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "ZEC-USD", "HYPE-USD", "LIT-USD"]
+
+        pair_data_map = {}
+        for target in monitored_pairs:
+            base = target.split("-")[0].upper()
+            data = (
+                universe_market_data.get(target)
+                or universe_market_data.get(f"{base}-USD")
+                or universe_market_data.get(base)
+                or universe_market_data.get(target.lower())
+            )
+            if isinstance(data, dict):
+                pair_data_map[target] = data
+
+        bullish_count = 0
+        bearish_count = 0
+
+        pair_states = {}
+        for target, data in pair_data_map.items():
+            reports = data.get("analyst_reports") or data.get("valid_reports") or data.get("reports")
+            rev_state = DeterministicGuard.evaluate_structural_reversal_state(
+                symbol_data=data,
+                analyst_reports=reports,
+                macro_regime=macro_regime
+            )
+            is_bull = bool(rev_state.get("is_bullish_reversal", False))
+            is_bear = bool(rev_state.get("is_bearish_reversal", False))
+
+            # Check price vs ema_20_15m with momentum
+            indicators = data.get("indicators") or {}
+            cur_p = float((data.get("price_data") or {}).get("current_price") or indicators.get("current_price") or 0.0)
+            ema_15m = float(indicators.get("ema_20_15m") or indicators.get("ema_20") or 0.0)
+            rsi = float(indicators.get("rsi_15m") or indicators.get("rsi_14") or 50.0)
+            c_close = float(indicators.get("last_closed_candle_close", cur_p))
+            c_open = float(indicators.get("candle_open", cur_p))
+
+            bull_mom = (cur_p > ema_15m > 0.0) and ((c_close > c_open) or (rsi > 50.0))
+            bear_mom = (cur_p < ema_15m and ema_15m > 0.0) and ((c_close < c_open) or (rsi < 50.0))
+
+            pair_states[target] = {
+                "is_bull": is_bull,
+                "is_bear": is_bear,
+                "bull_mom": bull_mom,
+                "bear_mom": bear_mom
+            }
+            if is_bull or bull_mom:
+                bullish_count += 1
+            if is_bear or bear_mom:
+                bearish_count += 1
+
+        btc_state = pair_states.get("BTC-USD", {})
+        eth_state = pair_states.get("ETH-USD", {})
+
+        leaders_bullish = bool(
+            (btc_state.get("is_bull") or btc_state.get("bull_mom"))
+            and (eth_state.get("is_bull") or eth_state.get("bull_mom"))
+        )
+        leaders_bearish = bool(
+            (btc_state.get("is_bear") or btc_state.get("bear_mom"))
+            and (eth_state.get("is_bear") or eth_state.get("bear_mom"))
+        )
+
+        if leaders_bullish and not leaders_bearish:
+            return "BULLISH_RECOVERY"
+        elif leaders_bearish and not leaders_bullish:
+            return "BEARISH_FLUSH"
+        elif bullish_count >= 4 and bearish_count < 4:
+            return "BULLISH_RECOVERY"
+        elif bearish_count >= 4 and bullish_count < 4:
+            return "BEARISH_FLUSH"
+
+        return "NEUTRAL"
+
+    def purge_watchlist_on_breadth_shift(self, breadth_shift: str) -> List[str]:
+        """
+        Module C: Automatic PullbackWatchlist Directional Purge on Breadth Shift.
+        - When market_breadth_shift == 'BULLISH_RECOVERY', purge all SHORT setups from watchlist.
+        - When market_breadth_shift == 'BEARISH_FLUSH', purge all LONG setups from watchlist.
+        """
+        purged = []
+        if not self._pullback_watchlist:
+            return purged
+
+        shift_clean = str(breadth_shift or "").upper().strip()
+        if shift_clean == "BULLISH_RECOVERY":
+            for sym, item in list(self._pullback_watchlist.items()):
+                if str(item.get("direction", "")).upper() == "SHORT":
+                    reason = "Market-wide BULLISH_RECOVERY breadth shift detected (U-turn reversal, not a local pullback)."
+                    print(f"🛑 [PullbackWatchlist] Invalidated {sym} (SHORT): {reason}")
+                    if hasattr(self, "services") and hasattr(self.services, "logger") and self.services.logger:
+                        self.services.logger.info(f"[PullbackWatchlist] Invalidated {sym} (SHORT): {reason}")
+                    self._pullback_watchlist.pop(sym, None)
+                    purged.append(sym)
+        elif shift_clean == "BEARISH_FLUSH":
+            for sym, item in list(self._pullback_watchlist.items()):
+                if str(item.get("direction", "")).upper() == "LONG":
+                    reason = "Market-wide BEARISH_FLUSH breadth shift detected (market-wide dump, not a local pullback)."
+                    print(f"🛑 [PullbackWatchlist] Invalidated {sym} (LONG): {reason}")
+                    if hasattr(self, "services") and hasattr(self.services, "logger") and self.services.logger:
+                        self.services.logger.info(f"[PullbackWatchlist] Invalidated {sym} (LONG): {reason}")
+                    self._pullback_watchlist.pop(sym, None)
+                    purged.append(sym)
+
+        if purged:
+            self._save_pullback_watchlist()
+        return purged
+
     async def check_pullback_watchlist(self) -> Tuple[bool, str, str]:
         """
         Lightweight continuous pullback monitor (0 LLM tokens).
@@ -2815,6 +2954,25 @@ class TradingPipeline:
                 symbols_to_delete.append(symbol)
                 continue
 
+            # 3.1 Individual symbol structural reversal invalidation
+            try:
+                from core.deterministic_guard import DeterministicGuard
+                sym_rev = DeterministicGuard.evaluate_structural_reversal_state(
+                    symbol_data={"price_data": ohlcv, "current_price": current_price}
+                )
+                if direction == "SHORT" and sym_rev.get("is_bullish_reversal"):
+                    print(f"🛑 [Pullback Watchlist] Сетап {symbol} (SHORT) инвалидирован: обнаружен бычий слом структуры (Bullish CHoCH). Удален.")
+                    self.services.logger.info(f"[PullbackWatchlist] Setup invalidated for {symbol} SHORT: Bullish CHoCH detected. Removed.")
+                    symbols_to_delete.append(symbol)
+                    continue
+                elif direction == "LONG" and sym_rev.get("is_bearish_reversal"):
+                    print(f"🛑 [Pullback Watchlist] Сетап {symbol} (LONG) инвалидирован: обнаружен медвежий слом структуры (Bearish CHoCH). Удален.")
+                    self.services.logger.info(f"[PullbackWatchlist] Setup invalidated for {symbol} LONG: Bearish CHoCH detected. Removed.")
+                    symbols_to_delete.append(symbol)
+                    continue
+            except Exception as rev_err:
+                self.services.logger.debug(f"[PullbackWatchlist] Reversal check error for {symbol}: {rev_err}")
+
             # 4. Pullback check: trigger only when price covers at least 80% of distance from signal_price to target_price
             signal_price = float(item.get("signal_price", 0.0) or item.get("initial_price", current_price))
             pullback_hit = False
@@ -2854,3 +3012,7 @@ class TradingPipeline:
             self._save_pullback_watchlist()
 
         return False, "", ""
+
+
+Pipeline = TradingPipeline
+check_cross_asset_reversal_breadth = TradingPipeline.check_cross_asset_reversal_breadth

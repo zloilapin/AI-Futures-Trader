@@ -8,6 +8,7 @@ class StrategyProfile:
     direction_bias: str # "LONG", "SHORT", "NEUTRAL"
     reasoning: str
     liquidity_sweep: bool = False
+    action_size_mult: float = 1.0
 
 class StrategyRouter:
     """
@@ -197,6 +198,24 @@ class StrategyRouter:
         )
 
         if profile_res.has_directional_signal and profile_res.direction_bias in ["LONG", "SHORT"]:
+            # Structural Reversal Continuation Veto
+            rev_data = market_data.get("structural_reversal") if isinstance(market_data, dict) else None
+            if rev_data:
+                if profile_res.direction_bias == "SHORT" and rev_data.get("is_bullish_reversal"):
+                    return StrategyProfile(
+                        False,
+                        "STRUCTURAL_REVERSAL_VETO",
+                        "NEUTRAL",
+                        f"ОТКЛОНЕН (STRUCTURAL_REVERSAL_VETO: Локальный слом структуры вверх (Bullish CHoCH / U-Turn Reclaim + бычий перевес аналитиков). Шорт против разворота заблокирован: {rev_data.get('reversal_reason')})."
+                    )
+                elif profile_res.direction_bias == "LONG" and rev_data.get("is_bearish_reversal"):
+                    return StrategyProfile(
+                        False,
+                        "STRUCTURAL_REVERSAL_VETO",
+                        "NEUTRAL",
+                        f"ОТКЛОНЕН (STRUCTURAL_REVERSAL_VETO: Локальный слом структуры вниз (Bearish CHoCH / U-Turn Breakdown + медвежий перевес аналитиков). Лонг против разворота заблокирован: {rev_data.get('reversal_reason')})."
+                    )
+
             indicators = market_data.get("indicators") or {}
             eval_atr = float(indicators.get("atr_14", indicators.get("atr", 0.0)) or 0.0)
             current_price = float((market_data.get("price_data") or {}).get("current_price", 0.0) or 0.0)
@@ -397,6 +416,19 @@ class StrategyRouter:
             both_leaders_bearish = (btc_align == "FULL_ALIGNMENT" and eth_align == "FULL_ALIGNMENT" and btc_t1h == "BEARISH" and eth_t1h == "BEARISH")
             both_leaders_bullish = (btc_align == "FULL_ALIGNMENT" and eth_align == "FULL_ALIGNMENT" and btc_t1h == "BULLISH" and eth_t1h == "BULLISH")
 
+        # Module A & B: Evaluate Deterministic Structural Reversal State
+        from core.deterministic_guard import DeterministicGuard
+        reversal_state = DeterministicGuard.evaluate_structural_reversal_state(
+            symbol_data=market_data,
+            analyst_reports=valid_reports,
+            macro_trend=trend_1h,
+            macro_regime=detected_regime
+        )
+        is_bullish_reversal = bool(reversal_state.get("is_bullish_reversal", False))
+        is_bearish_reversal = bool(reversal_state.get("is_bearish_reversal", False))
+        if isinstance(market_data, dict):
+            market_data["structural_reversal"] = reversal_state
+
         # 0. Priority Pass for Confirmed Pullback Watchlist Retests (Protected Retests)
         if market_data.get("is_pullback_retest"):
             # Regime Veto: Prohibit TREND_FOLLOWING pullback retest in TRANSITION regime
@@ -413,6 +445,22 @@ class StrategyRouter:
                 or market_data.get("retest_direction")
                 or ("LONG" if trend_1h == "BULLISH" else "SHORT")
             ).upper()
+
+            # Module B: Structural Reversal VETO against retest direction
+            if retest_dir == "SHORT" and is_bullish_reversal:
+                return StrategyProfile(
+                    False,
+                    "STRUCTURAL_REVERSAL_VETO",
+                    "NEUTRAL",
+                    f"ОТКЛОНЕН (STRUCTURAL_REVERSAL_VETO: Локальный слом структуры вверх (Bullish CHoCH / U-Turn Reclaim + бычий перевес аналитиков). Шорт против разворота заблокирован: {reversal_state.get('reversal_reason')})."
+                )
+            elif retest_dir == "LONG" and is_bearish_reversal:
+                return StrategyProfile(
+                    False,
+                    "STRUCTURAL_REVERSAL_VETO",
+                    "NEUTRAL",
+                    f"ОТКЛОНЕН (STRUCTURAL_REVERSAL_VETO: Локальный слом структуры вниз (Bearish CHoCH / U-Turn Breakdown + медвежий перевес аналитиков). Лонг против разворота заблокирован: {reversal_state.get('reversal_reason')})."
+                )
 
             # Invalidation Check: Veto if invalidation price breached
             invalidation_price = _safe_float(
@@ -518,6 +566,38 @@ class StrategyRouter:
                 retest_dir,
                 f"PULLBACK_RETEST {retest_dir}: Цена достигла целевой зоны отката EMA-20, структура отскока подтверждена."
             )
+
+        # Module B: Reversal Flip (CHoCH / U-Turn Direction Flip)
+        ind_report = next((r for r in valid_reports if r.get("agent_name") == "Indicator_Agent"), {})
+        ind_signal = str(ind_report.get("signal", "")).upper()
+        c_conf = _safe_float(candle_report.get("confidence"), 0.0)
+        i_conf = _safe_float(ind_report.get("confidence"), 0.0)
+
+        candle_bull_60 = candle_signal in ["BULLISH", "LONG", "BUY"] and c_conf >= 60.0
+        ind_bull_60 = ind_signal in ["BULLISH", "LONG", "BUY"] and i_conf >= 60.0
+        candle_bear_60 = candle_signal in ["BEARISH", "SHORT", "SELL"] and c_conf >= 60.0
+        ind_bear_60 = ind_signal in ["BEARISH", "SHORT", "SELL"] and i_conf >= 60.0
+
+        bullish_flip_eligible = is_bullish_reversal and (tech_bulls >= 2) and (candle_bull_60 or ind_bull_60)
+        bearish_flip_eligible = is_bearish_reversal and (tech_bears >= 2) and (candle_bear_60 or ind_bear_60)
+
+        if bullish_flip_eligible:
+            return StrategyProfile(
+                True,
+                "REVERSAL_TREND_SHIFT",
+                "LONG",
+                f"REVERSAL_FLIP (Bullish CHoCH / U-Turn): {reversal_state.get('reversal_reason')}. Слом структуры вверх, аналитики {tech_bulls} vs {tech_bears}.",
+                action_size_mult=0.70
+            )
+        elif bearish_flip_eligible:
+            return StrategyProfile(
+                True,
+                "REVERSAL_TREND_SHIFT",
+                "SHORT",
+                f"REVERSAL_FLIP (Bearish CHoCH / Inverse U-Turn): {reversal_state.get('reversal_reason')}. Слом структуры вниз, аналитики {tech_bears} vs {tech_bulls}.",
+                action_size_mult=0.70
+            )
+
         regime_info = (macro_cache.get("regime_verdict") or macro_cache.get("regime_info") or {}) if isinstance(macro_cache, dict) else {}
         range_score = _safe_float(regime_info.get("range_score"), 0.0)
         vol_score = _safe_float(regime_info.get("vol_score"), 10.0)

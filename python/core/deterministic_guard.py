@@ -348,6 +348,291 @@ class DeterministicGuard:
         return True, None, "Analyst quorum confirmed."
 
     @staticmethod
+    def evaluate_structural_reversal_state(
+        symbol_data: Dict[str, Any],
+        analyst_reports: Optional[Any] = None,
+        macro_trend: str = "",
+        macro_regime: str = ""
+    ) -> Dict[str, Any]:
+        """
+        Module A: Deterministic Structural Reversal (CHoCH / U-Turn) Detector.
+        Evaluates dynamic mean reclaim, structure shift (HL/LH, CHoCH/BOS, box floor/ceiling),
+        and analyst reversal consensus symmetrically for Bullish and Bearish reversals.
+
+        Bullish Structural Reversal (BULLISH_CHoCH / Right Side of U-Turn):
+          Triggered when at least 2 of 3 structural conditions hold:
+          1. Dynamic Mean Reclaim: cur_px > ema_20_15m AND (cur_px > ema_20_1h OR cur_px > vwap).
+          2. Structure Shift / Box Floor Rebound: Higher Low (HL) OR break above 15m swing Lower High (CHoCH),
+             OR bounce from lower 35% of 48h range with positive momentum (close > open, DI+ > DI-, or RSI_15m > 52).
+          3. Analyst Reversal Consensus: >= 2 technical agents BULLISH (conf >= 58%) and outnumber BEARISH.
+
+        Bearish Structural Reversal (BEARISH_CHoCH / Inverse U-Turn):
+          Symmetric criteria:
+          1. Dynamic Mean Breakdown: cur_px < ema_20_15m AND (cur_px < ema_20_1h OR cur_px < vwap).
+          2. Structure Shift / Box Ceiling Rejection: Lower High (LH) OR break below 15m swing Higher Low (CHoCH),
+             OR rejection from upper 35% of 48h range with negative momentum (close < open, DI- > DI+, or RSI_15m < 48).
+          3. Analyst Reversal Consensus: >= 2 technical agents BEARISH (conf >= 58%) and outnumber BULLISH.
+        """
+        if not symbol_data or not isinstance(symbol_data, dict):
+            return {
+                "is_bullish_reversal": False,
+                "is_bearish_reversal": False,
+                "reversal_direction": "NONE",
+                "reversal_reason": "No symbol data provided",
+                "conditions_met": {
+                    "bullish": {"mean_reclaim": False, "structure_shift": False, "analyst_consensus": False, "count": 0},
+                    "bearish": {"mean_breakdown": False, "structure_shift": False, "analyst_consensus": False, "count": 0}
+                },
+                "metrics": {}
+            }
+
+        price_data = (symbol_data.get("price_data") or {}) if isinstance(symbol_data, dict) else {}
+        indicators = (symbol_data.get("indicators") or {}) if isinstance(symbol_data, dict) else {}
+        mtf = (symbol_data.get("multi_timeframe") or symbol_data.get("mtf") or {}) if isinstance(symbol_data, dict) else {}
+
+        def _safe_float(val: Any, default: float = 0.0) -> float:
+            if val is None:
+                return default
+            try:
+                f = float(val)
+                return f if math.isfinite(f) else default
+            except (ValueError, TypeError):
+                return default
+
+        # 1. Current Price
+        cur_px = _safe_float(
+            price_data.get("current_price")
+            or indicators.get("current_price")
+            or symbol_data.get("current_price"),
+            0.0
+        )
+        candles = (
+            (price_data.get("candles_20") if isinstance(price_data, dict) else None)
+            or (price_data.get("candles") if isinstance(price_data, dict) else None)
+            or (indicators.get("candles") if isinstance(indicators, dict) else None)
+            or ((mtf.get("tf_15m") or {}).get("candles_20") if isinstance(mtf, dict) else None)
+            or (symbol_data.get("candles_20") if isinstance(symbol_data, dict) else None)
+            or []
+        )
+        if cur_px <= 0.0 and candles and isinstance(candles[-1], dict):
+            cur_px = _safe_float(candles[-1].get("close"), 0.0)
+
+        # 2. EMAs and VWAP
+        tf_15m = mtf.get("tf_15m") if isinstance(mtf, dict) else {}
+        tf_1h = mtf.get("tf_1h") if isinstance(mtf, dict) else {}
+
+        ema_20_15m = _safe_float(
+            indicators.get("ema_20_15m")
+            or indicators.get("ema_20")
+            or (tf_15m.get("ema_20") if isinstance(tf_15m, dict) else None)
+            or symbol_data.get("ema_20_15m")
+            or symbol_data.get("ema_20"),
+            0.0
+        )
+        ema_20_1h = _safe_float(
+            indicators.get("ema_20_1h")
+            or (tf_1h.get("ema_20") if isinstance(tf_1h, dict) else None)
+            or symbol_data.get("ema_20_1h"),
+            0.0
+        )
+        vwap = _safe_float(
+            indicators.get("vwap")
+            or price_data.get("vwap")
+            or symbol_data.get("vwap"),
+            0.0
+        )
+
+        # 3. 48h Box position
+        macro_box_pos_pct = indicators.get("macro_box_pos_pct")
+        if macro_box_pos_pct is None:
+            macro_box_pos_pct = symbol_data.get("macro_box_pos_pct", symbol_data.get("48h_box_position"))
+        macro_box_pos = _safe_float(macro_box_pos_pct, 50.0)
+        # Normalize if passed as ratio 0..1
+        if 0.0 < macro_box_pos <= 1.0:
+            macro_box_pos *= 100.0
+
+        # 4. Swings and Extremes
+        swing_high_15m = _safe_float(indicators.get("swing_high_15m") or symbol_data.get("swing_high_15m"), 0.0)
+        swing_low_15m = _safe_float(indicators.get("swing_low_15m") or symbol_data.get("swing_low_15m"), 0.0)
+        if (swing_high_15m <= 0.0 or swing_low_15m <= 0.0) and candles:
+            recent_highs = [_safe_float(c.get("high")) for c in candles[-16:] if isinstance(c, dict) and c.get("high")]
+            recent_lows = [_safe_float(c.get("low")) for c in candles[-16:] if isinstance(c, dict) and c.get("low")]
+            if recent_highs and swing_high_15m <= 0.0:
+                swing_high_15m = max(recent_highs)
+            if recent_lows and swing_low_15m <= 0.0:
+                swing_low_15m = min(recent_lows)
+
+        # 5. Momentum Indicators: RSI, DMI
+        rsi_15m = _safe_float(indicators.get("rsi_15m") or indicators.get("rsi_14") or indicators.get("rsi"), 50.0)
+        plus_di = _safe_float(indicators.get("plus_di_14") or indicators.get("di_plus"), 0.0)
+        minus_di = _safe_float(indicators.get("minus_di_14") or indicators.get("di_minus"), 0.0)
+
+        # 6. Candle checks
+        last_candle = None
+        if isinstance(candles, list) and len(candles) >= 1:
+            last_candle = candles[-1]
+
+        c_open = _safe_float(last_candle.get("open") if isinstance(last_candle, dict) else indicators.get("candle_open"), cur_px)
+        c_close = _safe_float(last_candle.get("close") if isinstance(last_candle, dict) else indicators.get("last_closed_candle_close", cur_px), cur_px)
+
+        # Check Higher Low (HL) / Lower High (LH)
+        has_hl = bool(indicators.get("higher_low") or indicators.get("hl"))
+        has_lh = bool(indicators.get("lower_high") or indicators.get("lh"))
+        if not has_hl and len(candles) >= 3:
+            lows = [_safe_float(c.get("low")) for c in candles[-5:] if isinstance(c, dict) and c.get("low")]
+            if len(lows) >= 2 and lows[-1] > lows[-2]:
+                has_hl = True
+        if not has_lh and len(candles) >= 3:
+            highs = [_safe_float(c.get("high")) for c in candles[-5:] if isinstance(c, dict) and c.get("high")]
+            if len(highs) >= 2 and highs[-1] < highs[-2]:
+                has_lh = True
+
+        # ══════════════════════════════════════════════════════════════════════════
+        # Condition 1: Dynamic Mean Reclaim / Breakdown
+        # ══════════════════════════════════════════════════════════════════════════
+        cond1_bull = False
+        if cur_px > 0.0 and ema_20_15m > 0.0 and cur_px > ema_20_15m:
+            if ema_20_1h > 0.0 or vwap > 0.0:
+                cond1_bull = (ema_20_1h > 0.0 and cur_px > ema_20_1h) or (vwap > 0.0 and cur_px > vwap)
+            else:
+                cond1_bull = True
+
+        cond1_bear = False
+        if cur_px > 0.0 and ema_20_15m > 0.0 and cur_px < ema_20_15m:
+            if ema_20_1h > 0.0 or vwap > 0.0:
+                cond1_bear = (ema_20_1h > 0.0 and cur_px < ema_20_1h) or (vwap > 0.0 and cur_px < vwap)
+            else:
+                cond1_bear = True
+
+        # ══════════════════════════════════════════════════════════════════════════
+        # Condition 2: Structure Shift / Box Floor Rebound / Ceiling Rejection
+        # ══════════════════════════════════════════════════════════════════════════
+        pos_momentum = (c_close > c_open) or (plus_di > minus_di and plus_di > 0.0) or (rsi_15m > 52.0)
+        break_choch_bull = (swing_high_15m > 0.0 and cur_px > swing_high_15m)
+        box_floor_rebound = (macro_box_pos <= 35.0 or (macro_box_pos >= 20.0 and bool(indicators.get("tested_box_floor")))) and pos_momentum
+        cond2_bull = bool(has_hl or break_choch_bull or box_floor_rebound)
+
+        neg_momentum = (c_close < c_open) or (minus_di > plus_di and minus_di > 0.0) or (rsi_15m < 48.0)
+        break_choch_bear = (swing_low_15m > 0.0 and cur_px < swing_low_15m)
+        box_ceiling_rejection = (macro_box_pos >= 65.0) and neg_momentum
+        cond2_bear = bool(has_lh or break_choch_bear or box_ceiling_rejection)
+
+        # ══════════════════════════════════════════════════════════════════════════
+        # Condition 3: Analyst Reversal Consensus
+        # ══════════════════════════════════════════════════════════════════════════
+        rep_source = analyst_reports
+        if not rep_source:
+            rep_source = symbol_data.get("analyst_reports") or symbol_data.get("valid_reports") or symbol_data.get("reports")
+
+        tech_agents = [
+            ("Candle_Agent", ["candle"]),
+            ("Order_Book_Agent", ["order_book", "orderbook", "depth"]),
+            ("OI_Funding_Agent", ["oi_funding", "oi", "funding"]),
+            ("Indicator_Agent", ["indicator"])
+        ]
+
+        def _get_agent_info(aliases):
+            if not rep_source:
+                return "NEUTRAL", 0.0
+            if isinstance(rep_source, dict):
+                for k, v in rep_source.items():
+                    agent_name = str((v.get("agent_name") or k) if isinstance(v, dict) else (getattr(v, "agent_name", None) or k)).lower().replace(' ', '_')
+                    if any(a in agent_name for a in aliases):
+                        sig = str(v.get("signal") or v.get("direction") or "NEUTRAL").upper().strip() if isinstance(v, dict) else str(getattr(v, "signal", None) or getattr(v, "direction", None) or "NEUTRAL").upper().strip()
+                        conf = _safe_float(v.get("confidence") if isinstance(v, dict) else getattr(v, "confidence", 0.0), 0.0)
+                        return sig, conf
+            elif isinstance(rep_source, list):
+                for item in rep_source:
+                    agent_name = str((item.get("agent_name") or item.get("name")) if isinstance(item, dict) else (getattr(item, "agent_name", None) or getattr(item, "name", None) or "")).lower().replace(' ', '_')
+                    if any(a in agent_name for a in aliases):
+                        sig = str(item.get("signal") or item.get("direction") or "NEUTRAL").upper().strip() if isinstance(item, dict) else str(getattr(item, "signal", None) or getattr(item, "direction", None) or "NEUTRAL").upper().strip()
+                        conf = _safe_float(item.get("confidence") if isinstance(item, dict) else getattr(item, "confidence", 0.0), 0.0)
+                        return sig, conf
+            return "NEUTRAL", 0.0
+
+        bulls_58 = 0
+        bears_58 = 0
+        all_bulls = 0
+        all_bears = 0
+
+        for name, aliases in tech_agents:
+            sig, conf = _get_agent_info(aliases)
+            if sig in ("BULLISH", "LONG", "BUY"):
+                if conf > 50.0: all_bulls += 1
+                if conf >= 58.0: bulls_58 += 1
+            elif sig in ("BEARISH", "SHORT", "SELL"):
+                if conf > 50.0: all_bears += 1
+                if conf >= 58.0: bears_58 += 1
+
+        cond3_bull = bool(bulls_58 >= 2 and bulls_58 > all_bears)
+        cond3_bear = bool(bears_58 >= 2 and bears_58 > all_bulls)
+
+        # ══════════════════════════════════════════════════════════════════════════
+        # Aggregation: >= 2 of 3 Conditions
+        # ══════════════════════════════════════════════════════════════════════════
+        bull_conditions = [cond1_bull, cond2_bull, cond3_bull]
+        bear_conditions = [cond1_bear, cond2_bear, cond3_bear]
+
+        bull_count = sum(1 for c in bull_conditions if c)
+        bear_count = sum(1 for c in bear_conditions if c)
+
+        is_bullish_reversal = (bull_count >= 2)
+        is_bearish_reversal = (bear_count >= 2)
+
+        if is_bullish_reversal and is_bearish_reversal:
+            if bull_count > bear_count:
+                is_bearish_reversal = False
+            elif bear_count > bull_count:
+                is_bullish_reversal = False
+            else:
+                is_bullish_reversal = False
+                is_bearish_reversal = False
+
+        reversal_dir = "LONG" if is_bullish_reversal else ("SHORT" if is_bearish_reversal else "NONE")
+        reversal_reason = ""
+        if is_bullish_reversal:
+            reversal_reason = (
+                f"Bullish CHoCH / U-Turn Reversal ({bull_count}/3 conditions: "
+                f"MeanReclaim={cond1_bull}, StructShift={cond2_bull}, Consensus={cond3_bull} [Bulls={bulls_58} vs Bears={all_bears}])"
+            )
+        elif is_bearish_reversal:
+            reversal_reason = (
+                f"Bearish CHoCH / Inverse U-Turn Reversal ({bear_count}/3 conditions: "
+                f"MeanBreakdown={cond1_bear}, StructShift={cond2_bear}, Consensus={cond3_bear} [Bears={bears_58} vs Bulls={all_bulls}])"
+            )
+
+        return {
+            "is_bullish_reversal": is_bullish_reversal,
+            "is_bearish_reversal": is_bearish_reversal,
+            "reversal_direction": reversal_dir,
+            "reversal_reason": reversal_reason,
+            "conditions_met": {
+                "bullish": {
+                    "mean_reclaim": cond1_bull,
+                    "structure_shift": cond2_bull,
+                    "analyst_consensus": cond3_bull,
+                    "count": bull_count
+                },
+                "bearish": {
+                    "mean_breakdown": cond1_bear,
+                    "structure_shift": cond2_bear,
+                    "analyst_consensus": cond3_bear,
+                    "count": bear_count
+                }
+            },
+            "metrics": {
+                "current_price": cur_px,
+                "ema_20_15m": ema_20_15m,
+                "ema_20_1h": ema_20_1h,
+                "vwap": vwap,
+                "macro_box_pos_pct": macro_box_pos,
+                "rsi_15m": rsi_15m,
+                "tech_bulls": bulls_58,
+                "tech_bears": bears_58
+            }
+        }
+
+    @staticmethod
     def evaluate(
         strategy_profile: StrategyProfile,
         ceo_proposal: Dict[str, Any],
@@ -383,8 +668,8 @@ class DeterministicGuard:
         guard_reason = "Passed deterministic guard."
         rejection_tag = None
 
-        # 1. Direction Guard: Never allow CEO to reverse specialized setup bias (Breakout / Mean Reversion / Scalping)
-        if strategy_mode in ["BREAKOUT", "MEAN_REVERSION", "VOLATILITY_MOMENTUM"] and decision in ["LONG", "SHORT"]:
+        # 1. Direction Guard: Never allow CEO to reverse specialized setup bias (Breakout / Mean Reversion / Scalping / Reversals)
+        if strategy_mode in ["BREAKOUT", "MEAN_REVERSION", "VOLATILITY_MOMENTUM", "REVERSAL_TREND_SHIFT"] and decision in ["LONG", "SHORT"]:
             if decision != direction_bias:
                 guard_msg = f"🛡️ [Strategy Guard] Решение CEO {decision} противоречит {strategy_mode} bias ({direction_bias}). Сделка отменена в HOLD для защиты капитала."
                 print(guard_msg)
@@ -397,6 +682,73 @@ class DeterministicGuard:
                 rejection_tag = "STRATEGY_GUARD_VETO"
                 guard_reason = guard_msg
                 reasoning_en = f"{reasoning_en}\n\n{guard_msg}".strip()
+
+        # 1.0 Structural Reversal Veto: Block late-cycle continuation trades into an active reversal
+        reversal_state = (market_data or {}).get("structural_reversal")
+        if not reversal_state and market_data:
+            try:
+                reversal_state = DeterministicGuard.evaluate_structural_reversal_state(
+                    symbol_data=market_data,
+                    analyst_reports=analyst_reports
+                )
+            except Exception:
+                reversal_state = None
+
+        if reversal_state:
+            if decision == "SHORT" and reversal_state.get("is_bullish_reversal"):
+                guard_msg = (
+                    f"STRUCTURAL_REVERSAL_VETO: Локальный слом структуры вверх "
+                    f"(Bullish CHoCH / U-Turn Reclaim + бычий перевес аналитиков). Шорт против разворота заблокирован."
+                )
+                print(guard_msg)
+                if logger:
+                    logger.warning(f"[Pipeline] {guard_msg}")
+                return FinalTradeDecision(
+                    symbol=symbol,
+                    decision="HOLD",
+                    conviction=0,
+                    trade_action="HOLD",
+                    strategy_mode=strategy_mode,
+                    direction_bias=direction_bias,
+                    min_conviction=min_conv,
+                    is_actionable=False,
+                    directional_confidence=0,
+                    entry_quality=0,
+                    guard_status="BLOCKED",
+                    guard_reason=guard_msg,
+                    rejection_tag="STRUCTURAL_REVERSAL_VETO",
+                    reasoning_en=f"{reasoning_en}\n\n{guard_msg}".strip(),
+                    reasoning_ru=reasoning_ru
+                )
+            elif decision == "LONG" and reversal_state.get("is_bearish_reversal"):
+                guard_msg = (
+                    f"STRUCTURAL_REVERSAL_VETO: Локальный слом структуры вниз "
+                    f"(Bearish CHoCH / U-Turn Breakdown + медвежий перевес аналитиков). Лонг против разворота заблокирован."
+                )
+                print(guard_msg)
+                if logger:
+                    logger.warning(f"[Pipeline] {guard_msg}")
+                return FinalTradeDecision(
+                    symbol=symbol,
+                    decision="HOLD",
+                    conviction=0,
+                    trade_action="HOLD",
+                    strategy_mode=strategy_mode,
+                    direction_bias=direction_bias,
+                    min_conviction=min_conv,
+                    is_actionable=False,
+                    directional_confidence=0,
+                    entry_quality=0,
+                    guard_status="BLOCKED",
+                    guard_reason=guard_msg,
+                    rejection_tag="STRUCTURAL_REVERSAL_VETO",
+                    reasoning_en=f"{reasoning_en}\n\n{guard_msg}".strip(),
+                    reasoning_ru=reasoning_ru
+                )
+
+        # For REVERSAL_TREND_SHIFT, enforce REDUCE_SIZE by default ($1.35 hard cap)
+        if strategy_mode == "REVERSAL_TREND_SHIFT" and decision in ["LONG", "SHORT"] and trade_action == "ENTER":
+            trade_action = "REDUCE_SIZE"
 
         # 1.1 Deterministic ANALYST_QUORUM_GATE (Systemic Module 01 Upgrade)
         is_pullback_retest = bool((market_data or {}).get("is_pullback_retest") or (ceo_proposal or {}).get("is_pullback_retest"))
@@ -1018,3 +1370,4 @@ class DeterministicGuard:
 
 
 DeterministicGuard.validate = DeterministicGuard.evaluate
+evaluate_structural_reversal_state = DeterministicGuard.evaluate_structural_reversal_state

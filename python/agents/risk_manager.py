@@ -349,6 +349,9 @@ class RiskManager(BaseAgent):
         elif strategy_mode == "RELATIVE_MOMENTUM":
             rules["min_conviction"] = 68
             rules["min_rr"] = min(rules.get("min_rr", 1.25), 1.20)
+        elif strategy_mode == "REVERSAL_TREND_SHIFT":
+            rules["min_conviction"] = 65
+            rules["min_rr"] = min(rules.get("min_rr", 1.25), 1.20)
         elif strategy_mode == "MEAN_REVERSION":
             rules["min_conviction"] = 70
             if getattr(config, "ANTI_BOT_MODE", False) is True:
@@ -810,8 +813,8 @@ class RiskManager(BaseAgent):
         # Base target risk (ENTER): 1.75% of total equity (~$1.55 at $88 equity).
         # Hard maximum risk ceiling:
         #   - ENTER: min(0.0215 * total_balance, 2.00) (strict cap at $2.00 USDC, ~$1.85-$1.90 at $88 equity).
-        #   - REDUCE_SIZE: min(0.0150 * total_balance, 1.35) (~$1.30 USDC).
-        if trade_action == "REDUCE_SIZE":
+        #   - REDUCE_SIZE / REVERSAL_TREND_SHIFT: min(0.0150 * total_balance, 1.35) (~$1.30 USDC).
+        if trade_action == "REDUCE_SIZE" or strategy_mode == "REVERSAL_TREND_SHIFT":
             target_risk_usd = 0.0125 * total_balance
             hard_max_risk_usd = min(0.0150 * total_balance, 1.35)
         else:
