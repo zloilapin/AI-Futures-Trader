@@ -677,14 +677,17 @@ class TradingPipeline:
                                     if not is_risk_free_position(p):
                                         same_dir_risk += 1
 
-                        # Formula: max 2 with active risk; allow 3rd total only if at least 1 is in Break-Even
-                        max_dir_risk = 2
-                        max_dir_total = 3 if (same_dir_open > same_dir_risk) else 2
+                        # INVARIANT 2: Stateful Directional Slot Quarantine on Stop-Out
+                        # Single stopout (<= -0.35R) reduces cap from 2 to 1 for 90m (5400s).
+                        # Double stopout within rolling 180m freezes direction (cap=0) for 120m (7200s).
+                        from core.directional_quarantine import directional_quarantine
+                        effective_dir_risk, q_reason = directional_quarantine.get_effective_directional_cap(target_dir, base_cap=2)
+                        effective_dir_total = (effective_dir_risk + 1) if (effective_dir_risk > 0 and same_dir_open > same_dir_risk) else effective_dir_risk
 
-                        if same_dir_open >= max_dir_total or same_dir_risk >= max_dir_risk:
+                        if effective_dir_risk == 0 or same_dir_open >= effective_dir_total or same_dir_risk >= effective_dir_risk:
                             msg = (
-                                f"⏸️ Пропуск {symbol}. Лимит однонаправленных позиций ({same_dir_open}/{max_dir_total} {target_dir}, "
-                                f"с риском: {same_dir_risk}/{max_dir_risk}) заполнен. Дебаты LLM пропущены (экономия токенов 100%)."
+                                f"⏸️ Пропуск {symbol}. Лимит однонаправленных позиций ({same_dir_open}/{effective_dir_total} {target_dir}, "
+                                f"с риском: {same_dir_risk}/{effective_dir_risk}) исчерпан ({q_reason}). Дебаты LLM пропущены (экономия токенов 100%)."
                             )
                             print(msg)
                             self.services.logger.info(f"[System_Core] {msg}")
@@ -697,8 +700,8 @@ class TradingPipeline:
                                 "scanner_status": scanner_status,
                                 "scanner_reason": scanner_reason if scanner_blocked else None,
                                 "risk_approved": False,
-                                "risk_reason": f"Pre-Debate Gate: лимит однонаправленных позиций ({same_dir_open}/2 {target_dir}) исчерпан",
-                                "ceo_reasoning": "Bypassed (Pre-Debate Cluster Cap)",
+                                "risk_reason": f"Pre-Debate Gate: {q_reason} ({same_dir_open}/{effective_dir_total} {target_dir})",
+                                "ceo_reasoning": "Bypassed (Pre-Debate Cluster Cap / Directional Quarantine)",
                                 "status": "⏸️ ЛИМИТ ПОЗИЦИЙ"
                             })
                             tracker.record_rejection("DIRECTIONAL_CLUSTER_CAP")
@@ -711,7 +714,7 @@ class TradingPipeline:
                                 stage="DIRECTIONAL_CLUSTER_GATE",
                                 final_action="REJECTED",
                                 rejection_tag="DIRECTIONAL_CLUSTER_CAP",
-                                rejection_reason=f"Pre-Debate Gate: {same_dir_open}/2 active {target_dir} positions already open",
+                                rejection_reason=f"Pre-Debate Gate: {q_reason} ({same_dir_open}/{effective_dir_total} active {target_dir} positions open)",
                                 strategy_profile=strategy_profile,
                                 analyst_reports=valid_reports,
                                 market_data=market_data

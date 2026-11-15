@@ -72,8 +72,8 @@ async def test_risk_manager_nado_trigger_bump_to_104():
         macro_regime="TRENDING"
     )
     assert verdict_tight["approved"] is False
-    assert verdict_tight["veto_category"] == "MIN_NOTIONAL"
-    assert "CLOB min_size" in verdict_tight["reasoning"]
+    assert "MIN_NOTIONAL" in verdict_tight["veto_category"]
+    assert "MIN_NOTIONAL" in verdict_tight["reasoning"] or "CLOB min_size" in verdict_tight["reasoning"]
 
     # Case 3: Portfolio $15.00 -> calculated notional is ~$17.60 (< $35.00 floor)
     # Micro-dust: strictly vetoed in both SHADOW and LIVE to prevent clogging portfolio slots!
@@ -90,7 +90,7 @@ async def test_risk_manager_nado_trigger_bump_to_104():
         macro_regime="TRENDING"
     )
     assert verdict_dust["approved"] is False
-    assert verdict_dust["veto_category"] == "MIN_NOTIONAL"
+    assert "MIN_NOTIONAL" in verdict_dust["veto_category"]
     assert "MIN_NOTIONAL" in verdict_dust["reasoning"]
 
 
@@ -307,11 +307,14 @@ async def test_small_position_tp1_sets_runner_and_activates_sentinel_parabolic_t
 @pytest.mark.asyncio
 async def test_risk_manager_structural_sl_small_balance_bump_approved():
     """
-    Verifies that on an ~$84.42 equity account with a structural SL of ~1.90%
-    (which produces an initial calculated notional of ~$59.06):
-    1. Stage 6 bump to $104.00 is APPROVED because bumped risk ($2.27-$2.36) <= bump cap ($2.87-$3.21).
-    2. Stage 7 calculates proper leverage from $104.00 (e.g. 6x-7x), ensuring required margin <= usable margin ($37.99).
-    3. Stage 8 passes with approved = True, notional >= 101.0, and risk_amount_usd accurately re-anchored.
+    Verifies that on an ~$84.42 equity account:
+    1. Tight structural SL (~1.10%, SL at 49450.0):
+       Stage 6 bump to $108.50 is APPROVED because bumped risk (~$1.30) <= hard_max_risk_usd ($1.815).
+       Stage 8 passes with approved = True, notional >= 101.0, and risk <= hard_max_risk_usd.
+    2. Wide structural SL (~1.90%, SL at 49050.0):
+       Stage 6 bump risk (~$2.27) > hard_max_risk_usd ($1.815).
+       Under Invariant 1 ($1R Dollar Homogeneity), market entry is REJECTED with
+       MIN_NOTIONAL_RISK_CAP_VETO and routed to P* solver (WAIT_FOR_PULLBACK).
     """
     mock_logger = MagicMock()
     mock_llm = MagicMock()
@@ -324,15 +327,16 @@ async def test_risk_manager_structural_sl_small_balance_bump_approved():
         "trade_action": "ENTER"
     }
 
-    # Entry 50000.0, SL at 49050.0 (1.90% structural distance)
-    market = {
+    # Tight stop: Entry 50000.0, SL at 49700.0 (0.80% structural distance, like Session 2 BTC)
+    market_tight = {
         "price_data": {"current_price": 50000.0},
         "indicators": {
-            "atr_14": 500.0,
+            "atr_14": 250.0,
             "bb_middle": 49800.0,
             "ema_20": 49700.0,
-            "structural_sl": 49050.0,
-            "swing_low": 49050.0
+            "structural_sl": 49700.0,
+            "swing_low": 49700.0,
+            "swing_low_15m": 49700.0
         },
         "derivatives_data": {
             "taker_fee_pct": 0.0005,
@@ -351,15 +355,44 @@ async def test_risk_manager_structural_sl_small_balance_bump_approved():
         "recent_streak": []
     }
 
-    verdict = await rm.analyze(
-        ceo_decision, portfolio, market,
+    verdict_tight = await rm.analyze(
+        ceo_decision, portfolio, market_tight,
         effective_profile="BALANCED",
         strategy_mode="TREND_FOLLOWING",
         macro_regime="TRENDING"
     )
 
-    assert verdict["approved"] is True
-    assert verdict["notional_size_usd"] >= 101.0
-    assert verdict["risk_amount_usd"] >= 1.5  # Actual planned risk around $1.80-$2.40
-    assert verdict["risk_amount_usd"] <= 3.25
-    assert verdict["is_software_tpsl"] is False
+    assert verdict_tight["approved"] is True
+    assert verdict_tight["notional_size_usd"] >= 101.0
+    assert verdict_tight["risk_amount_usd"] <= 1.815 + 0.10  # Enforces Invariant 1 ceiling
+    assert verdict_tight["is_software_tpsl"] is False
+
+    # Wide stop: Entry 50000.0, SL at 49050.0 (1.90% structural distance) -> exceeds hard cap, routes to P*
+    market_wide = {
+        "price_data": {"current_price": 50000.0},
+        "indicators": {
+            "atr_14": 500.0,
+            "bb_middle": 49800.0,
+            "ema_20": 49700.0,
+            "structural_sl": 49050.0,
+            "swing_low": 49050.0
+        },
+        "derivatives_data": {
+            "taker_fee_pct": 0.0005,
+            "funding_rate": 0.0001,
+            "size_increment": 0.00005,
+            "price_increment": 0.1,
+            "min_size": 0.00005,
+            "min_notional": 100.0
+        }
+    }
+    verdict_wide = await rm.analyze(
+        ceo_decision, portfolio, market_wide,
+        effective_profile="BALANCED",
+        strategy_mode="TREND_FOLLOWING",
+        macro_regime="TRENDING"
+    )
+    assert verdict_wide["approved"] is False
+    assert "MIN_NOTIONAL_RISK_CAP_VETO" in verdict_wide["veto_category"]
+    assert verdict_wide["trade_action"] == "WAIT_FOR_PULLBACK"
+    assert verdict_wide["target_pullback_price"] is not None

@@ -682,7 +682,9 @@ class RiskManager(BaseAgent):
         reason: str,
         trade_action: str = "HOLD",
         target_pullback_price: Optional[float] = None,
-        watchlist_metadata: Optional[Dict[str, Any]] = None
+        watchlist_metadata: Optional[Dict[str, Any]] = None,
+        sl_price: Optional[float] = None,
+        tp_price: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Uniform dictionary constructor for rejected / vetoed trade candidates."""
         return {
@@ -698,10 +700,12 @@ class RiskManager(BaseAgent):
             "contracts": 0.0,
             "margin_pct": 0.0,
             "entry_price": 0.0,
-            "take_profit_price": 0.0,
+            "take_profit_price": tp_price or 0.0,
             "take_profit_pct": 0.0,
-            "stop_loss_price": 0.0,
+            "stop_loss_price": sl_price or 0.0,
             "stop_loss_pct": 0.0,
+            "sl_price": sl_price,
+            "tp_price": tp_price,
             "risk_reward_ratio": 0.0,
             "liquidation_price": 0.0,
             "position_size_pct": 0.0,
@@ -801,6 +805,18 @@ class RiskManager(BaseAgent):
             self.logger.warning(f"[{self.name}] ❌ INSUFFICIENT BALANCE: Total balance is {raw_total_balance}. Blocking trade.")
             return self._build_veto_result("INSUFFICIENT_BALANCE", f"Total balance is non-positive or non-finite (${raw_total_balance}).", trade_action)
         total_balance = float(raw_total_balance)
+
+        # INVARIANT 1: Strict Equity-Proportional 1R Ceiling (Homogeneous 1R Dollar Cap)
+        # Base target risk (ENTER): 1.75% of total equity (~$1.55 at $88 equity).
+        # Hard maximum risk ceiling:
+        #   - ENTER: min(0.0215 * total_balance, 2.00) (strict cap at $2.00 USDC, ~$1.85-$1.90 at $88 equity).
+        #   - REDUCE_SIZE: min(0.0150 * total_balance, 1.35) (~$1.30 USDC).
+        if trade_action == "REDUCE_SIZE":
+            target_risk_usd = 0.0125 * total_balance
+            hard_max_risk_usd = min(0.0150 * total_balance, 1.35)
+        else:
+            target_risk_usd = 0.0175 * total_balance
+            hard_max_risk_usd = min(0.0215 * total_balance, 2.00)
             
         if not _is_finite_non_negative(raw_avail_margin):
             self.logger.warning(f"[{self.name}] ❌ INVALID MARGIN: Available margin is {raw_avail_margin}. Blocking trade.")
@@ -996,9 +1012,9 @@ class RiskManager(BaseAgent):
             self.logger.warning(f"[{self.name}] 🚫 MAX_CONCURRENT_POSITIONS VETO: {msg}")
             return self._build_veto_result("MAX_CONCURRENT_POSITIONS", msg, trade_action)
 
-        # Gate 2.2b: Directional Cluster Cap (Risk-Free Slot Recycling: 2 Risk + 1 Break-Even)
-        # Prevents opening more than 2 positions with active risk in the same direction.
-        # A 3rd directional position is permitted ONLY if at least 1 existing position is in Break-Even.
+        # Gate 2.2b: Directional Cluster Cap & Stateful Slot Quarantine (Invariant 2)
+        # Prevents opening more than effective_dir_risk positions with active risk in the same direction.
+        # Single stopout (<= -0.35R) reduces cap to 1 for 90m; double stopout freezes direction (cap=0) for 120m.
         same_dir_total = 0
         same_dir_risk = 0
         for p in unique_positions:
@@ -1009,13 +1025,15 @@ class RiskManager(BaseAgent):
                 if not self.is_risk_free_position(p):
                     same_dir_risk += 1
 
-        max_dir_risk = 2
-        max_dir_total = 3 if (same_dir_total > same_dir_risk) else 2
+        from core.directional_quarantine import directional_quarantine
+        effective_dir_risk, q_reason = directional_quarantine.get_effective_directional_cap(decision, base_cap=2)
+        max_dir_total = (effective_dir_risk + 1) if (effective_dir_risk > 0 and same_dir_total > same_dir_risk) else effective_dir_risk
 
-        if same_dir_total >= max_dir_total or same_dir_risk >= max_dir_risk:
+        if effective_dir_risk == 0 or same_dir_total >= max_dir_total or same_dir_risk >= effective_dir_risk:
             msg = (
                 f"Directional cluster limit reached: {same_dir_total}/{max_dir_total} active {decision} positions "
-                f"({same_dir_risk}/{max_dir_risk} with active risk) in {macro_regime} regime."
+                f"({same_dir_risk}/{effective_dir_risk} with active risk) in {macro_regime} regime. "
+                f"Quarantine status: {q_reason}"
             )
             self.logger.warning(f"[{self.name}] 🚫 DIRECTIONAL_CLUSTER_CAP VETO: {msg}")
             return self._build_veto_result("DIRECTIONAL_CLUSTER_CAP", msg, trade_action)
@@ -1169,6 +1187,9 @@ class RiskManager(BaseAgent):
         expected_slip_buffer = exec_price_info["slip_buffer"]
         expected_slippage_pct = exec_price_info["expected_slippage_pct"]
 
+        atr_1h_pct = get_normalized_atr_pct(market_data, current_price)
+        max_sl_dist_allowed = max(1.25, min(3.50, 1.85 * atr_1h_pct))
+
         # Calculate SL and TP distances based on strategy mode
         is_anti_bot = bool(getattr(config, "ANTI_BOT_MODE", False))
         if strategy_mode == "MEAN_REVERSION":
@@ -1262,6 +1283,16 @@ class RiskManager(BaseAgent):
 
             atr_buffer = 0.25 * (atr_14 if atr_14 > 0 else current_price * 0.01)
 
+            # Fallback to explicit structural SL from proposal if swing extremes were not present in candles/indicators
+            if decision == "SHORT" and swing_high_15m <= 0.0:
+                cand_sl = float(_extract_cand_field(ceo_decision, "structural_sl") or _extract_cand_field(ceo_decision, "sl_price") or 0.0)
+                if cand_sl > current_price:
+                    swing_high_15m = max(0.0, cand_sl - atr_buffer)
+            elif decision == "LONG" and swing_low_15m <= 0.0:
+                cand_sl = float(_extract_cand_field(ceo_decision, "structural_sl") or _extract_cand_field(ceo_decision, "sl_price") or 0.0)
+                if 0 < cand_sl < current_price:
+                    swing_low_15m = cand_sl + atr_buffer
+
             has_structure = (decision == "SHORT" and swing_high_15m > 0) or (decision == "LONG" and swing_low_15m > 0)
             if has_structure:
                 is_retest = bool(
@@ -1321,7 +1352,7 @@ class RiskManager(BaseAgent):
                     tentative_tp_dist = max(atr_14 * tp_mult, (current_price * (max_sl_dist_allowed / 100.0)) * effective_min_rr)
                     tentative_tp = current_price + tentative_tp_dist if decision == "LONG" else current_price - tentative_tp_dist
                     
-                    calc_risk_budget = float(ceo_decision.get("approved_risk_usd") or remaining_risk_budget_usd or (total_balance * 0.02) or 2.0)
+                    calc_risk_budget = min(float(ceo_decision.get("approved_risk_usd") or remaining_risk_budget_usd or hard_max_risk_usd), hard_max_risk_usd)
                     p_star = solve_optimal_pullback_entry(
                         direction=decision,
                         current_price=current_price,
@@ -1493,7 +1524,7 @@ class RiskManager(BaseAgent):
                 target_tp=tp_price,
                 atr_15m=atr_14,
                 max_sl_dist_pct=max_sl_dist_allowed,
-                max_risk_usd=approved_risk_usd if ('approved_risk_usd' in locals() and approved_risk_usd > 0) else approved_budget,
+                max_risk_usd=min(float(approved_risk_usd if ('approved_risk_usd' in locals() and approved_risk_usd > 0) else approved_budget), hard_max_risk_usd),
                 min_notional_usd=float(derivatives_data.get("min_notional", 100.0) or 100.0),
                 min_net_rr=min_rr_required,
                 taker_fee_pct=fee_pct / 2.0 if ('fee_pct' in locals() and fee_pct > 0) else 0.0005,
@@ -1834,7 +1865,7 @@ class RiskManager(BaseAgent):
         )
 
         # ═══ Stage 6: Position Sizing (Canonical Math with Fee Integration) ═══
-        risk_amount_usd = total_balance * dynamic_risk_pct
+        risk_amount_usd = min(total_balance * dynamic_risk_pct, hard_max_risk_usd)
         if remaining_risk_budget_usd > 0:
             risk_amount_usd = min(risk_amount_usd, remaining_risk_budget_usd)
 
@@ -1851,41 +1882,71 @@ class RiskManager(BaseAgent):
             # Nado DEX CLOB & Native Trigger Optimization ($108.50 / $105.50 Exchange Safe Bump - Block 04):
             # If notional is below the exchange CLOB threshold ($35.00 <= notional_usd < safe_bump_target),
             # conditionally bump notional to safe bump target ($108.50 for BTC/ETH, $105.50 for others) to pass exchange limit (avoiding error 2094),
-            # provided the resulting risk does not exceed max_allowed_risk_budget ($1.35 cap for REDUCE_SIZE).
+            # provided the resulting risk does not exceed hard_max_risk_usd ceiling (INVARIANT 1).
             min_bump_threshold = float(getattr(config, "MIN_NOTIONAL_FLOOR_USD", 35.0) or 35.0)
-            bump_risk_cap_pct = max(0.034, float(getattr(config, "MIN_NOTIONAL_MAX_BUMP_RISK_PCT", 0.038) or 0.038))
             clean_sym_b = str(symbol or _extract_cand_field(ceo_decision, "symbol", "")).replace('/', '-').upper()
             base_coin_b = clean_sym_b.split('-')[0].strip()
             target_bump_notional = 108.50 if base_coin_b in ("BTC", "ETH") else 105.50
             is_trigger_bumped = False
-            max_allowed_risk_budget = max(risk_amount_usd * 1.75, total_balance * bump_risk_cap_pct) if total_balance > 0 else (risk_amount_usd * 1.75)
-            if trade_action == "REDUCE_SIZE":
-                max_allowed_risk_budget = min(max_allowed_risk_budget, 1.35)
+            max_allowed_risk_budget = hard_max_risk_usd
 
             is_production_mode = getattr(config, "SHADOW_MODE", False) or getattr(config, "NADO_LIVE_TRADING_ENABLED", False) or getattr(config, "LIVE_TRADING_ENABLED", False)
             raw_mn = derivatives_data.get("min_notional")
             needs_bump = (is_production_mode or raw_mn is None or float(raw_mn or 0.0) >= 100.0)
-            if needs_bump and min_bump_threshold <= notional_usd < (target_bump_notional - 0.50):
+            if needs_bump and 0 < notional_usd < (target_bump_notional - 0.50):
                 bumped_notional = target_bump_notional
                 bumped_contracts = bumped_notional / execution_entry if execution_entry > 0 else contracts
                 bumped_risk = bumped_contracts * effective_loss_per_contract
 
-                # Block 04: If bumping a REDUCE_SIZE trade causes trade_risk_usd > $1.35, reject with REDUCE_SIZE_RISK_CAP_VETO
-                if trade_action == "REDUCE_SIZE" and bumped_risk > 1.35:
-                    msg = (
-                        f"REDUCE_SIZE_RISK_CAP_VETO: Bumping {clean_sym_b} to exchange min notional (${target_bump_notional:.2f}) "
-                        f"causes dollar risk (${bumped_risk:.2f} USDC) to exceed REDUCE_SIZE cap ($1.35 USDC). "
-                        f"Immediate market entry aborted. Recommend WAIT_FOR_PULLBACK closer to structure."
+                # INVARIANT 1: Wide-stop setups where bumped_risk > hard_max_risk_usd MUST NOT execute at market.
+                # Reject with MIN_NOTIONAL_RISK_CAP_VETO and invoke solve_optimal_pullback_entry (P*) with max_risk_usd = hard_max_risk_usd.
+                if bumped_risk > hard_max_risk_usd:
+                    effective_min_rr = float(min_rr_required if ('min_rr_required' in locals() and min_rr_required > 0) else profile_rules.get("min_rr", 1.40))
+                    p_star = solve_optimal_pullback_entry(
+                        direction=decision,
+                        current_price=current_price,
+                        structural_sl=sl_price,
+                        target_tp=tp_price,
+                        atr_15m=atr_14,
+                        max_sl_dist_pct=max_sl_dist_allowed,
+                        max_risk_usd=hard_max_risk_usd,
+                        min_notional_usd=target_bump_notional,
+                        min_net_rr=effective_min_rr,
+                        taker_fee_pct=fee_pct / 2.0 if ('fee_pct' in locals() and fee_pct > 0) else 0.0005,
                     )
-                    self.logger.warning(f"[{self.name}] 🚫 REDUCE_SIZE_RISK_CAP_VETO: {msg}")
-                    return self._build_veto_result("REDUCE_SIZE_RISK_CAP_VETO", msg, "WAIT_FOR_PULLBACK")
+                    sl_dist_pct = (distance_to_sl / execution_entry * 100.0) if execution_entry > 0 else 0.0
+                    if p_star is not None:
+                        msg = (
+                            f"MIN_NOTIONAL_RISK_CAP_VETO: Bumping {clean_sym_b} to exchange min notional (${target_bump_notional:.2f}) "
+                            f"causes dollar risk (${bumped_risk:.2f} USDC) to exceed hard cap (${hard_max_risk_usd:.2f} USDC) "
+                            f"due to wide structural SL ({sl_dist_pct:.2f}%). "
+                            f"Инверсный солвер P* рассчитал оптимальную цену отката P*=${p_star:.4f} с риском <= ${hard_max_risk_usd:.2f}. "
+                            f"Маршрутизировано в WAIT_FOR_PULLBACK."
+                        )
+                        self.logger.warning(f"[{self.name}] 🚫 MIN_NOTIONAL_RISK_CAP_VETO: {msg}")
+                        return self._build_veto_result(
+                            "MIN_NOTIONAL_RISK_CAP_VETO",
+                            msg,
+                            "WAIT_FOR_PULLBACK",
+                            target_pullback_price=p_star,
+                            sl_price=sl_price,
+                            tp_price=tp_price,
+                        )
+                    else:
+                        msg = (
+                            f"MIN_NOTIONAL_RISK_CAP_VETO: Bumping {clean_sym_b} to exchange min notional (${target_bump_notional:.2f}) "
+                            f"causes dollar risk (${bumped_risk:.2f} USDC) to exceed hard cap (${hard_max_risk_usd:.2f} USDC), "
+                            f"and solver confirmed no valid P* satisfies risk invariants. Discarded."
+                        )
+                        self.logger.warning(f"[{self.name}] 🚫 MIN_NOTIONAL_RISK_CAP_VETO: {msg}")
+                        return self._build_veto_result("MIN_NOTIONAL_RISK_CAP_VETO", msg, "HOLD")
 
-                max_allowed_bump_risk = max_allowed_risk_budget
+                max_allowed_bump_risk = hard_max_risk_usd
                 can_bump = (bumped_notional <= max_notional_usd) and (bumped_risk <= max_allowed_bump_risk)
                 if bumped_notional <= max_notional_usd and total_balance > 0 and can_bump:
                     self.logger.info(
                         f"[{self.name}] ⚡ Nado CLOB Optimization: Bumped notional from ${notional_usd:.2f} to ${bumped_notional:.2f} "
-                        f"to pass $101 exchange limit for CLOB and native SL/TP triggers (Risk: ${bumped_risk:.2f} / {(bumped_risk/total_balance)*100:.2f}%)."
+                        f"to pass $101 exchange limit for CLOB and native SL/TP triggers (Risk: ${bumped_risk:.2f} <= ${hard_max_risk_usd:.2f})."
                     )
                     notional_usd = bumped_notional
                     contracts = bumped_contracts
@@ -2125,13 +2186,6 @@ class RiskManager(BaseAgent):
             msg = f"Calculated contracts ({contracts}) is below exchange minimum size ({min_size})."
             self.logger.warning(f"[{self.name}] 🚫 MIN_SIZE VETO: {msg}")
             return self._build_veto_result("MIN_SIZE", msg, trade_action)
-        elif notional_usd < 35.0:
-            msg = (
-                f"VETO: MIN_NOTIONAL. Calculated notional (${notional_usd:.2f}) is below minimum floor "
-                f"($35.00 minimum slot size). Refusing micro-dust trade to preserve portfolio slots."
-            )
-            self.logger.warning(f"[{self.name}] 🚫 MIN_NOTIONAL VETO: {msg}")
-            return self._build_veto_result("MIN_NOTIONAL", msg, trade_action)
         elif notional_usd < 103.50:
             NADO_SIZE_INCREMENTS = {
                 "LIT-USD": 1.0,
@@ -2163,34 +2217,22 @@ class RiskManager(BaseAgent):
             bump_risk = bump_contracts * effective_loss_per_contract
             bump_margin = round(bump_notional / effective_leverage if effective_leverage > 0 else bump_notional, 2)
 
-            bump_risk_cap_pct = max(0.034, float(getattr(config, "MIN_NOTIONAL_MAX_BUMP_RISK_PCT", 0.038) or 0.038))
-            max_allowed_risk_budget = max(risk_amount_usd * 1.75, total_balance * bump_risk_cap_pct) if total_balance > 0 else (risk_amount_usd * 1.75)
-            if trade_action == "REDUCE_SIZE":
-                max_allowed_risk_budget = min(max_allowed_risk_budget, 1.35)
-
-            # Block 04: If bumping a REDUCE_SIZE trade causes bump_risk > $1.35, reject with REDUCE_SIZE_RISK_CAP_VETO
-            if trade_action == "REDUCE_SIZE" and bump_risk > 1.35:
-                msg = (
-                    f"REDUCE_SIZE_RISK_CAP_VETO: Bumping {clean_sym_b} to exchange min notional (${bump_notional:.2f}) "
-                    f"causes dollar risk (${bump_risk:.2f} USDC) to exceed REDUCE_SIZE cap ($1.35 USDC). "
-                    f"Immediate market entry aborted. Recommend WAIT_FOR_PULLBACK closer to structure."
-                )
-                self.logger.warning(f"[{self.name}] 🚫 REDUCE_SIZE_RISK_CAP_VETO: {msg}")
-                return self._build_veto_result("REDUCE_SIZE_RISK_CAP_VETO", msg, "WAIT_FOR_PULLBACK")
+            # INVARIANT 1: Strict hard maximum risk ceiling in Stage 8 bump
+            max_allowed_risk_budget = hard_max_risk_usd
 
             can_safely_bump = (
-                notional_usd >= min_bump_threshold
+                notional_usd > 0
                 and bump_notional >= 101.0
                 and bump_notional <= max_notional_usd
                 and bump_margin <= (usable_margin * 1.05)
                 and bump_margin <= available_margin
-                and bump_risk <= max_allowed_risk_budget
+                and bump_risk <= hard_max_risk_usd
             )
 
             if can_safely_bump:
                 self.logger.info(
                     f"[{self.name}] ⚡ Stage 8: Safely bumped sub-notional from ${notional_usd:.2f} to ${bump_notional:.2f} >= $101.00 "
-                    f"(Contracts: {bump_contracts}, Margin: ${bump_margin:.2f} <= ${usable_margin:.2f}, Risk: ${bump_risk:.2f} <= ${max_allowed_risk_budget:.2f})."
+                    f"(Contracts: {bump_contracts}, Margin: ${bump_margin:.2f} <= ${usable_margin:.2f}, Risk: ${bump_risk:.2f} <= ${hard_max_risk_usd:.2f})."
                 )
                 contracts = bump_contracts
                 notional_usd = bump_notional
@@ -2199,6 +2241,7 @@ class RiskManager(BaseAgent):
                 margin_pct = round((margin_usd / total_balance) * 100 if total_balance > 0 else 0, 2)
                 is_trigger_bumped = True
             else:
+                effective_min_rr = float(min_rr_required if ('min_rr_required' in locals() and min_rr_required > 0) else profile_rules.get("min_rr", 1.40))
                 p_star = solve_optimal_pullback_entry(
                     direction=decision,
                     current_price=current_price,
@@ -2206,27 +2249,35 @@ class RiskManager(BaseAgent):
                     target_tp=tp_price,
                     atr_15m=atr_14,
                     max_sl_dist_pct=max_sl_dist_allowed,
-                    max_risk_usd=max_allowed_risk_budget,
+                    max_risk_usd=hard_max_risk_usd,
                     min_notional_usd=target_min_clob,
-                    min_net_rr=float(min_rr_required if ('min_rr_required' in locals() and min_rr_required > 0) else profile_rules.get("min_rr", 1.40)),
+                    min_net_rr=effective_min_rr,
                     taker_fee_pct=fee_pct / 2.0 if ('fee_pct' in locals() and fee_pct > 0) else 0.0005,
                 )
                 if p_star is not None:
                     msg = (
-                        f"VETO: MIN_NOTIONAL (${notional_usd:.2f} < $101.00 exchange CLOB min_size). "
+                        f"VETO: MIN_NOTIONAL_RISK_CAP_VETO (${notional_usd:.2f} < $101.00 exchange CLOB min_size). "
+                        f"Bump risk ${bump_risk:.2f} exceeds hard risk cap ${hard_max_risk_usd:.2f}. "
                         f"Инверсный солвер P* рассчитал цену отката ${p_star:.4f}, позволяющую открыть минимальный лот "
-                        f"без превышения лимита риска (${max_allowed_risk_budget:.2f}). Маршрутизировано в WAIT_FOR_PULLBACK."
+                        f"без превышения лимита риска (${hard_max_risk_usd:.2f}). Маршрутизировано в WAIT_FOR_PULLBACK."
                     )
-                    self.logger.warning(f"[{self.name}] 🚫 MIN_NOTIONAL VETO: {msg}")
-                    return self._build_veto_result("MIN_NOTIONAL", msg, "WAIT_FOR_PULLBACK", target_pullback_price=p_star)
+                    self.logger.warning(f"[{self.name}] 🚫 MIN_NOTIONAL_RISK_CAP_VETO: {msg}")
+                    return self._build_veto_result(
+                        "MIN_NOTIONAL_RISK_CAP_VETO",
+                        msg,
+                        "WAIT_FOR_PULLBACK",
+                        target_pullback_price=p_star,
+                        sl_price=sl_price,
+                        tp_price=tp_price,
+                    )
                 else:
                     msg = (
-                        f"VETO: MIN_NOTIONAL (${notional_usd:.2f} < $101.00 exchange CLOB min_size). "
+                        f"VETO: MIN_NOTIONAL_RISK_CAP_VETO (${notional_usd:.2f} < $101.00 exchange CLOB min_size). "
                         f"Calculated notional is below exchange minimum and cannot be safely bumped to ${target_min_clob:.2f} "
-                        f"(bump risk ${bump_risk:.2f} vs cap ${max_allowed_risk_budget:.2f}, margin ${bump_margin:.2f} vs usable ${usable_margin:.2f})."
+                        f"(bump risk ${bump_risk:.2f} vs cap ${hard_max_risk_usd:.2f}, margin ${bump_margin:.2f} vs usable ${usable_margin:.2f})."
                     )
-                    self.logger.warning(f"[{self.name}] 🚫 MIN_NOTIONAL VETO: {msg}")
-                    return self._build_veto_result("MIN_NOTIONAL", msg, trade_action)
+                    self.logger.warning(f"[{self.name}] 🚫 MIN_NOTIONAL_RISK_CAP_VETO: {msg}")
+                    return self._build_veto_result("MIN_NOTIONAL_RISK_CAP_VETO", msg, trade_action)
         elif notional_usd > max_notional_usd:
             msg = f"Required notional ${notional_usd:.2f} exceeds max allowed ${max_notional_usd:.2f}."
             self.logger.warning(f"[{self.name}] 🚫 MAX NOTIONAL VETO: {msg}")

@@ -2403,6 +2403,17 @@ class NadoTradingService(BaseTradingService):
                 journal = journal[-1000:]
             StateStore.save(journal_file, journal)
 
+            # INVARIANT 2: Record directional stopout in DirectionalQuarantine
+            try:
+                from core.directional_quarantine import directional_quarantine
+                directional_quarantine.record_stopout(
+                    direction=direction,
+                    timestamp=time.time(),
+                    realized_r=realized_r
+                )
+            except Exception as dq_err:
+                logger.debug(f"[NadoTradingService] Directional quarantine record error: {dq_err}")
+
             # Auto-Recalibration Hook (Contour 1 Walk-Forward Bayesian Calibration)
             # Triggers periodic recalibration every 12 closed trades once minimum sample (>= 20) is met
             if len(journal) >= 20 and len(journal) % 12 == 0:
@@ -3707,9 +3718,11 @@ class NadoTradingService(BaseTradingService):
         base_symbol = canonical_sym.split('-')[0].upper()
         pos = self.active_positions.get(symbol) or self.active_positions.get(canonical_sym) or self.active_positions.get(base_symbol) or {}
 
-        # CRITICAL SAFETY INVARIANT: An on-chain position (having product_id/sender or restored on-chain)
-        # must NEVER be virtually closed, even if SHADOW_MODE is set in config.
-        # Virtual close is permitted ONLY for purely simulated/paper positions.
+        # INVARIANT 3: On-Chain Ledger Purity
+        # When is_on_chain_position is True (or live trading is active on Nado CLOB),
+        # a virtual exit trigger (TIME_STOP_BE, SENTINEL_CLOSE) must NEVER remove the position
+        # from active_positions or append a record to trade_journal.json unless the corresponding
+        # on-chain market close order has actually succeeded on Nado CLOB.
         is_explicitly_virtual = bool(pos.get("is_virtual") or pos.get("is_shadow"))
         is_on_chain_position = bool(
             pos.get("sender")
@@ -3717,8 +3730,16 @@ class NadoTradingService(BaseTradingService):
             or pos.get("native_triggers_placed")
             or "restored" in str(pos.get("original_thesis", "")).lower()
         )
+        is_live_trading = bool(
+            getattr(config, "NADO_LIVE_TRADING_ENABLED", False)
+            or getattr(config, "LIVE_TRADING_ENABLED", False)
+            or getattr(self, "is_connected", False)
+        )
 
-        if (is_explicitly_virtual or getattr(config, "SHADOW_MODE", False)) and not is_on_chain_position:
+        # Virtual close is strictly permitted ONLY if explicitly virtual and NOT an on-chain position and NOT live trading
+        is_virtual_allowed = (is_explicitly_virtual or getattr(config, "SHADOW_MODE", False)) and not is_on_chain_position and not is_live_trading
+
+        if is_virtual_allowed:
             if not pos:
                 return False, 0.0
             cur_price = float(pos.get("current_price", pos.get("entry_price", 0.0)) or 0.0)
