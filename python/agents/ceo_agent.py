@@ -571,6 +571,22 @@ class CEOAgent(BaseAgent):
             "6. If StrategyRouter selected MEAN_REVERSION with a clear direction and no hard vetoes apply, approve the trade with ENTER (do NOT downgrade to WAIT_FOR_PULLBACK or HOLD) and assign EntryQuality >= 75%."
         )
 
+    @staticmethod
+    def get_reversal_trend_shift_prompt_addon(direction: str, reversal_reason: str = "") -> str:
+        return (
+            f"\n[🔄 CRITICAL: STRUCTURAL REVERSAL IN PROGRESS ({direction}) - REVERSAL_TREND_SHIFT]:\n"
+            f"StrategyRouter and DeterministicGuard have confirmed a structural trend shift ({direction}) via 15m/1H CHoCH / U-Turn Reclaim"
+            f"{f' ({reversal_reason})' if reversal_reason else ''}.\n"
+            f"TIMEFRAME PHASE-LAG CONDITIONING RULES FOR CEO:\n"
+            f"1. A structural reversal initiates on 15m and 1H timeframes BEFORE the lagging 4H moving average/indicator can turn. Do NOT penalize this {direction} setup or force HOLD simply because the lagging 4H macro trend is contrary.\n"
+            f"2. Evaluate MTF directional alignment (C_dir) primarily against the active reversal timeframes: 15m/1H structure (EMA-20/VWAP reclaim, Higher Lows / Lower Highs) and technical sub-agent consensus.\n"
+            f"3. SCORE_BREAKDOWN REQUIREMENTS (PREVENT MATH VETO):\n"
+            f"   - When evaluating {direction}, score_breakdown MUST reflect the 15m/1H structural reversal in direction {direction}.\n"
+            f"   - If {direction} == 'LONG': bull_argument must be positive and dominate bear_argument (e.g. bull_argument: 38-45, bear_argument: -10 to -18), and mtf_trend must be positive (+25 to +35) reflecting 15m/1H reclaim.\n"
+            f"   - If {direction} == 'SHORT': bear_argument must be negative and dominate bull_argument (e.g. bear_argument: -38 to -45, bull_argument: 10 to 18), and mtf_trend must be negative (-25 to -35) reflecting 15m/1H breakdown.\n"
+            f"4. If current price is overextended from the 15m/1H reclaim level, prescribe trade_action: WAIT_FOR_PULLBACK (EntryQuality ~55-65%) so the system registers a pullback retest rather than forcing market entry."
+        )
+
     async def analyze(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Executes the 4-Tier Escalation Model logic with separated Directional Confidence
@@ -592,10 +608,15 @@ class CEOAgent(BaseAgent):
         is_pullback_retest = bool(data.get("is_pullback_retest"))
         pb_ctx = data.get("pullback_context") or {}
 
+        strategy_mode = data.get("strategy_mode", "TREND_FOLLOWING")
+        direction_bias = data.get("direction_bias", "NEUTRAL")
+        reversal_state = data.get("reversal_state") or (data.get("market_data") or {}).get("structural_reversal") or {}
+        is_reversal = (strategy_mode == "REVERSAL_TREND_SHIFT" or bool(reversal_state.get("is_reversal")))
+
         payload = {
             "target_symbol": symbol,
-            "strategy_mode": data.get("strategy_mode", "TREND_FOLLOWING"),
-            "direction_bias": data.get("direction_bias", "NEUTRAL"),
+            "strategy_mode": strategy_mode,
+            "direction_bias": direction_bias,
             "router_reasoning": data.get("router_reasoning", ""),
             "macro_regime": data.get("macro_regime", "RANGE_CHOPPY"),
             "macro_profile": data.get("macro_profile", "BALANCED"),
@@ -609,11 +630,15 @@ class CEOAgent(BaseAgent):
             "historical_trade_memory": historical_context,
             "past_lessons_learned": data.get("past_lessons_learned", []),
             "is_pullback_retest": is_pullback_retest,
-            "pullback_context": pb_ctx if is_pullback_retest else None
+            "pullback_context": pb_ctx if is_pullback_retest else None,
+            "structural_reversal": reversal_state
         }
         
         data_string = json.dumps(payload, indent=2)
         full_prompt = f"{self.system_instruction}\n\nExecutive Dashboard Data:\n{data_string}"
+
+        if is_reversal and direction_bias in ["LONG", "SHORT"]:
+            full_prompt = f"{full_prompt}\n{self.get_reversal_trend_shift_prompt_addon(direction_bias, reversal_state.get('reversal_reason', ''))}"
 
         if is_pullback_retest:
             pb_direction = pb_ctx.get("direction") or data.get("pullback_retest_direction") or data.get("direction_bias", "LONG")
@@ -747,7 +772,12 @@ Primary CEO Reasoning:
 {reasoning}
 
 Here is the raw data:
-{data_string}
+{data_string}"""
+
+            if is_reversal and direction_bias in ["LONG", "SHORT"]:
+                escalation_prompt = f"{escalation_prompt}\n{self.get_reversal_trend_shift_prompt_addon(direction_bias, reversal_state.get('reversal_reason', ''))}"
+
+            escalation_prompt += """
 
 Provide a JSON strictly matching this schema (pick one concrete string for enum fields, do NOT output pipe '|' characters):
 {{
@@ -1359,6 +1389,7 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
         bb_pen = 0
         strat_mode = str((market_context or {}).get("strategy_mode", "")).upper()
         is_breakout_strategy = strat_mode in ["BREAKOUT", "VOLATILITY_MOMENTUM"]
+        is_reversal = (strat_mode == "REVERSAL_TREND_SHIFT")
         is_pullback_retest = bool(
             (market_context or {}).get("is_pullback_retest") 
             or ((market_context or {}).get("market_data") or {}).get("is_pullback_retest")
@@ -1470,6 +1501,9 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                 except (ValueError, TypeError): pass
 
         cat_market_structure = max(-15, llm_struct)
+        if is_reversal:
+            # Phase-Lag: Reversals initiate against lagging HTF indicators; do not penalize for contrary 4H structure
+            cat_market_structure = max(-10, cat_market_structure)
 
         # Category D: Liquidity & Execution Friction (Spread, orderbook imbalance, friction)
         llm_liq = 0
@@ -1509,7 +1543,7 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
 
         # Cap cumulative penalties:
         # If pure unit test with capped LLM breakdown (-30 cap) and no market context:
-        max_allowed_penalty = -10 if is_pullback_retest else (-30 if (not market_context and llm_penalty <= -30) else -40)
+        max_allowed_penalty = -10 if is_pullback_retest else (-15 if is_reversal else (-30 if (not market_context and llm_penalty <= -30) else -40))
         total_penalty = max(max_allowed_penalty, final_penalty)
 
         risk_breakdown = {
@@ -1587,19 +1621,28 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
         from core.config import config
         is_anti_bot = bool(getattr(config, "ANTI_BOT_MODE", False))
         is_mean_rev = (strategy_mode == "MEAN_REVERSION")
+        is_reversal = (strategy_mode == "REVERSAL_TREND_SHIFT")
         matches_router = (direction_bias == req_decision) if direction_bias in ["LONG", "SHORT"] else True
 
-        # Anti-Bot Score Alignment: when hunting counter-trend exhaustion traps, ensure raw breakdown reflects the fade decision
-        if (is_anti_bot or is_mean_rev) and (matches_router or is_mean_rev):
+        if is_reversal and req_decision not in ["LONG", "SHORT"] and direction_bias in ["LONG", "SHORT"]:
+            req_decision = direction_bias
+            self.logger.info(
+                f"[{self.name}] 🔄 REVERSAL_TREND_SHIFT: Re-evaluating default HOLD as {direction_bias} "
+                f"under active 15m/1H structural reversal contract."
+            )
+
+        # Anti-Bot & Reversal Score Alignment: when hunting counter-trend traps or structural reversals,
+        # ensure raw breakdown reflects the active thesis direction
+        if (is_anti_bot or is_mean_rev or is_reversal) and (matches_router or is_mean_rev or is_reversal):
             if req_decision == "SHORT" and raw_bull >= raw_bear:
                 raw_bear, raw_bull = max(raw_bull, 38.0), min(raw_bear, 18.0)
                 self.logger.info(
-                    f"[{self.name}] 🦈 Anti-Bot Score Alignment: aligned breakdown weights with counter-trend verdict {req_decision}"
+                    f"[{self.name}] 🔄 Reversal/Anti-Bot Score Alignment: aligned breakdown weights with verdict {req_decision}"
                 )
             elif req_decision == "LONG" and raw_bear >= raw_bull:
                 raw_bull, raw_bear = max(raw_bear, 38.0), min(raw_bull, 18.0)
                 self.logger.info(
-                    f"[{self.name}] 🦈 Anti-Bot Score Alignment: aligned breakdown weights with counter-trend verdict {req_decision}"
+                    f"[{self.name}] 🔄 Reversal/Anti-Bot Score Alignment: aligned breakdown weights with verdict {req_decision}"
                 )
 
         if market_context and isinstance(market_context, dict):
@@ -1624,7 +1667,21 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                 is_bull_4h = (norm_4h == "BULLISH")
                 is_bear_4h = (norm_4h == "BEARISH")
 
-                if has_1h and has_4h:
+                if is_reversal and direction_bias in ["LONG", "SHORT"]:
+                    # Phase-Lag Weight Redistribution (Contract 1):
+                    # 4H EMA has a multi-hour phase lag relative to a 15m/1H structural break (CHoCH).
+                    # When strategy_mode == "REVERSAL_TREND_SHIFT", evaluate MTF directional alignment
+                    # using active reversal timeframes (15m/1H structure, EMA-20/VWAP reclaim)
+                    # rather than penalizing for diverging from the lagging 4H indicator.
+                    is_aligned_15m = (norm_15m == ("BULLISH" if direction_bias == "LONG" else "BEARISH"))
+                    is_aligned_1h = (norm_1h == ("BULLISH" if direction_bias == "LONG" else "BEARISH"))
+                    if is_aligned_15m or is_aligned_1h:
+                        mtf_status = f"REVERSAL_{direction_bias}"
+                        observed_mtf_bias = direction_bias
+                    else:
+                        mtf_status = f"TRANSITION_{direction_bias}"
+                        observed_mtf_bias = direction_bias
+                elif has_1h and has_4h:
                     # Both timeframes are known and evaluated
                     if (is_bull_1h and is_bear_4h) or (is_bear_1h and is_bull_4h):
                         if norm_15m == norm_1h and norm_15m in ["BULLISH", "BEARISH"]:
@@ -1683,6 +1740,12 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
             effective_mtf = min(40.0, raw_mtf * 0.85 if raw_mtf > 0 else 25.0)
             bull_mtf_contrib = effective_mtf if observed_mtf_bias == "BULLISH" else 0.0
             bear_mtf_contrib = effective_mtf if observed_mtf_bias == "BEARISH" else 0.0
+        elif mtf_status in ["REVERSAL_BULLISH", "REVERSAL_BEARISH"]:
+            # Active structural reversal: 15m/1H CHoCH confirmed.
+            # Provide solid MTF contribution (max 35 pts) in reversal direction without lagging 4H penalty.
+            effective_mtf = min(35.0, raw_mtf if raw_mtf > 0 else 30.0)
+            bull_mtf_contrib = effective_mtf if observed_mtf_bias == "BULLISH" else 0.0
+            bear_mtf_contrib = effective_mtf if observed_mtf_bias == "BEARISH" else 0.0
         elif mtf_status in ["TRANSITION_BULLISH", "TRANSITION_BEARISH"]:
             # Early reversal: 15m and 1H agree against older 4H. Provide partial MTF contribution (max 20 pts)
             effective_mtf = min(20.0, raw_mtf * 0.50 if raw_mtf > 0 else 15.0)
@@ -1716,18 +1779,23 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
             bull_mtf_contrib = raw_mtf if observed_mtf_bias == "BULLISH" else 0.0
             bear_mtf_contrib = raw_mtf if observed_mtf_bias == "BEARISH" else 0.0
 
-        # In Anti-Bot Predator Mode or Mean Reversion, MTF trend contrary to counter-trend fade must not veto trade
-        if is_anti_bot or is_mean_rev:
+        # In Anti-Bot Predator Mode, Mean Reversion, or Reversal Trend Shift:
+        # Lagging contrary trend must NOT penalize or veto trade.
+        if is_anti_bot or is_mean_rev or is_reversal:
             if req_decision == "SHORT":
                 bull_mtf_contrib = 0.0
                 if is_anti_bot:
                     bear_mtf_contrib = max(bear_mtf_contrib, 35.0)
+                elif is_reversal:
+                    bear_mtf_contrib = max(bear_mtf_contrib, 30.0)
                 else:
                     bear_mtf_contrib = max(bear_mtf_contrib, 30.0)
             elif req_decision == "LONG":
                 bear_mtf_contrib = 0.0
                 if is_anti_bot:
                     bull_mtf_contrib = max(bull_mtf_contrib, 35.0)
+                elif is_reversal:
+                    bull_mtf_contrib = max(bull_mtf_contrib, 30.0)
                 else:
                     bull_mtf_contrib = max(bull_mtf_contrib, 30.0)
 
@@ -1742,15 +1810,15 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
         math_conflict = False
         if req_decision == "SHORT":
             if total_bull >= total_bear:
-                if (is_anti_bot or is_mean_rev):
+                if (is_anti_bot or is_mean_rev or is_reversal):
                     raw_bear = max(raw_bull + 10.0, 38.0)
                     raw_bull = min(raw_bull, 18.0)
                     total_bear = raw_bear + bear_mtf_contrib
                     total_bull = raw_bull + bull_mtf_contrib
                     self.logger.info(
-                        f"[{self.name}] 🦈 Anti-Bot Score Alignment: aligned breakdown weights with counter-trend verdict {req_decision}"
+                        f"[{self.name}] 🦈 Anti-Bot/Reversal Score Alignment: aligned breakdown weights with counter-trend verdict {req_decision}"
                     )
-            if (is_anti_bot or is_mean_rev):
+            if (is_anti_bot or is_mean_rev or is_reversal):
                 if total_bull >= total_bear:
                     total_bear = total_bull + 15.0
             if total_bull >= total_bear:
@@ -1767,7 +1835,7 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                     adj_diff = total_bear - (0.4 * total_bull)
                     # Scale up when LLM uses compact breakdown weights (e.g. 25 vs 15 + 15 mtf)
                     dominance_score = (total_bear / (total_bear + total_bull)) * 100.0 if (total_bear + total_bull) > 0 else 0.0
-                    has_trend = (bear_mtf_contrib > 0.0) or (strategy_mode in ["BREAKOUT", "VOLATILITY_MOMENTUM", "MEAN_REVERSION"])
+                    has_trend = (bear_mtf_contrib > 0.0) or (strategy_mode in ["BREAKOUT", "VOLATILITY_MOMENTUM", "MEAN_REVERSION", "REVERSAL_TREND_SHIFT"])
                     if total_bear >= 35.0 and has_trend:
                         if raw_diff < 70:
                             blended = max(raw_diff, min(adj_diff * 2.0, dominance_score))
@@ -1778,15 +1846,15 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                 directional_confidence = min(100, max(0, int(round(blended))))
         elif req_decision == "LONG":
             if total_bear >= total_bull:
-                if (is_anti_bot or is_mean_rev):
+                if (is_anti_bot or is_mean_rev or is_reversal):
                     raw_bull = max(raw_bear + 10.0, 38.0)
                     raw_bear = min(raw_bear, 18.0)
                     total_bull = raw_bull + bull_mtf_contrib
                     total_bear = raw_bear + bear_mtf_contrib
                     self.logger.info(
-                        f"[{self.name}] 🦈 Anti-Bot Score Alignment: aligned breakdown weights with counter-trend verdict {req_decision}"
+                        f"[{self.name}] 🦈 Anti-Bot/Reversal Score Alignment: aligned breakdown weights with counter-trend verdict {req_decision}"
                     )
-            if (is_anti_bot or is_mean_rev):
+            if (is_anti_bot or is_mean_rev or is_reversal):
                 if total_bear >= total_bull:
                     total_bull = total_bear + 15.0
             if total_bear >= total_bull:
@@ -1802,7 +1870,7 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                 else:
                     adj_diff = total_bull - (0.4 * total_bear)
                     dominance_score = (total_bull / (total_bull + total_bear)) * 100.0 if (total_bull + total_bear) > 0 else 0.0
-                    has_trend = (bull_mtf_contrib > 0.0) or (strategy_mode in ["BREAKOUT", "VOLATILITY_MOMENTUM", "MEAN_REVERSION"])
+                    has_trend = (bull_mtf_contrib > 0.0) or (strategy_mode in ["BREAKOUT", "VOLATILITY_MOMENTUM", "MEAN_REVERSION", "REVERSAL_TREND_SHIFT"])
                     if total_bull >= 35.0 and has_trend:
                         if raw_diff < 70:
                             blended = max(raw_diff, min(adj_diff * 2.0, dominance_score))
@@ -1892,3 +1960,6 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
             "raw_net_score": net_directional_score,
             "math_conflict": math_conflict
         })
+
+CEO_Agent = CEOAgent
+

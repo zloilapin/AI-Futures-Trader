@@ -160,22 +160,23 @@ def solve_optimal_pullback_entry(
     if atr <= 0:
         atr = p_mkt * 0.005
 
+    # Round-trip fee fraction:
+    f_fee = 2.0 * fee
+
     # 1. Stop Distance Invariant limit:
     d_max = 0.90 * (max_sl_pct / 100.0)
-
-    # 2. Risk on Min Notional limit:
-    r_max = (0.95 * risk_usd) / min_notional
-
-    # Combined fractional stop cap:
-    d_cap = min(d_max, r_max)
-    if d_cap <= 0.0 or d_cap >= 1.0:
+    if d_max <= 0.0 or d_max >= 1.0:
         return None
+
+    # 2. Risk on Min Notional limit (accounting for execution slippage and fees):
+    # In RiskManager: contracts = min_notional / E, where E is execution entry.
+    # Total loss per contract = distance_to_sl + (E + S)*fee.
+    # To ensure dollar risk on bumped min notional <= max_risk_usd:
+    target_risk = 0.95 * risk_usd
+    slip = 0.0020  # Modelled 20 bps crossing slippage
 
     # 4. Breathing Room:
     b_min = 0.60 * atr
-
-    # Round-trip fee fraction:
-    f_fee = 2.0 * fee
 
     if dir_clean == "SHORT":
         # Price is expected to pull back UP towards S before resuming DOWN towards T.
@@ -183,16 +184,24 @@ def solve_optimal_pullback_entry(
         if s <= p_mkt or t >= p_mkt:
             return None
 
-        # Stop distance is S - P*.
-        # (S - P*) / P* <= d_cap  =>  P* >= S / (1 + d_cap)
-        p_stop_bound = s / (1.0 + d_cap)
+        # Stop distance ceiling: (S - P*) / P* <= d_max => P* >= S / (1 + d_max)
+        p_stop_bound = s / (1.0 + d_max)
+
+        # Min notional risk ceiling:
+        # contracts * [ (S - E) + (E + S)*fee ] <= target_risk
+        # (min_notional / E) * [ S*(1 + fee) - E*(1 - fee) ] <= target_risk
+        # E_min = min_notional * S * (1 + fee) / [ min_notional * (1 - fee) + target_risk ]
+        # P* >= E_min / (1 - slip)
+        denom_risk = min_notional * (1.0 - fee) + target_risk
+        e_min = (min_notional * s * (1.0 + fee)) / denom_risk
+        p_risk_bound = e_min / (1.0 - slip)
 
         # Net R:R: (P* - T) / (S - P*) >= k_rr with fees
         denom_rr = (1.0 + k_rr) * max(0.001, (1.0 - f_fee))
         p_rr_bound = (k_rr * s + t) / denom_rr
 
         # Lower bound on P*:
-        p_min = max(p_mkt, p_stop_bound, p_rr_bound)
+        p_min = max(p_mkt, p_stop_bound, p_risk_bound, p_rr_bound)
 
         # Breathing room upper bound: S - P* >= b_min  =>  P* <= S - b_min
         p_max = s - b_min
@@ -208,16 +217,26 @@ def solve_optimal_pullback_entry(
         if s >= p_mkt or t <= p_mkt:
             return None
 
-        # Stop distance is P* - S.
-        # (P* - S) / P* <= d_cap  =>  P* <= S / (1.0 - d_cap)
-        p_stop_bound = s / (1.0 - d_cap)
+        # Stop distance ceiling: (P* - S) / P* <= d_max => P* <= S / (1.0 - d_max)
+        p_stop_bound = s / (1.0 - d_max)
+
+        # Min notional risk ceiling:
+        # contracts * [ (E - S) + (E + S)*fee ] <= target_risk
+        # (min_notional / E) * [ E*(1 + fee) - S*(1 - fee) ] <= target_risk
+        # E_max = min_notional * S * (1 - fee) / [ min_notional * (1 + fee) - target_risk ]
+        # P* <= E_max / (1 + slip)
+        denom_risk = min_notional * (1.0 + fee) - target_risk
+        if denom_risk <= 0:
+            return None
+        e_max = (min_notional * s * (1.0 - fee)) / denom_risk
+        p_risk_bound = e_max / (1.0 + slip)
 
         # Net R:R: (T - P*) / (P* - S) >= k_rr with fees
         denom_rr = (1.0 + k_rr) * (1.0 + f_fee)
         p_rr_bound = (k_rr * s + t) / denom_rr
 
         # Upper bound on P*:
-        p_max = min(p_mkt, p_stop_bound, p_rr_bound)
+        p_max = min(p_mkt, p_stop_bound, p_risk_bound, p_rr_bound)
 
         # Breathing room lower bound: P* - S >= b_min  =>  P* >= S + b_min
         p_min = s + b_min
@@ -236,6 +255,29 @@ class RiskManager(BaseAgent):
     """
     get_normalized_atr_pct = staticmethod(get_normalized_atr_pct)
     solve_optimal_pullback_entry = staticmethod(solve_optimal_pullback_entry)
+
+    @staticmethod
+    def get_effective_max_risk_usd(
+        equity: float,
+        trade_action: str = "ENTER",
+        strategy_mode: str = "TREND_FOLLOWING",
+        profile_rules: Optional[dict] = None
+    ) -> float:
+        """
+        SSOT for Maximum Dollar Risk (1R Ceiling) across the entire trading system.
+        Enforces dollar risk homogeneity:
+          - REDUCE_SIZE / REVERSAL_TREND_SHIFT: min(0.0150 * equity, 1.35) (~$1.30 at $87 equity).
+          - ENTER / Full Size: min(0.0215 * equity, 2.00) (~$1.85 at $87 equity).
+        """
+        eq = float(equity) if (equity is not None and equity > 0) else 88.0
+        act = str(trade_action or "").upper().strip()
+        mode = str(strategy_mode or "").upper().strip()
+
+        if act == "REDUCE_SIZE" or mode == "REVERSAL_TREND_SHIFT":
+            return round(min(0.0150 * eq, 1.35), 4)
+        else:
+            return round(min(0.0215 * eq, 2.00), 4)
+
     def __init__(self, logger: TradeLogger, llm_client: LLMClient, default_macro_regime: str = "UNKNOWN"):
         super().__init__("Risk_Manager", logger, llm_client)
         self.default_macro_regime = default_macro_regime
@@ -696,6 +738,7 @@ class RiskManager(BaseAgent):
             "trade_action": trade_action,
             "reasoning": f"❌ ОТКЛОНЕНО ({veto_category}): {reason}",
             "risk_amount_usd": 0.0,
+            "risk_usd": 0.0,
             "notional_size_usd": 0.0,
             "margin_usd": 0.0,
             "leverage": 1.0,
@@ -811,15 +854,17 @@ class RiskManager(BaseAgent):
 
         # INVARIANT 1: Strict Equity-Proportional 1R Ceiling (Homogeneous 1R Dollar Cap)
         # Base target risk (ENTER): 1.75% of total equity (~$1.55 at $88 equity).
-        # Hard maximum risk ceiling:
-        #   - ENTER: min(0.0215 * total_balance, 2.00) (strict cap at $2.00 USDC, ~$1.85-$1.90 at $88 equity).
-        #   - REDUCE_SIZE / REVERSAL_TREND_SHIFT: min(0.0150 * total_balance, 1.35) (~$1.30 USDC).
+        # Hard maximum risk ceiling from SSOT helper:
+        hard_max_risk_usd = self.get_effective_max_risk_usd(
+            equity=total_balance,
+            trade_action=trade_action,
+            strategy_mode=strategy_mode,
+            profile_rules=profile_rules
+        )
         if trade_action == "REDUCE_SIZE" or strategy_mode == "REVERSAL_TREND_SHIFT":
             target_risk_usd = 0.0125 * total_balance
-            hard_max_risk_usd = min(0.0150 * total_balance, 1.35)
         else:
             target_risk_usd = 0.0175 * total_balance
-            hard_max_risk_usd = min(0.0215 * total_balance, 2.00)
             
         if not _is_finite_non_negative(raw_avail_margin):
             self.logger.warning(f"[{self.name}] ❌ INVALID MARGIN: Available margin is {raw_avail_margin}. Blocking trade.")
@@ -1286,25 +1331,25 @@ class RiskManager(BaseAgent):
 
             atr_buffer = 0.25 * (atr_14 if atr_14 > 0 else current_price * 0.01)
 
+            is_retest = bool(
+                _extract_cand_field(ceo_decision, "is_pullback_retest")
+                or (market_data.get("is_pullback_retest") if market_data else False)
+                or "RETEST" in str(_extract_cand_field(ceo_decision, "reasoning_en", "")).upper()
+                or "RETEST" in str(_extract_cand_field(ceo_decision, "reasoning", "")).upper()
+            )
+            cand_sl = float(_extract_cand_field(ceo_decision, "structural_sl") or _extract_cand_field(ceo_decision, "sl_price") or 0.0)
+            cand_tp = float(_extract_cand_field(ceo_decision, "target_tp") or _extract_cand_field(ceo_decision, "tp_price") or 0.0)
+
             # Fallback to explicit structural SL from proposal if swing extremes were not present in candles/indicators
             if decision == "SHORT" and swing_high_15m <= 0.0:
-                cand_sl = float(_extract_cand_field(ceo_decision, "structural_sl") or _extract_cand_field(ceo_decision, "sl_price") or 0.0)
                 if cand_sl > current_price:
                     swing_high_15m = max(0.0, cand_sl - atr_buffer)
             elif decision == "LONG" and swing_low_15m <= 0.0:
-                cand_sl = float(_extract_cand_field(ceo_decision, "structural_sl") or _extract_cand_field(ceo_decision, "sl_price") or 0.0)
                 if 0 < cand_sl < current_price:
                     swing_low_15m = cand_sl + atr_buffer
 
             has_structure = (decision == "SHORT" and swing_high_15m > 0) or (decision == "LONG" and swing_low_15m > 0)
             if has_structure:
-                is_retest = bool(
-                    _extract_cand_field(ceo_decision, "is_pullback_retest")
-                    or (market_data.get("is_pullback_retest") if market_data else False)
-                    or "RETEST" in str(_extract_cand_field(ceo_decision, "reasoning_en", "")).upper()
-                    or "RETEST" in str(_extract_cand_field(ceo_decision, "reasoning", "")).upper()
-                )
-
                 # Asset-Tier Dynamic Ceilings (Block 02 Post-Audit Patch):
                 # Tier 1 (BTC-USD, ETH-USD): base 1.65%, floor 1.20%, cap 1.75%
                 # Tier 2 (SOL-USD, BNB-USD): base 2.35%, floor 1.60%, cap 2.50%
@@ -1338,7 +1383,13 @@ class RiskManager(BaseAgent):
                 if ceo_conv >= 82.0 and trend_aligned:
                     max_sl_dist_allowed += 0.05
 
-                if decision == "SHORT":
+                if is_retest and cand_sl > 0:
+                    structural_sl = cand_sl
+                    if decision == "SHORT":
+                        struct_dist_pct = ((structural_sl - current_price) / current_price) * 100.0 if current_price > 0 and structural_sl > current_price else 0.0
+                    else:
+                        struct_dist_pct = ((current_price - structural_sl) / current_price) * 100.0 if current_price > 0 and structural_sl < current_price else 0.0
+                elif decision == "SHORT":
                     structural_sl = swing_high_15m + atr_buffer
                     struct_dist_pct = ((structural_sl - current_price) / current_price) * 100.0 if current_price > 0 and structural_sl > current_price else 0.0
                 else: # LONG
@@ -1388,7 +1439,10 @@ class RiskManager(BaseAgent):
 
                 # Capped ATR distance so that 1.75*ATR multiplier never pushes a valid structural entry beyond max_sl_dist_allowed
                 capped_atr_dist = min(sl_dist_clamped, current_price * (max_sl_dist_allowed / 100.0))
-                if decision == "SHORT":
+                if is_retest and cand_sl > 0:
+                    sl_price = structural_sl
+                    sl_dist_base = abs(current_price - structural_sl)
+                elif decision == "SHORT":
                     atr_based_sl = current_price + capped_atr_dist
                     sl_price = max(atr_based_sl, structural_sl)
                     sl_dist_base = sl_price - current_price
@@ -1399,9 +1453,12 @@ class RiskManager(BaseAgent):
             else:
                 sl_dist_base = sl_dist_clamped
 
-            # Target Take Profit preserves or improves standard R:R >= 1.8
-            target_rr = max(1.8, (tp_mult / sl_mult) if sl_mult > 0 else 1.8)
-            tp_dist_base = max(atr_14 * tp_mult, sl_dist_base * target_rr, current_price * config.MIN_TP_PCT)
+            if is_retest and cand_tp > 0 and ((decision == "LONG" and cand_tp > current_price) or (decision == "SHORT" and cand_tp < current_price)):
+                tp_dist_base = abs(cand_tp - current_price)
+            else:
+                # Target Take Profit preserves or improves standard R:R >= 1.8
+                target_rr = max(1.8, (tp_mult / sl_mult) if sl_mult > 0 else 1.8)
+                tp_dist_base = max(atr_14 * tp_mult, sl_dist_base * target_rr, current_price * config.MIN_TP_PCT)
 
         if decision == "LONG":
             sl_price = current_price - sl_dist_base
@@ -2413,6 +2470,7 @@ class RiskManager(BaseAgent):
             "software_sl_tp_only": is_software_tpsl,
             "execution_mode": "SOFTWARE_TPSL" if is_software_tpsl else "NATIVE_TPSL",
             "risk_amount_usd": risk_amount_usd,
+            "risk_usd": risk_amount_usd,
             "approved_risk_usd": risk_amount_usd,
             "planned_risk_usd": risk_amount_usd,
             "planned_price_risk_usd": planned_price_risk_usd,
@@ -2457,4 +2515,7 @@ class RiskManager(BaseAgent):
             "bayes_posterior_win_prob": bayes_prob,
             "bayes_strategy_bucket": f"{regime_tag}:{strat_tag}",
         }
+
+get_effective_max_risk_usd = RiskManager.get_effective_max_risk_usd
+
 

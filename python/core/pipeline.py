@@ -382,6 +382,7 @@ class TradingPipeline:
             macro_cache = {}
         if portfolio_data is None:
             portfolio_data = await self.services.trading_service.get_portfolio_summary()
+        self._last_portfolio_data = portfolio_data
         if scan_summaries is None:
             scan_summaries = []
         if tracker is None:
@@ -1025,7 +1026,9 @@ class TradingPipeline:
                     "current_price": current_price,
                     "is_pullback_retest": is_retest,
                     "pullback_retest_direction": retest_direction if is_retest else None,
-                    "pullback_context": pb_context
+                    "pullback_context": pb_context,
+                    "reversal_state": market_data.get("structural_reversal") or getattr(strategy_profile, "reversal_state", {}),
+                    "structural_reversal": market_data.get("structural_reversal") or getattr(strategy_profile, "reversal_state", {})
                 }
                 ceo_verdict = await self.agents.ceo.analyze(ceo_payload)
 
@@ -2626,18 +2629,62 @@ class TradingPipeline:
         indicators = market_data.get("indicators", {}) if isinstance(market_data, dict) else {}
         ema_20 = float(indicators.get("ema_20") or 0.0)
         atr_14 = float(indicators.get("atr_14") or 0.0)
-        swing_high_15m = float(indicators.get("swing_high_15m") or indicators.get("high_48h") or 0.0)
-        swing_low_15m = float(indicators.get("swing_low_15m") or indicators.get("low_48h") or 0.0)
-        min_pullback_dist = max(0.5 * atr_14, current_price * 0.004) if atr_14 > 0 else (current_price * 0.008)
+        swing_high_15m = float(indicators.get("swing_high_15m") or 0.0)
+        swing_low_15m = float(indicators.get("swing_low_15m") or 0.0)
+
+        # Extract true structural swing extremes from recent 15m candles if not explicit in indicators
+        c_list = market_data.get("price_data", {}).get("candles_20") or market_data.get("multi_timeframe", {}).get("tf_15m", {}).get("candles_20", [])
+        if (swing_high_15m <= 0.0 or swing_low_15m <= 0.0) and isinstance(c_list, list) and c_list:
+            try:
+                h_16 = [float(c.get("high", current_price)) for c in c_list[-16:] if isinstance(c, dict) and float(c.get("high", 0)) > 0]
+                l_16 = [float(c.get("low", current_price)) for c in c_list[-16:] if isinstance(c, dict) and float(c.get("low", 0)) > 0]
+                if h_16 and swing_high_15m <= 0: swing_high_15m = max(h_16)
+                if l_16 and swing_low_15m <= 0: swing_low_15m = min(l_16)
+            except Exception:
+                pass
+
+        if swing_high_15m <= 0.0:
+            swing_high_15m = float(indicators.get("high_48h") or 0.0)
+        if swing_low_15m <= 0.0:
+            swing_low_15m = float(indicators.get("low_48h") or 0.0)
+
         inval_dist = 1.2 * atr_14 if atr_14 > 0 else (current_price * 0.015)
+        atr_buf = 0.30 * atr_14 if atr_14 > 0 else (current_price * 0.005)
+
+        # True Structural Stop Anchor (Contract 2): Anchor behind actual market structure
+        if decision == "LONG":
+            struct_sl = (swing_low_15m - atr_buf) if swing_low_15m > 0 else (current_price - inval_dist)
+            invalidation_price = round(struct_sl, 6)
+        else:  # SHORT
+            struct_sl = (swing_high_15m + atr_buf) if swing_high_15m > 0 else (current_price + inval_dist)
+            invalidation_price = round(struct_sl, 6)
+
+        # SSOT Risk Cap Calculation (Contract 2)
+        from agents.risk_manager import RiskManager, solve_optimal_pullback_entry, get_normalized_atr_pct
+        cur_equity = 88.0
+        if hasattr(self, "_last_portfolio_data") and self._last_portfolio_data:
+            cur_equity = float(self._last_portfolio_data.get("equity") or self._last_portfolio_data.get("total_balance") or 88.0)
+        elif hasattr(self.services.trading_service, "_last_equity") and self.services.trading_service._last_equity > 0:
+            cur_equity = float(self.services.trading_service._last_equity)
+        elif isinstance(market_data, dict) and "portfolio_data" in market_data:
+            cur_equity = float(market_data["portfolio_data"].get("equity") or 88.0)
+
+        effective_action = ceo_verdict.get("trade_action") if isinstance(ceo_verdict, dict) else "ENTER"
+        effective_max_risk = RiskManager.get_effective_max_risk_usd(
+            equity=cur_equity,
+            trade_action=effective_action,
+            strategy_mode=strategy_mode
+        )
+
+        clean_sym = str(symbol).replace('/', '-').upper()
+        base_sym = clean_sym.split('-')[0].strip()
+        target_bump_notional = 108.50 if base_sym in ("BTC", "ETH") else 105.50
 
         # Mathematical Inverse Solver P* Integration
         if target_pullback_price is None or target_pullback_price <= 0:
-            from agents.risk_manager import solve_optimal_pullback_entry, get_normalized_atr_pct
             norm_atr_pct = get_normalized_atr_pct(market_data, current_price)
             max_sl_pct = max(1.25, min(3.50, 1.85 * norm_atr_pct))
 
-            struct_sl = (swing_low_15m - (0.30 * atr_14)) if decision == "LONG" else (swing_high_15m + (0.30 * atr_14))
             tentative_tp_dist = max(atr_14 * 2.5, current_price * 0.035)
             tentative_tp = current_price + tentative_tp_dist if decision == "LONG" else current_price - tentative_tp_dist
 
@@ -2648,37 +2695,19 @@ class TradingPipeline:
                 target_tp=tentative_tp,
                 atr_15m=atr_14,
                 max_sl_dist_pct=max_sl_pct,
-                max_risk_usd=float(getattr(config, "MAX_RISK_PER_TRADE_USD", 2.0) or 2.0),
-                min_notional_usd=100.0,
+                max_risk_usd=effective_max_risk,
+                min_notional_usd=target_bump_notional,
                 min_net_rr=1.40,
                 taker_fee_pct=0.0005
             )
             if p_star is not None:
                 target_pullback_price = p_star
             else:
-                if decision == "LONG":
-                    target_pullback_price = round(
-                        min(ema_20, current_price - min_pullback_dist) if (ema_20 > 0 and ema_20 < current_price) else (current_price - min_pullback_dist),
-                        6
-                    )
-                else:  # SHORT
-                    target_pullback_price = round(
-                        max(ema_20, current_price + min_pullback_dist) if (ema_20 > current_price) else (current_price + min_pullback_dist),
-                        6
-                    )
-
-        if decision == "LONG":
-            raw_inval = target_pullback_price - inval_dist
-            if swing_low_15m > 0:
-                invalidation_price = round(min(raw_inval, swing_low_15m - 0.30 * atr_14), 6)
-            else:
-                invalidation_price = round(raw_inval, 6)
-        else:  # SHORT
-            raw_inval = target_pullback_price + inval_dist
-            if swing_high_15m > 0:
-                invalidation_price = round(max(raw_inval, swing_high_15m + 0.30 * atr_14), 6)
-            else:
-                invalidation_price = round(raw_inval, 6)
+                self.services.logger.info(
+                    f"[PullbackWatchlist] 🛑 No valid P* satisfies SSOT risk cap (${effective_max_risk:.2f}) "
+                    f"for {symbol} ({decision}). Candidate discarded cleanly."
+                )
+                return
 
         now_ts = time.time()
         import datetime
@@ -2694,6 +2723,7 @@ class TradingPipeline:
             "directional_conf": directional_conf,
             "conviction": conviction,
             "strategy_mode": strategy_mode,
+            "trade_action": effective_action,
             "reason": cand_reason,
             "created_at": now_ts,
             "added_at": added_str,
@@ -2941,6 +2971,75 @@ class TradingPipeline:
 
             target_price = item["target_pullback_price"]
             inv_price = item["invalidation_price"]
+
+            # Self-Healing Watchlist Validation on Check/Load (Contract 2):
+            raw_eq = getattr(self.services.trading_service, "_last_equity", None)
+            if isinstance(raw_eq, (int, float)) and raw_eq > 0:
+                cur_equity = float(raw_eq)
+            elif isinstance(getattr(self, "_last_portfolio_data", None), dict):
+                cur_equity = float(self._last_portfolio_data.get("total_balance") or self._last_portfolio_data.get("total_usd") or 0.0)
+            else:
+                cur_equity = None
+
+            if cur_equity is not None and cur_equity > 0:
+                item_mode = item.get("strategy_mode", "TREND_FOLLOWING")
+                item_action = item.get("trade_action", "ENTER")
+                effective_max_risk = RiskManager.get_effective_max_risk_usd(cur_equity, trade_action=item_action, strategy_mode=item_mode)
+                target_bump_notional = 108.50 if base_sym in ("BTC", "ETH") else 105.50
+
+                sl_dist = abs(target_price - inv_price) / target_price if target_price > 0 else 0.0
+                implied_risk = (target_bump_notional * sl_dist) + (target_bump_notional * 0.0010)
+
+                if implied_risk > (effective_max_risk + 0.01):
+                    from agents.risk_manager import solve_optimal_pullback_entry, get_normalized_atr_pct
+                    norm_atr_pct = get_normalized_atr_pct({"price_data": ohlcv}, current_price)
+                    max_sl_pct = max(1.25, min(3.50, 1.85 * norm_atr_pct))
+                    atr_14 = float(ohlcv.get("atr_14", current_price * 0.01) or (current_price * 0.01))
+                    tentative_tp_dist = max(atr_14 * 2.5, current_price * 0.035)
+                    tentative_tp = current_price + tentative_tp_dist if direction == "LONG" else current_price - tentative_tp_dist
+
+                    # For REVERSAL_TREND_SHIFT, if inv_price was a deep 48h extreme, re-anchor to true 15m CHoCH swing extreme
+                    if item_mode == "REVERSAL_TREND_SHIFT":
+                        c_list = ohlcv.get("candles_20", [])
+                        recent_lows = [float(c.get("low", 0)) for c in c_list[-16:] if isinstance(c, dict) and float(c.get("low", 0)) > 0]
+                        recent_highs = [float(c.get("high", 0)) for c in c_list[-16:] if isinstance(c, dict) and float(c.get("high", 0)) > 0]
+                        if direction == "LONG" and recent_lows:
+                            choch_sl = min(recent_lows) - (0.30 * atr_14)
+                            if choch_sl > inv_price:
+                                inv_price = choch_sl
+                                item["invalidation_price"] = round(inv_price, 6)
+                        elif direction == "SHORT" and recent_highs:
+                            choch_sl = max(recent_highs) + (0.30 * atr_14)
+                            if choch_sl < inv_price:
+                                inv_price = choch_sl
+                                item["invalidation_price"] = round(inv_price, 6)
+
+                    new_p_star = solve_optimal_pullback_entry(
+                        direction=direction,
+                        current_price=current_price,
+                        structural_sl=inv_price,
+                        target_tp=tentative_tp,
+                        atr_15m=atr_14,
+                        max_sl_dist_pct=max_sl_pct,
+                        max_risk_usd=effective_max_risk,
+                        min_notional_usd=target_bump_notional,
+                        min_net_rr=1.40,
+                        taker_fee_pct=0.0005
+                    )
+                    if new_p_star is not None:
+                        item["target_pullback_price"] = new_p_star
+                        item["target_entry"] = new_p_star
+                        target_price = new_p_star
+                        self._save_pullback_watchlist()
+                        self.services.logger.info(
+                            f"[PullbackWatchlist] 🔄 Self-Healing: Recomputed P* for {symbol} ({direction}) "
+                            f"to ${new_p_star:.4f} to satisfy SSOT risk cap ${effective_max_risk:.2f}."
+                        )
+                    else:
+                        print(f"🛑 [Pullback Watchlist] Сетап {symbol} ({direction}) удален: риск (${implied_risk:.2f}) превышает SSOT кап (${effective_max_risk:.2f}), и валидный P* не существует.")
+                        self.services.logger.info(f"[PullbackWatchlist] Removed {symbol}: no valid P* satisfies SSOT risk cap.")
+                        symbols_to_delete.append(symbol)
+                        continue
 
             # 3. Invalidation check
             if direction == "LONG" and current_price < inv_price:
