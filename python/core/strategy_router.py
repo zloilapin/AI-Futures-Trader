@@ -358,6 +358,7 @@ class StrategyRouter:
 
         # Wash-Volume Rejection: volume_ratio > 2.5 (volume_spike_pct > 250%), but flat OI (< 0.15%) and tiny candle body (< 0.25*ATR)
         is_wash_volume = (volume_spike_pct > 250.0) and (abs(oi_change_pct) < 0.15) and (eval_atr > 0 and candle_body < 0.25 * eval_atr)
+        is_vol_explosion = (volume_spike_pct >= 300.0) and not is_wash_volume
 
         # Trend Exhaustion Guard (15m Timeframe Channel Extreme + Divergence Detection)
         algo_signals = indicators.get("algo_signals") or {}
@@ -424,8 +425,14 @@ class StrategyRouter:
             macro_trend=trend_1h,
             macro_regime=detected_regime
         )
-        is_bullish_reversal = bool(reversal_state.get("is_bullish_reversal", False))
-        is_bearish_reversal = bool(reversal_state.get("is_bearish_reversal", False))
+        is_bullish_reversal = bool(
+            reversal_state.get("is_bullish_reversal", False)
+            or (isinstance(market_data, dict) and (market_data.get("structural_reversal") or {}).get("is_bullish_reversal", False))
+        )
+        is_bearish_reversal = bool(
+            reversal_state.get("is_bearish_reversal", False)
+            or (isinstance(market_data, dict) and (market_data.get("structural_reversal") or {}).get("is_bearish_reversal", False))
+        )
         if isinstance(market_data, dict):
             market_data["structural_reversal"] = reversal_state
 
@@ -489,15 +496,15 @@ class StrategyRouter:
                     f"ОТКЛОНЕН (Ретест SHORT отменен: тренд 1H сменился на BULLISH)."
                 )
 
-            # Macro Leaders Veto for retest
-            if retest_dir == "LONG" and both_leaders_bearish:
+            # Macro Leaders Veto for retest (Respects decoupled runners with confirmed reversal or volume explosion)
+            if retest_dir == "LONG" and both_leaders_bearish and not is_vol_explosion and not is_bullish_reversal:
                 return StrategyProfile(
                     False,
                     "MACRO_LEADERS_VETO",
                     "NEUTRAL",
                     "ОТКЛОНЕН (Поводыри BTC/ETH в синхронном обвале FULL_ALIGNMENT BEARISH: ретест LONG заблокирован)."
                 )
-            elif retest_dir == "SHORT" and both_leaders_bullish:
+            elif retest_dir == "SHORT" and both_leaders_bullish and not is_vol_explosion and not is_bearish_reversal:
                 return StrategyProfile(
                     False,
                     "MACRO_LEADERS_VETO",
@@ -518,21 +525,21 @@ class StrategyRouter:
                     f"ОТКЛОНЕН (Ретест {retest_dir} заблокирован: слабый ADX={adx_14:.1f} < {req_retest_adx:.1f})."
                 )
 
-            # Anti-Knife Catching: Reject retest if analysts violently oppose (>= 3 opposing) or lack supporting analysts (< 1)
-            # Corrective 15m candle color is expected on retest and does NOT cancel the trade
-            if retest_dir == "LONG" and (tech_bears >= 3 or tech_bulls < 1):
+            # Anti-Knife Catching: Reject retest ONLY if analysts violently oppose (>= 3 opposing)
+            # Corrective 15m candle color and mild analyst neutrality are expected on retest and do NOT cancel the trade
+            if retest_dir == "LONG" and tech_bears >= 3:
                 return StrategyProfile(
                     False,
                     "FALLING_KNIFE_VETO",
                     "NEUTRAL",
-                    f"ОТКЛОНЕН (Ловля падающих ножей: ретест LONG отклонен из-за оппозиции аналитиков: Bears={tech_bears}, Bulls={tech_bulls})."
+                    f"ОТКЛОНЕН (Ловля падающих ножей: ретест LONG отклонен из-за оппозиции аналитиков: Bears={tech_bears})."
                 )
-            elif retest_dir == "SHORT" and (tech_bulls >= 3 or tech_bears < 1):
+            elif retest_dir == "SHORT" and tech_bulls >= 3:
                 return StrategyProfile(
                     False,
                     "ROCKET_RALLY_VETO",
                     "NEUTRAL",
-                    f"ОТКЛОНЕН (Ловля ракет: ретест SHORT отклонен из-за оппозиции аналитиков: Bulls={tech_bulls}, Bears={tech_bears})."
+                    f"ОТКЛОНЕН (Ловля ракет: ретест SHORT отклонен из-за оппозиции аналитиков: Bulls={tech_bulls})."
                 )
 
             # Trend Exhaustion Guard for Retests
@@ -663,7 +670,7 @@ class StrategyRouter:
                     False, "BREAKOUT", "NEUTRAL",
                     f"ОТКЛОНЕН (Анти-распил: Запрет BREAKOUT LONG при мертвом рынке или слабом ADX: Range={range_score:.1f}%, regime={detected_regime}, MTF={mtf_alignment}, ADX={adx_14:.1f} < 25.0)."
                 )
-            if both_leaders_bearish and not is_vol_explosion:
+            if both_leaders_bearish and not is_vol_explosion and not is_bullish_reversal:
                 return StrategyProfile(
                     False, "MACRO_LEADERS_VETO", "NEUTRAL",
                     "ОТКЛОНЕН (Поводыри BTC/ETH в синхронном обвале FULL_ALIGNMENT BEARISH: пробой LONG заблокирован)."
@@ -766,7 +773,7 @@ class StrategyRouter:
                 tot_rng = h_c - l_c
                 u_shad = h_c - max(o_c, c_c)
                 is_bear_rejection = (c_c <= o_c) or (tot_rng > 0 and (u_shad / tot_rng) >= 0.30)
-                if is_bear_rejection and not trend_exhaustion_short and not both_leaders_bullish:
+                if is_bear_rejection and not trend_exhaustion_short and not (both_leaders_bullish and not is_vol_explosion and not is_bearish_reversal):
                     return StrategyProfile(
                         True,
                         "TREND_FOLLOWING",
@@ -782,7 +789,7 @@ class StrategyRouter:
                 tot_rng = h_c - l_c
                 l_shad = min(o_c, c_c) - l_c
                 is_bull_rejection = (c_c >= o_c) or (tot_rng > 0 and (l_shad / tot_rng) >= 0.30)
-                if is_bull_rejection and not trend_exhaustion_long and not both_leaders_bearish:
+                if is_bull_rejection and not trend_exhaustion_long and not (both_leaders_bearish and not is_vol_explosion and not is_bullish_reversal):
                     return StrategyProfile(
                         True,
                         "TREND_FOLLOWING",
@@ -915,7 +922,7 @@ class StrategyRouter:
             # In FULL_ALIGNMENT (all 3 timeframes aligned in trend_1h):
             # Direction MUST strictly match trend_1h! Rejecting counter-trend analyst disagreements.
             if trend_1h == "BULLISH":
-                if both_leaders_bearish and not is_vol_explosion:
+                if both_leaders_bearish and not is_vol_explosion and not is_bullish_reversal:
                     return StrategyProfile(
                         False, "MACRO_LEADERS_VETO", "NEUTRAL",
                         "ОТКЛОНЕН (Поводыри BTC/ETH в синхронном обвале FULL_ALIGNMENT BEARISH: покупка альткоинов заблокирована)."

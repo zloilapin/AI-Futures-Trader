@@ -1018,3 +1018,123 @@ def test_low_adx_chop_rejected_predebate_by_strategy_router():
     assert profile_healthy.direction_bias == "LONG"
 
 
+def test_retest_pullback_tolerates_corrective_candle_and_mild_analysts():
+    """
+    Phase 3 Contract:
+    Anti-knife retest guard must tolerate normal corrective pullbacks (where tech_bulls == 0).
+    It must ONLY veto when analysts violently oppose with >= 3 opposing bears.
+    """
+    market_data = {
+        "is_pullback_retest": True,
+        "pullback_retest_direction": "LONG",
+        "invalidation_price": 95.0,
+        "price_data": {"current_price": 100.0},
+        "indicators": {
+            "atr_14": 1.5,
+            "adx_14": 25.0,
+            "bb_pos": 45.0,
+            "bb_position_pct": 45.0,
+        },
+        "multi_timeframe": {
+            "trend_1h": "BULLISH",
+            "trend_4h": "BULLISH",
+            "mtf_alignment": "FULL_ALIGNMENT"
+        }
+    }
+
+    # Case A: Normal pullback candle (0 bulls, 1 bear, 2 neutrals) -> MUST PASS
+    mild_reports = [
+        {"agent_name": "Trend_Agent", "signal": "NEUTRAL"},
+        {"agent_name": "Candle_Agent", "signal": "BEARISH"},
+        {"agent_name": "Indicator_Agent", "signal": "NEUTRAL"},
+    ]
+    profile_mild = StrategyRouter.evaluate(
+        symbol="SOL-USD",
+        market_data=market_data,
+        valid_reports=mild_reports,
+        macro_cache={},
+        detected_regime="TRENDING",
+        profile="BALANCED"
+    )
+    assert profile_mild.has_directional_signal is True
+    assert profile_mild.strategy_mode == "TREND_FOLLOWING"
+    assert profile_mild.direction_bias == "LONG"
+
+    # Case B: Violent opposing breakdown (3 bears) -> MUST VETO WITH FALLING_KNIFE_VETO
+    violent_reports = [
+        {"agent_name": "Trend_Agent", "signal": "BEARISH"},
+        {"agent_name": "Candle_Agent", "signal": "BEARISH"},
+        {"agent_name": "Indicator_Agent", "signal": "BEARISH"},
+    ]
+    profile_violent = StrategyRouter.evaluate(
+        symbol="SOL-USD",
+        market_data=market_data,
+        valid_reports=violent_reports,
+        macro_cache={},
+        detected_regime="TRENDING",
+        profile="BALANCED"
+    )
+    assert profile_violent.has_directional_signal is False
+    assert profile_violent.strategy_mode == "FALLING_KNIFE_VETO"
+
+
+def test_decoupled_reversal_altcoin_bypasses_macro_leaders_veto():
+    """
+    Phase 3 Contract:
+    An altcoin with a confirmed structural reversal or volume explosion has decoupled from
+    BTC/ETH. Lagging macro leaders (FULL_ALIGNMENT BEARISH) must NOT veto its retest or breakout.
+    """
+    market_data_reversal = {
+        "is_pullback_retest": True,
+        "pullback_retest_direction": "LONG",
+        "invalidation_price": 95.0,
+        "price_data": {"current_price": 100.0},
+        "indicators": {
+            "atr_14": 1.5,
+            "adx_14": 25.0,
+            "bb_pos": 50.0,
+            "bb_position_pct": 50.0,
+            "volume_spike_pct": 250.0
+        },
+        "multi_timeframe": {
+            "trend_1h": "BULLISH",
+            "trend_4h": "BEARISH",
+            "mtf_alignment": "TRANSITION"
+        },
+        "structural_reversal": {
+            "is_bullish_reversal": True,
+            "is_bearish_reversal": False,
+            "pattern_type": "BULLISH_CHOCH"
+        }
+    }
+
+    macro_cache_leaders_bearish = {
+        "BTC-USD": {
+            "multi_timeframe": {"mtf_alignment": "FULL_ALIGNMENT", "trend_1h": "BEARISH"}
+        },
+        "ETH-USD": {
+            "multi_timeframe": {"mtf_alignment": "FULL_ALIGNMENT", "trend_1h": "BEARISH"}
+        }
+    }
+
+    reports = [
+        {"agent_name": "Trend_Agent", "signal": "BULLISH"},
+        {"agent_name": "OrderBook_Agent", "signal": "BULLISH"}
+    ]
+
+    profile = StrategyRouter.evaluate(
+        symbol="SOL-USD",
+        market_data=market_data_reversal,
+        valid_reports=reports,
+        macro_cache=macro_cache_leaders_bearish,
+        detected_regime="TRANSITION",
+        profile="BALANCED"
+    )
+
+    # Retest must NOT be vetoed by MACRO_LEADERS_VETO!
+    assert profile.has_directional_signal is True
+    assert profile.strategy_mode != "MACRO_LEADERS_VETO"
+    assert profile.direction_bias == "LONG"
+
+
+
