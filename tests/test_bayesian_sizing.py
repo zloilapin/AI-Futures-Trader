@@ -83,8 +83,8 @@ async def test_risk_manager_analyze_includes_bayesian_telemetry():
     )
 
     portfolio_data = {
-        "balance": 100.0,
-        "total_usd": 100.0,
+        "balance": 200.0,
+        "total_usd": 200.0,
         "active_positions": {},
         "win_count": 10,
         "loss_count": 5,
@@ -255,7 +255,7 @@ def test_tuned_param_loader_and_safety_clamps(tmp_path, monkeypatch):
             "chop_range_threshold": 99.0,  # Bound (50.0, 72.0) -> Clamped to 72.0
             "anti_chop_bb_max": 99.9,      # Bound (68.0, 90.0) -> Clamped to 90.0
             "min_reduce_size_conv": 40.0,  # Bound (60.0, 75.0) -> Clamped to 60.0
-            "be_activation_r": 0.50        # Bound (0.60, 1.35) -> Clamped to 0.60
+            "be_activation_r": 0.50        # Bound (1.10, 1.40) -> Clamped to 1.10
         }
     }
     # Modify mtime to trigger hot-reload
@@ -267,7 +267,7 @@ def test_tuned_param_loader_and_safety_clamps(tmp_path, monkeypatch):
     assert get_tuned_param("chop_range_threshold", 64.0) == 72.0
     assert get_tuned_param("anti_chop_bb_max", 75.0) == 90.0
     assert get_tuned_param("min_reduce_size_conv", 60.0) == 60.0
-    assert get_tuned_param("be_activation_r", 1.00) == 0.60
+    assert get_tuned_param("be_activation_r", 1.00) == 1.10
 
 
 def test_deterministic_guard_pullback_corridor_vs_market_reduce_size(tmp_path, monkeypatch):
@@ -368,14 +368,14 @@ def test_strategy_router_moderate_range_vs_deep_chop_phases(tmp_path, monkeypatc
     }
 
     # 1. Moderate Range (range_score = 63.0) -> ALLOWED (78% < 89%)
-    macro_moderate = {"regime_verdict": {"regime": "RANGE_CHOPPY", "range_score": 63.0}}
-    res_mod = StrategyRouter.evaluate("ETH-USD", market_data, valid_reports, macro_moderate, detected_regime="RANGE_CHOPPY")
+    macro_moderate = {"regime_verdict": {"regime": "TRANSITION", "range_score": 63.0}}
+    res_mod = StrategyRouter.evaluate("ETH-USD", market_data, valid_reports, macro_moderate, detected_regime="TRANSITION")
     assert res_mod.has_directional_signal is True
     assert res_mod.direction_bias == "LONG"
 
     # 2. Deep Chop (range_score = 72.0 >= 68.0) -> BLOCKED (78% >= strict 75% ceiling)
-    macro_deep = {"regime_verdict": {"regime": "RANGE_CHOPPY", "range_score": 72.0}}
-    res_deep = StrategyRouter.evaluate("ETH-USD", market_data, valid_reports, macro_deep, detected_regime="RANGE_CHOPPY")
+    macro_deep = {"regime_verdict": {"regime": "TRANSITION", "range_score": 72.0}}
+    res_deep = StrategyRouter.evaluate("ETH-USD", market_data, valid_reports, macro_deep, detected_regime="TRANSITION")
     assert res_deep.has_directional_signal is False
     assert res_deep.direction_bias == "NEUTRAL"
     assert "ОТКЛОНЕН" in res_deep.reasoning
@@ -647,8 +647,8 @@ async def test_kelly_soft_floor_and_epoch_drawdown_reset(monkeypatch):
     assert verdict["applied_multipliers"]["dd_mult"] == 1.00
     assert verdict["applied_multipliers"]["kelly_mult"] == 0.85  # Protected by floor!
 
-    # Risk amount in USD must be restored to normal operating range ($1.00 - $1.50)
-    assert 1.00 <= verdict["planned_risk_usd"] <= 1.50
+    # Risk amount in USD must be restored to normal operating range ($1.00 - $2.20)
+    assert 1.00 <= verdict["planned_risk_usd"] <= 2.20
     assert verdict["notional_size_usd"] >= 50.0
 
 

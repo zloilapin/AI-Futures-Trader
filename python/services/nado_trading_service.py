@@ -2416,8 +2416,10 @@ class NadoTradingService(BaseTradingService):
                 logger.debug(f"[NadoTradingService] Directional quarantine record error: {dq_err}")
 
             # Auto-Recalibration Hook (Contour 1 Walk-Forward Bayesian Calibration)
-            # Triggers periodic recalibration every 12 closed trades once minimum sample (>= 20) is met
-            if len(journal) >= 20 and len(journal) % 12 == 0:
+            # Triggers periodic recalibration once minimum sample is met
+            min_recal_trades = int(getattr(config, "BAYESIAN_MIN_TRADES_FOR_RECALIBRATION", 20) or 20)
+            recal_cadence = int(getattr(config, "BAYESIAN_RECALIBRATION_CADENCE", 12) or 12)
+            if len(journal) >= min_recal_trades and len(journal) % recal_cadence == 0:
                 logger.info(
                     f"[NadoTradingService] 🔄 Auto-recalibration cadence reached ({len(journal)} trades in journal). "
                     f"Triggering Bayesian Optimizer walk-forward recalibration..."
