@@ -287,10 +287,10 @@ def apply_breakout_penalty_override(
 
         new_entry_quality = max(0.0, dir_conf + capped_penalty)
 
-        # Повышаем статус с WAIT_FOR_PULLBACK до активного входа
+        # Повышаем статус с WAIT_FOR_PULLBACK до активного входа при соблюдении Модуля 3 (C_dir >= 75 и Q_loc >= 73)
         new_action = action
         if action == "WAIT_FOR_PULLBACK":
-            new_action = "ENTER" if new_entry_quality >= 73.0 else "REDUCE_SIZE"
+            new_action = "ENTER" if (new_entry_quality >= 73.0 and dir_conf >= 75.0) else "REDUCE_SIZE"
 
         logger = logging.getLogger("CEO_Agent")
         old_qual = ceo_decision.get('entry_quality', ceo_decision.get('conviction', new_entry_quality))
@@ -324,7 +324,7 @@ def apply_breakout_penalty_override(
 class CEOEscalationPatch:
     # Пороги прямого доверия Primary CEO (qwen-plus / qwen-2.5-72b) без вызова 8B-арбитра
     DIRECT_ENTER_MIN_CONF: float = 75.0
-    DIRECT_ENTER_MIN_QUAL: float = 70.0   # Было 80.0 — из-за этого сливались сделки с Qual=75% (#35, #42, #45)
+    DIRECT_ENTER_MIN_QUAL: float = 70.0   # Structural quality requirement for direct enter
     DIRECT_REDUCE_MIN_CONF: float = 75.0
     DIRECT_REDUCE_MIN_QUAL: float = 62.0
     SMART_CUTOFF_MIN_QUAL: float = 62.0
@@ -360,7 +360,7 @@ class CEOEscalationPatch:
                 f"Bypassing escalation to save latency and API costs."
             )
 
-        # 2. Чистый сигнал ENTER от старшей модели (Циклы #35, #42, #45 больше не блокируются)
+        # 2. Clear ENTER signal from primary model
         if (
             action == "ENTER"
             and dir_conf >= cls.DIRECT_ENTER_MIN_CONF
@@ -371,7 +371,7 @@ class CEOEscalationPatch:
                 f"{cls.DIRECT_ENTER_MIN_QUAL:.0f}%). Bypassing 8B escalation to prevent false downgrade."
             )
 
-        # 3. Уверенный REDUCE_SIZE (защита от триггера COHORT_D_NEGATIVE_EXPECTANCY в Risk Manager)
+        # 3. Solid REDUCE_SIZE (preserves Primary metrics for Stage 5 Risk Manager)
         if (
             action == "REDUCE_SIZE"
             and dir_conf >= cls.DIRECT_REDUCE_MIN_CONF
@@ -472,7 +472,7 @@ class CEOEscalationPatch:
             decision["disputed_arbitration"] = False
             return decision
 
-        # Шаг 4: Валидация математики арбитра (ИСПРАВЛЕНИЕ БАГА ЦИКЛОВ #12, #43-#47)
+        # Step 4: Validate arbiter math (rejection of mathematical hallucinations)
         if not cls.validate_arbiter_math(arbiter_resp):
             logger.warning(
                 f"[CEO_Agent] {symbol}: Арбитр эскалации допустил "
@@ -859,7 +859,7 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                         "risk_penalties": esc_pen_candidate
                     }
 
-                    # Step 4: Validate arbiter math (FIX FOR CYCLES #12, #43-#47)
+                    # Step 4: Validate arbiter math (rejection of mathematical hallucinations)
                     if esc_score_res.get("math_conflict", False) or not CEOEscalationPatch.validate_arbiter_math(arb_eval_dict):
                         self.logger.warning(
                             f"[{self.name}] {symbol}: Арбитр {self.escalation_llm.model_name} допустил "
@@ -1539,9 +1539,8 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
             # Confirmed pullback retest has reached target zone; cap cumulative penalties at -10
             final_penalty = max(-10, final_penalty)
 
-        # Cap cumulative penalties:
-        # If pure unit test with capped LLM breakdown (-30 cap) and no market context:
-        max_allowed_penalty = -10 if is_pullback_retest else (-15 if is_reversal else (-30 if (not market_context and llm_penalty <= -30) else -40))
+        # Cap cumulative penalties across orthogonal categories
+        max_allowed_penalty = -10 if is_pullback_retest else (-15 if is_reversal else -40)
         total_penalty = max(max_allowed_penalty, final_penalty)
 
         risk_breakdown = {

@@ -102,7 +102,7 @@ def test_bch_regression_extreme_rsi_and_sentiment():
 
 def test_cumulative_risk_penalty_cap():
     """
-    Ensures that multiple independent penalties cannot exceed the MAX_TOTAL_RISK_PENALTY (-30).
+    Ensures that multiple independent penalties cannot exceed the cumulative cap (-40).
     """
     ceo = get_mock_ceo()
     breakdown = {
@@ -116,9 +116,9 @@ def test_cumulative_risk_penalty_cap():
         }
     }
     result = ceo._validate_and_compute_score("LONG", breakdown)
-    assert result["risk_penalties"] == -30  # Capped at -30
+    assert result["risk_penalties"] == -40  # Capped at -40
     assert result["directional_confidence"] == 90
-    assert result["entry_quality"] == 60
+    assert result["entry_quality"] == 50
 
 def test_deterministic_floor_overrides_llm_zero_penalty():
     """

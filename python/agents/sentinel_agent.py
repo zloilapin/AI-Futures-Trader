@@ -144,8 +144,9 @@ class SentinelAgent:
 
         strategy_mode = str(pos.get("strategy_mode", "")).upper()
         from core.config import config
-        is_anti_bot_pos = bool(pos.get("is_anti_bot") or pos.get("anti_bot_mode") or getattr(config, "ANTI_BOT_MODE", False))
-        is_anti_bot_mr = is_anti_bot_pos or (strategy_mode == "MEAN_REVERSION")
+        is_anti_bot_active = bool(getattr(config, "ANTI_BOT_MODE", False))
+        is_anti_bot_pos = bool(pos.get("is_anti_bot") or pos.get("anti_bot_mode"))
+        is_anti_bot_mr = is_anti_bot_active and (is_anti_bot_pos or (strategy_mode == "MEAN_REVERSION"))
         vol_spike = float((market_data.get("indicators") or {}).get("volume_spike_pct") or 0.0) if market_data else 0.0
 
         # Calculate position age for Time-Stop / Stagnation Guard
