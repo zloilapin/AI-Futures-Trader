@@ -936,10 +936,11 @@ class NadoTradingService(BaseTradingService):
                     if needed_contracts > current_order_contracts:
                         taker_fee_val = float(taker_fee_pct or 0.0005)
                         bumped_risk = needed_contracts * abs(entry_price - float(sl_price)) + needed_contracts * (entry_price + float(sl_price)) * taker_fee_val
-                        max_allowed_risk = 1.35 if (str(locals().get("trade_action", "")).upper() == "REDUCE_SIZE") else float(approved_risk_usd) * 1.35
-                        if (str(locals().get("trade_action", "")).upper() == "REDUCE_SIZE") and bumped_risk > 1.35:
-                            logger.error(f"[NadoTradingService] ❌ REDUCE_SIZE_RISK_CAP_VETO: Pre-dispatch bump risk (${bumped_risk:.2f}) exceeds $1.35 cap.")
-                            self.last_execution_status = "REDUCE_SIZE_RISK_CAP_VETO"
+                        # Enforce scale-invariant risk cap using approved_risk_usd (SSOT from RiskManager)
+                        max_allowed_risk = (float(approved_risk_usd) * 1.05) if (approved_risk_usd and float(approved_risk_usd) > 0) else bumped_risk
+                        if bumped_risk > max_allowed_risk:
+                            logger.error(f"[NadoTradingService] ❌ MIN_NOTIONAL_RISK_CAP_VETO: Pre-dispatch bump risk (${bumped_risk:.2f}) exceeds approved cap (${max_allowed_risk:.2f}).")
+                            self.last_execution_status = "MIN_NOTIONAL_RISK_CAP_VETO"
                             return False
                         new_approved_risk = min(max_allowed_risk, max(float(approved_risk_usd), bumped_risk))
                         logger.info(

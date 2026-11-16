@@ -265,18 +265,19 @@ class RiskManager(BaseAgent):
     ) -> float:
         """
         SSOT for Maximum Dollar Risk (1R Ceiling) across the entire trading system.
-        Enforces dollar risk homogeneity:
-          - REDUCE_SIZE / REVERSAL_TREND_SHIFT: min(0.0150 * equity, 1.35) (~$1.30 at $87 equity).
-          - ENTER / Full Size: min(0.0215 * equity, 2.00) (~$1.85 at $87 equity).
+        Enforces scale-invariant 1R dollar risk homogeneity proportional to account equity:
+          - REDUCE_SIZE / REVERSAL_TREND_SHIFT: 0.0150 * equity (1.50% of equity).
+          - ENTER / Full Size: 0.0215 * equity (2.15% of equity, or profile base_risk).
+        Scale invariant across any account equity ($85 to $85,000) without hardcoded dollar clamps.
         """
         eq = float(equity) if (equity is not None and equity > 0) else 88.0
         act = str(trade_action or "").upper().strip()
         mode = str(strategy_mode or "").upper().strip()
 
         if act == "REDUCE_SIZE" or mode == "REVERSAL_TREND_SHIFT":
-            return round(min(0.0150 * eq, 1.35), 4)
+            return round(0.0150 * eq, 4)
         else:
-            return round(min(0.0215 * eq, 2.00), 4)
+            return round(0.0215 * eq, 4)
 
     def __init__(self, logger: TradeLogger, llm_client: LLMClient, default_macro_regime: str = "UNKNOWN"):
         super().__init__("Risk_Manager", logger, llm_client)
@@ -2358,7 +2359,7 @@ class RiskManager(BaseAgent):
             bumped_contracts = round(contracts + effective_inc, min(decimals, 8))
             bumped_notional = round(bumped_contracts * execution_entry, 2)
             bumped_risk = round(bumped_contracts * effective_loss_per_contract, 2)
-            max_risk_allowed = 1.35 if trade_action == "REDUCE_SIZE" else max_allowed_risk_budget
+            max_risk_allowed = max_allowed_risk_budget
             if bumped_risk > max_risk_allowed:
                 veto_tag = "REDUCE_SIZE_RISK_CAP_VETO" if trade_action == "REDUCE_SIZE" else "MIN_NOTIONAL"
                 msg = f"Post-quantization notional bump (${bumped_notional:.2f}) causes risk (${bumped_risk:.2f}) to exceed max cap (${max_risk_allowed:.2f})."

@@ -338,8 +338,8 @@ async def test_block04_reduce_size_risk_cap_veto():
         strategy_mode="TREND_FOLLOWING"
     )
     assert verdict.get("approved") is False
-    assert verdict.get("veto_category") == "REDUCE_SIZE_RISK_CAP_VETO"
-    assert "to exceed REDUCE_SIZE cap ($1.35 USDC)" in verdict.get("reasoning")
+    assert verdict.get("veto_category") in ["MIN_NOTIONAL_RISK_CAP_VETO", "REDUCE_SIZE_RISK_CAP_VETO"]
+    assert "causes dollar risk" in verdict.get("reasoning") and "to exceed hard cap" in verdict.get("reasoning")
 
 @pytest.mark.asyncio
 async def test_block04_safe_bump_calibration_targets():

@@ -626,27 +626,28 @@ async def test_ceo_agent_phase_lag_conditioning_for_reversal_trend_shift():
 def test_ssot_effective_max_risk_usd_contract():
     """
     Contract 2: RiskManager.get_effective_max_risk_usd is the SSOT for 1R cap.
-    - ENTER: min(0.0215 * equity, 2.00)
-    - REDUCE_SIZE / REVERSAL_TREND_SHIFT: min(0.0150 * equity, 1.35)
+    - ENTER: 0.0215 * equity (2.15% of equity)
+    - REDUCE_SIZE / REVERSAL_TREND_SHIFT: 0.0150 * equity (1.50% of equity)
+    Enforces scale invariance across any account size ($85 to $85,000) without dollar clamps.
     """
     # At $88.00 equity:
-    # ENTER cap: min(0.0215 * 88, 2.00) = 1.892
+    # ENTER cap: 0.0215 * 88 = 1.892
     enter_cap = RiskManager.get_effective_max_risk_usd(88.0, trade_action="ENTER", strategy_mode="TREND_FOLLOWING")
     assert round(enter_cap, 2) == 1.89
 
-    # REDUCE_SIZE cap: min(0.0150 * 88, 1.35) = 1.32
+    # REDUCE_SIZE cap: 0.0150 * 88 = 1.32
     red_cap = RiskManager.get_effective_max_risk_usd(88.0, trade_action="REDUCE_SIZE", strategy_mode="TREND_FOLLOWING")
     assert round(red_cap, 2) == 1.32
 
-    # REVERSAL_TREND_SHIFT cap: min(0.0150 * 88, 1.35) = 1.32 even if trade_action is ENTER
+    # REVERSAL_TREND_SHIFT cap: 0.0150 * 88 = 1.32 even if trade_action is ENTER
     rev_cap = RiskManager.get_effective_max_risk_usd(88.0, trade_action="ENTER", strategy_mode="REVERSAL_TREND_SHIFT")
     assert round(rev_cap, 2) == 1.32
 
-    # Large equity ceiling:
+    # Scale invariance on large equity ($500.00):
     enter_large = RiskManager.get_effective_max_risk_usd(500.0, trade_action="ENTER", strategy_mode="TREND_FOLLOWING")
-    assert enter_large == 2.00
+    assert round(enter_large, 2) == 10.75  # 0.0215 * 500 = 10.75
     rev_large = RiskManager.get_effective_max_risk_usd(500.0, trade_action="ENTER", strategy_mode="REVERSAL_TREND_SHIFT")
-    assert rev_large == 1.35
+    assert round(rev_large, 2) == 7.50   # 0.0150 * 500 = 7.50
 
 
 @pytest.mark.asyncio
