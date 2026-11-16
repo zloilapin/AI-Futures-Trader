@@ -486,8 +486,11 @@ def test_nado_auto_recalibration_hook_cadence(tmp_path, monkeypatch):
     """
     from services.nado_trading_service import NadoTradingService
     from core.state_store import StateStore
+    from core.config import config
 
     monkeypatch.setattr(StateStore, "_base_dir_override", str(tmp_path))
+    monkeypatch.setattr(config, "BAYESIAN_MIN_TRADES_FOR_RECALIBRATION", 20)
+    monkeypatch.setattr(config, "BAYESIAN_RECALIBRATION_CADENCE", 12)
     svc = NadoTradingService()
 
     recal_calls = []

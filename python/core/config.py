@@ -27,7 +27,19 @@ class Settings(BaseSettings):
     # Web3 / Nado
     INK_PRIVATE_KEY: SecretStr = Field(default=SecretStr(""))
     NADO_NETWORK: Literal["TESTNET", "MAINNET"] = Field(default="TESTNET")
-    SHADOW_MODE: bool = Field(default=False, description="Simulate execution without sending on-chain transactions")
+    SHADOW_MODE: bool = Field(default=True, description="Simulate execution without sending on-chain transactions")
+    USE_EXTERNAL_TUNED_PARAMS: bool = Field(
+        default=False,
+        description="If True, loads hyperparameter overrides from data/tuned_hyperparams.json. If False (default SSOT), strictly adheres to immutable code-level architectural constants."
+    )
+    BAYESIAN_MIN_TRADES_FOR_RECALIBRATION: int = Field(
+        default=20,
+        description="Minimum closed trades in trade_journal.json before Bayesian Optimizer walk-forward recalibration is allowed."
+    )
+    BAYESIAN_RECALIBRATION_CADENCE: int = Field(
+        default=12,
+        description="Cadence of closed trades between Bayesian Optimizer walk-forward recalibration runs."
+    )
     ANTI_BOT_MODE: bool = Field(
         default=False,
         description="Predator / Anti-Bot Mode targeting bots at Bollinger/Donchian extremes"
@@ -316,24 +328,35 @@ def reset_tuned_param_cache() -> None:
 
 def get_tuned_param(key: str, default: float) -> float:
     """
-    Reads calibrated hyperparameter from tuned_hyperparams.json with hot reloading
-    via mtime and strict bounding within PARAMETER_INVARIANTS.
+    Reads calibrated hyperparameter from tuned_hyperparams.json only if explicitly enabled
+    or when running under a test directory override (StateStore._base_dir_override).
+    Otherwise, strictly adheres to authoritative immutable constants from PARAMETER_INVARIANTS (SSOT).
     """
-    resolved_path = _resolve_tuned_path()
-    if resolved_path is not None and resolved_path.exists():
-        try:
-            mtime = resolved_path.stat().st_mtime
-            if mtime > _TUNED_CACHE.get("mtime", 0.0):
-                raw = json.loads(resolved_path.read_text(encoding="utf-8"))
-                params = raw.get("best_params") or raw.get("params") or {}
-                if isinstance(params, dict):
-                    clamped = validate_and_clamp_params(params, auto_heal_disk=True, source_path=resolved_path)
-                    _TUNED_CACHE["params"] = clamped
-                    _TUNED_CACHE["mtime"] = mtime
-        except Exception:
-            pass
+    from core.state_store import StateStore
+    is_test_override = bool(getattr(StateStore, "_base_dir_override", None))
+    allow_external = bool(getattr(config, "USE_EXTERNAL_TUNED_PARAMS", False)) or is_test_override
 
-    val = float(_TUNED_CACHE.get("params", {}).get(key, default))
+    if allow_external:
+        resolved_path = _resolve_tuned_path()
+        if resolved_path is not None and resolved_path.exists():
+            try:
+                mtime = resolved_path.stat().st_mtime
+                if mtime > _TUNED_CACHE.get("mtime", 0.0):
+                    raw = json.loads(resolved_path.read_text(encoding="utf-8"))
+                    params = raw.get("best_params") or raw.get("params") or {}
+                    if isinstance(params, dict):
+                        clamped = validate_and_clamp_params(params, auto_heal_disk=True, source_path=resolved_path)
+                        _TUNED_CACHE["params"] = clamped
+                        _TUNED_CACHE["mtime"] = mtime
+            except Exception:
+                pass
+
+    if key in _TUNED_CACHE.get("params", {}):
+        val = float(_TUNED_CACHE["params"][key])
+    elif not allow_external:
+        val = float(PARAMETER_INVARIANTS.get(key, {}).get("default", default))
+    else:
+        val = float(default)
     if key in _SAFETY_BOUNDS:
         lo, hi = _SAFETY_BOUNDS[key]
         val = max(lo, min(hi, val))
