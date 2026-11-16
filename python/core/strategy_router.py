@@ -505,11 +505,11 @@ class StrategyRouter:
                     "ОТКЛОНЕН (Поводыри BTC/ETH в синхронном ралли FULL_ALIGNMENT BULLISH: ретест SHORT заблокирован)."
                 )
 
-            # ADX Trend Strength Check for Retests
+            # ADX Trend Strength Check for Retests (Unified Scale & Asset Invariant Floor)
             from core.config import config
             allow_forbidden = bool(getattr(config, "ALLOW_FORBIDDEN_STRATEGIES", False))
             is_transition_market = (str(detected_regime).upper() == "TRANSITION") or (mtf_alignment == "TRANSITION")
-            req_retest_adx = 22.0 if is_transition_market else (22.0 if symbol.split("-")[0].upper() in ["BTC", "ETH"] else 20.0)
+            req_retest_adx = 22.0 if is_transition_market else 20.0
             if not allow_forbidden and 0.0 < adx_14 < req_retest_adx:
                 return StrategyProfile(
                     False,
@@ -860,12 +860,13 @@ class StrategyRouter:
             if not allow_forbidden:
                 return StrategyProfile(False, "MEAN_REVERSION", "NEUTRAL", f"ОТКЛОНЕН (Анти-распил: MEAN_REVERSION отключен в конфигурации Pure Trend Following при ALLOW_FORBIDDEN_STRATEGIES=False).")
 
-            # Mean Reversion requires sufficient channel width
-            # For major high-cap benchmark assets (BTC, ETH), channels naturally compress to 0.8%-1.2%
-            # during consolidation. We lower the threshold to 0.8% for BTC and ETH, while keeping
-            # 1.5% for mid/small-cap altcoins to cover taker fees and spread friction.
+            # Mean Reversion requires sufficient channel width (Scale & Asset Invariant)
+            # Liquid assets with tight spreads (<= 0.05%) or benchmark majors naturally support
+            # narrower consolidation channels (0.8%), while higher-friction assets require 1.5% to cover fees.
             base_sym = symbol.split("-")[0].upper()
-            min_bb_width = 0.8 if base_sym in ["BTC", "ETH"] else 1.5
+            ob_data = market_data.get("order_book_data") or {} if isinstance(market_data, dict) else {}
+            spread_pct = float(ob_data.get("spread_pct") or 0.0)
+            min_bb_width = 0.8 if ((spread_pct > 0 and spread_pct <= 0.05) or base_sym in ["BTC", "ETH"]) else 1.5
             if bb_width_pct < min_bb_width:
                 return StrategyProfile(False, "MEAN_REVERSION", "NEUTRAL", f"ОТКЛОНЕН (Канал Bollinger слишком узкий: {bb_width_pct:.2f}% < {min_bb_width:.1f}% для прибыльного Mean Reversion).")
 

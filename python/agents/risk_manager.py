@@ -1295,17 +1295,21 @@ class RiskManager(BaseAgent):
                 tp_dist_base = dist_to_mean * 0.90
                 sl_dist_base = max(atr_14 * sl_mult, current_price * min_sl_pct)
         elif strategy_mode == "VOLATILITY_MOMENTUM":
-            # Scalping mode: BTC/ETH can tolerate tighter noise floors (0.6% / 1.2%),
-            # while altcoins require at least 1.0% SL and 2.0% TP to prevent 1-min noise wicks from prematurely hitting stops
-            min_sl_ratio = 0.006 if base_asset in ["BTC", "ETH"] else 0.010
-            min_tp_ratio = 0.012 if base_asset in ["BTC", "ETH"] else 0.020
+            # Scalping mode: low-volatility assets tolerate tighter noise floors (0.6% / 1.2%),
+            # while higher volatility regimes expand floors to prevent noise wick stopouts (Scale & Asset Invariant)
+            atr_pct_val = (atr_14 / current_price) if current_price > 0 else 0.01
+            is_low_vol = (atr_pct_val < 0.012) or (base_asset in ["BTC", "ETH"])
+            min_sl_ratio = 0.006 if is_low_vol else 0.010
+            min_tp_ratio = 0.012 if is_low_vol else 0.020
             sl_dist_base = max(atr_14 * sl_mult, current_price * min_sl_ratio)
             tp_dist_base = max(atr_14 * tp_mult, current_price * min_tp_ratio)
         else:
             # Lever 5: Volatility-Adaptive Stop Loss Clamp with Structural Anchor (Step 4)
-            is_major = base_asset in ["BTC", "ETH"]
-            min_sl_dist = current_price * (0.008 if is_major else 0.010)  # 0.8% floor for majors, 1.0% for altcoins
-            max_sl_dist = current_price * (0.022 if is_major else 0.055)  # 2.2% ceiling for majors, 5.5% for volatile altcoins
+            # Continuous volatility-derived noise floors and ceilings:
+            atr_pct_val = (atr_14 / current_price) if current_price > 0 else 0.01
+            is_low_vol = (atr_pct_val < 0.012) or (base_asset in ["BTC", "ETH"])
+            min_sl_dist = current_price * (0.008 if is_low_vol else 0.010)  # 0.8% floor for low-vol/majors, 1.0% for altcoins
+            max_sl_dist = current_price * (0.022 if is_low_vol else 0.055)  # 2.2% ceiling for low-vol, 5.5% for volatile altcoins
             raw_sl_dist = atr_14 * sl_mult if atr_14 > 0 else (current_price * 0.015)
 
             # Preserve wide stop for extreme outliers (e.g. stress tests with ATR > 10% of price)
@@ -1351,20 +1355,8 @@ class RiskManager(BaseAgent):
 
             has_structure = (decision == "SHORT" and swing_high_15m > 0) or (decision == "LONG" and swing_low_15m > 0)
             if has_structure:
-                # Asset-Tier Dynamic Ceilings (Block 02 Post-Audit Patch):
-                # Tier 1 (BTC-USD, ETH-USD): base 1.65%, floor 1.20%, cap 1.75%
-                # Tier 2 (SOL-USD, BNB-USD): base 2.35%, floor 1.60%, cap 2.50%
-                # Tier 3 (ZEC-USD, HYPE-USD, LIT-USD, and other high-beta alts): base 3.10%, floor 1.95%, cap 3.25%
-                clean_sym = str(symbol or _extract_cand_field(ceo_decision, "symbol", "")).replace('/', '-').upper()
-                base_coin = clean_sym.split('-')[0].strip()
-                if base_coin in ("BTC", "ETH"):
-                    tier_base_pct, tier_min_pct, tier_max_pct = 1.65, 1.20, 1.75
-                elif base_coin in ("SOL", "BNB"):
-                    tier_base_pct, tier_min_pct, tier_max_pct = 2.35, 1.60, 2.50
-                else:
-                    tier_base_pct, tier_min_pct, tier_max_pct = 3.10, 1.95, 3.25
-
-                # 1. Dynamic Formula (Unified ATR_1h_pct contract):
+                # Continuous ATR-normalized Dynamic Structure Ceiling (Scale & Asset Invariant):
+                # Replaces hardcoded coin tiers with continuous market volatility physics:
                 # max_sl_dist_allowed = clip(1.85 * atr_1h_pct, 1.25, 3.50)
                 atr_1h_pct = get_normalized_atr_pct(market_data, current_price)
                 max_sl_dist_allowed = max(1.25, min(3.50, 1.85 * atr_1h_pct))
