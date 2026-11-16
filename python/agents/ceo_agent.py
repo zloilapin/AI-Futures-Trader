@@ -947,16 +947,14 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
                     conviction = max(conviction, 72)
 
                 conviction_for_risk = max(primary_dir_conf, float(directional_confidence))
-                if conviction < 60:
-                    if directional_confidence >= 70:
-                        trade_action = "WAIT_FOR_PULLBACK"
-                    else:
-                        trade_action = "HOLD"
-                        decision = "HOLD"
-                elif conviction >= 73:
+                if directional_confidence < 65:
+                    trade_action = "HOLD"
+                    decision = "HOLD"
+                elif conviction < 60:
+                    trade_action = "HOLD"
+                    decision = "HOLD"
+                elif entry_quality >= 73 and directional_confidence >= 75:
                     trade_action = "ENTER"
-                elif directional_confidence >= 75 and conviction < 65:
-                    trade_action = "WAIT_FOR_PULLBACK"
                 else:
                     trade_action = "REDUCE_SIZE"
                 final_status = "APPROVED_ENTER" if trade_action == "ENTER" else trade_action
@@ -1919,6 +1917,9 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
             if calculated_decision != "HOLD" and calculated_decision == retest_dir:
                 directional_confidence = max(directional_confidence, orig_conf)
 
+        ext_pen = abs(float((risk_breakdown or {}).get("price_extension", 0.0) or 0.0))
+        location_quality = max(0.0, min(100.0, 100.0 - (ext_pen * 4.0)))
+
         if math_conflict:
             calculated_decision = "HOLD"
             trade_action = "HOLD"
@@ -1926,26 +1927,24 @@ CRITICAL: Return RAW JSON ONLY. Your output MUST start immediately with '{{' and
             entry_quality = 0
             conviction = 0
             self.logger.error(f"[{self.name}] 🛑 Hard Veto: Math hallucination active. Forcing decision=HOLD, action=HOLD.")
-        elif calculated_decision == "HOLD" or directional_confidence < 60:
+        elif calculated_decision == "HOLD" or directional_confidence < 65:
+            # Case 3: Low C_dir < 65% => HOLD (No structural edge)
             trade_action = "HOLD"
         elif is_pullback_retest:
             # Retest reached target zone: do NOT re-enter WAIT_FOR_PULLBACK or HOLD
-            trade_action = "REDUCE_SIZE" if entry_quality < 73 else "ENTER"
-        elif entry_quality < 60:
-            # Late or poor entry point (overextended from EMA, extreme RSI/BB, poor R:R)
-            if directional_confidence >= 70:
-                trade_action = "WAIT_FOR_PULLBACK"
-            else:
-                trade_action = "HOLD"
-        elif directional_confidence >= 75 and (entry_quality < 65 or (risk_breakdown or {}).get("price_extension", 0) <= -10):
+            trade_action = "REDUCE_SIZE" if (entry_quality < 73 or directional_confidence < 75) else "ENTER"
+        elif location_quality < 60.0:
+            # Case 2: High C_dir >= 65% AND Low Q_loc < 60% => WAIT_FOR_PULLBACK (Overextended from value)
             trade_action = "WAIT_FOR_PULLBACK"
-        elif entry_quality >= 73:
+        elif entry_quality < 60:
+            # Poor execution quality or adverse R:R => HOLD
+            trade_action = "HOLD"
+        elif entry_quality >= 73 and directional_confidence >= 75:
+            # High conviction and high quality => full ENTER
             trade_action = "ENTER"
-        else: # 65 <= entry_quality < 73 (or 60-64 with dir_conf < 70)
+        else:
+            # Actionable trade with moderate conviction/quality => REDUCE_SIZE
             trade_action = "REDUCE_SIZE"
-
-        ext_pen = abs(float((risk_breakdown or {}).get("price_extension", 0.0) or 0.0))
-        location_quality = max(0.0, min(100.0, 100.0 - (ext_pen * 4.0)))
 
         return ScoreResult({
             "decision": calculated_decision,

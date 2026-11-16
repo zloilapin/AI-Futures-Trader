@@ -431,15 +431,6 @@ class StrategyRouter:
 
         # 0. Priority Pass for Confirmed Pullback Watchlist Retests (Protected Retests)
         if market_data.get("is_pullback_retest"):
-            # Regime Veto: Prohibit TREND_FOLLOWING pullback retest in TRANSITION regime
-            if str(detected_regime or "").upper() == "TRANSITION":
-                return StrategyProfile(
-                    False,
-                    "TRANSITION_RETEST_VETO",
-                    "NEUTRAL",
-                    "ОТКЛОНЕН (Макро-режим TRANSITION: трендовый ретест заблокирован из-за смены рыночной структуры)."
-                )
-
             retest_dir = str(
                 market_data.get("pullback_retest_direction")
                 or market_data.get("retest_direction")
@@ -580,6 +571,21 @@ class StrategyRouter:
 
         bullish_flip_eligible = is_bullish_reversal and (tech_bulls >= 2) and (candle_bull_60 or ind_bull_60)
         bearish_flip_eligible = is_bearish_reversal and (tech_bears >= 2) and (candle_bear_60 or ind_bear_60)
+
+        if bullish_flip_eligible or bearish_flip_eligible:
+            from core.config import config
+            allow_forbidden = bool(getattr(config, "ALLOW_FORBIDDEN_STRATEGIES", False))
+            is_transition_market = (str(detected_regime).upper() == "TRANSITION") or (mtf_alignment == "TRANSITION")
+            req_reversal_adx = 22.0 if is_transition_market else (22.0 if symbol.split("-")[0].upper() in ["BTC", "ETH"] else 20.0)
+            if not allow_forbidden and 0.0 < adx_14 < req_reversal_adx:
+                flip_dir = "LONG" if bullish_flip_eligible else "SHORT"
+                phase_str = "в фазе TRANSITION" if is_transition_market else "для разворота"
+                return StrategyProfile(
+                    False,
+                    "LOW_ADX_REVERSAL_VETO",
+                    "NEUTRAL",
+                    f"ОТКЛОНЕН (Анти-распил: ADX={adx_14:.1f} < {req_reversal_adx:.1f} {phase_str}: вялый рынок, разворотный импульс {flip_dir} не подтвержден)."
+                )
 
         if bullish_flip_eligible:
             return StrategyProfile(

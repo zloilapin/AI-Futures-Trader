@@ -809,3 +809,211 @@ async def test_dynamic_watchlist_revalidation_heals_legacy_risk_mismatches():
             implied_risk = 105.50 * sl_dist + (105.50 * 0.0010)
             assert implied_risk <= 1.31  # Self-healed to conform to $1.30 cap!
 
+
+# ═════════════════════════════════════════════════════════════════════════════
+# MODULE D: Pre-Debate / Retest Symmetry (Via Negativa) & Orthogonal Routing Tests
+# ═════════════════════════════════════════════════════════════════════════════
+
+def test_no_candidate_with_high_cdir_and_qloc_forced_to_pullback_with_contradictory_message():
+    """
+    Contract 1: Module 3 Orthogonal Single Source of Truth (C_dir >= 65 and Q_loc >= 60).
+    Verifies that:
+    1. A candidate with C_dir >= 65 and Q_loc >= 60 is actionable (ENTER or REDUCE_SIZE),
+       and is NOT overridden to WAIT_FOR_PULLBACK by legacy 75%/73% checks.
+    2. Any WAIT_FOR_PULLBACK status accurately reports location quality / base extension
+       and never produces self-contradictory messages like '73% < 70%' or '77% < 70%'.
+    """
+    strat = StrategyProfile(
+        has_directional_signal=True,
+        strategy_mode="TREND_FOLLOWING",
+        direction_bias="SHORT",
+        reasoning="Trend test"
+    )
+    rm = MagicMock()
+    rm._get_profile_rules.return_value = {"min_conviction": 75}
+
+    analyst_reports = [
+        {"agent_name": "Candle_Agent", "signal": "BEARISH", "confidence": 75.0},
+        {"agent_name": "Indicator_Agent", "signal": "BEARISH", "confidence": 72.0},
+    ]
+
+    # Candidate with C_dir=75, Q_loc=80, EntryQuality=73, Conviction=73
+    # Under legacy Step 3, this was erroneously converted to WAIT_FOR_PULLBACK with '73% < 75%'!
+    ceo_actionable = {
+        "decision": "SHORT",
+        "conviction": 73,
+        "directional_confidence": 75,
+        "location_quality": 80.0,
+        "entry_quality": 73,
+        "trade_action": "REDUCE_SIZE",
+        "risk_breakdown": {"price_extension": 0}
+    }
+    decision = DeterministicGuard.evaluate(
+        strategy_profile=strat,
+        ceo_proposal=ceo_actionable,
+        profile="BALANCED",
+        risk_manager=rm,
+        symbol="SOL-USD",
+        analyst_reports=analyst_reports
+    )
+
+    assert decision.decision == "SHORT"
+    assert decision.trade_action in ["ENTER", "REDUCE_SIZE"]
+    assert decision.is_actionable is True
+    assert "73% < 70%" not in (decision.guard_reason or "")
+    assert "77% < 70%" not in (decision.guard_reason or "")
+
+    # Now verify that when trade_action is genuinely WAIT_FOR_PULLBACK due to location quality < 60%:
+    ceo_pullback = {
+        "decision": "SHORT",
+        "conviction": 73,
+        "directional_confidence": 75,
+        "location_quality": 40.0,
+        "entry_quality": 73,
+        "trade_action": "WAIT_FOR_PULLBACK",
+        "risk_breakdown": {"price_extension": -15.0}
+    }
+    decision_pb = DeterministicGuard.evaluate(
+        strategy_profile=strat,
+        ceo_proposal=ceo_pullback,
+        profile="BALANCED",
+        risk_manager=rm,
+        symbol="SOL-USD",
+        analyst_reports=analyst_reports
+    )
+    assert decision_pb.trade_action == "WAIT_FOR_PULLBACK"
+    assert decision_pb.guard_status == "PULLBACK_WATCHLIST"
+    assert "73% < 70%" not in decision_pb.guard_reason
+    assert "77% < 70%" not in decision_pb.guard_reason
+    assert "Location quality 40.0% < 60%" in decision_pb.guard_reason or "Location quality (40.0% < 60%)" in decision_pb.guard_reason
+
+
+def test_structurally_valid_watchlist_retest_in_transition_passes_router():
+    """
+    Contract 2: Resolve the TRANSITION Retest Deadlock via Structural Validity.
+    Verifies that a watchlist retest during macro_regime == 'TRANSITION':
+    1. Is NOT killed by a blanket TRANSITION_RETEST_VETO.
+    2. Passes to the deterministic guard when structurally valid (invalidation unbreached,
+       1H trend not opposed, no opposing reversal, ADX >= 22.0).
+    """
+    market_data = {
+        "is_pullback_retest": True,
+        "pullback_retest_direction": "LONG",
+        "invalidation_price": 95.0,
+        "price_data": {"current_price": 100.0},  # Unbreached (> 95.0)
+        "multi_timeframe": {
+            "trend_1h": "BULLISH",
+            "trend_4h": "NEUTRAL",
+            "mtf_alignment": "TRANSITION"
+        },
+        "indicators": {
+            "adx_14": 24.5,  # >= 22.0 required for TRANSITION
+            "bb_position_pct": 50.0,
+            "rsi_14": 52.0
+        },
+        "structural_reversal": {
+            "is_bullish_reversal": False,
+            "is_bearish_reversal": False
+        }
+    }
+
+    analyst_reports = [
+        {"agent_name": "Candle_Agent", "signal": "BULLISH", "confidence": 70.0},
+        {"agent_name": "Indicator_Agent", "signal": "BULLISH", "confidence": 65.0},
+    ]
+
+    macro_cache = {
+        "regime_verdict": {"regime": "TRANSITION", "range_score": 40.0, "vol_score": 12.0}
+    }
+
+    profile = StrategyRouter.evaluate(
+        symbol="SOL-USD",
+        market_data=market_data,
+        valid_reports=analyst_reports,
+        macro_cache=macro_cache,
+        detected_regime="TRANSITION",
+        profile="BALANCED"
+    )
+
+    assert profile.has_directional_signal is True
+    assert profile.direction_bias == "LONG"
+    assert profile.strategy_mode == "TREND_FOLLOWING"
+    assert "TRANSITION_RETEST_VETO" not in profile.strategy_mode
+
+
+def test_low_adx_chop_rejected_predebate_by_strategy_router():
+    """
+    Contract 3: Enforce Pre-Debate ADX Gate Symmetry (Via Negativa).
+    Verifies that:
+    1. In dead chop (ADX = 11.0–13.8), REVERSAL_FLIP (CHoCH) is rejected pre-debate
+       at StrategyRouter (has_directional_signal=False, LOW_ADX_REVERSAL_VETO), costing 0 LLM tokens
+       and causing 0 PullbackWatchlist pollution.
+    2. When ADX is healthy (ADX >= 20.0/22.0), REVERSAL_FLIP is approved as REVERSAL_TREND_SHIFT.
+    """
+    analyst_reports = [
+        {"agent_name": "Candle_Agent", "signal": "BULLISH", "confidence": 75.0},
+        {"agent_name": "Indicator_Agent", "signal": "BULLISH", "confidence": 70.0},
+    ]
+
+    macro_cache = {
+        "regime_verdict": {"regime": "RANGE_CHOPPY", "range_score": 60.0, "vol_score": 8.0}
+    }
+
+    # Case A: Dead chop with ADX = 12.5 (Sessions 1-3 flat noise)
+    market_data_dead_adx = {
+        "is_pullback_retest": False,
+        "price_data": {"current_price": 3.10},
+        "multi_timeframe": {
+            "trend_1h": "BEARISH",
+            "trend_4h": "BEARISH",
+            "mtf_alignment": "FULL_ALIGNMENT"
+        },
+        "indicators": {
+            "current_price": 3.10,
+            "ema_20_15m": 3.02,
+            "ema_20_1h": 3.05,
+            "vwap": 3.04,
+            "swing_high_15m": 3.08,
+            "macro_box_pos_pct": 28.0,
+            "rsi_15m": 57.0,
+            "higher_low": True,
+            "atr_14": 0.08,
+            "adx_14": 12.5,  # Dead chop ADX!
+            "bb_position_pct": 50.0,
+            "rsi_14": 52.0
+        }
+    }
+
+    profile_dead = StrategyRouter.evaluate(
+        symbol="SOL-USD",
+        market_data=market_data_dead_adx,
+        valid_reports=analyst_reports,
+        macro_cache=macro_cache,
+        detected_regime="TRANSITION",
+        profile="BALANCED"
+    )
+
+    # Must be deterministically vetoed pre-debate!
+    assert profile_dead.has_directional_signal is False
+    assert profile_dead.strategy_mode == "LOW_ADX_REVERSAL_VETO"
+    assert "ADX=12.5" in profile_dead.reasoning
+
+    # Case B: Healthy momentum with ADX = 25.0
+    market_data_healthy_adx = dict(market_data_dead_adx)
+    market_data_healthy_adx["indicators"] = dict(market_data_dead_adx["indicators"])
+    market_data_healthy_adx["indicators"]["adx_14"] = 25.0  # Healthy trend momentum
+
+    profile_healthy = StrategyRouter.evaluate(
+        symbol="SOL-USD",
+        market_data=market_data_healthy_adx,
+        valid_reports=analyst_reports,
+        macro_cache=macro_cache,
+        detected_regime="TRANSITION",
+        profile="BALANCED"
+    )
+
+    assert profile_healthy.has_directional_signal is True
+    assert profile_healthy.strategy_mode == "REVERSAL_TREND_SHIFT"
+    assert profile_healthy.direction_bias == "LONG"
+
+

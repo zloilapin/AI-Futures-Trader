@@ -658,6 +658,10 @@ class DeterministicGuard:
         raw_trade_action = str(ceo_proposal.get("trade_action", "ENTER" if raw_conviction >= min_conv else "HOLD")).upper()
         dir_conf = int(ceo_proposal.get("directional_confidence", raw_conviction) or 0)
         entry_qual = int(ceo_proposal.get("entry_quality", raw_conviction) or 0)
+        risk_bd = (ceo_proposal.get("risk_breakdown") or {})
+        ext_pen = abs(float(risk_bd.get("price_extension", 0.0) or 0.0))
+        calc_q_loc = max(0.0, min(100.0, 100.0 - (ext_pen * 4.0)))
+        q_loc = float(ceo_proposal.get("location_quality", calc_q_loc) or calc_q_loc)
         reasoning_en = ceo_proposal.get("reasoning_en", ceo_proposal.get("reasoning", ""))
         reasoning_ru = ceo_proposal.get("reasoning_ru", "")
 
@@ -982,7 +986,12 @@ class DeterministicGuard:
                 is_actionable = False
                 guard_status = "PULLBACK_WATCHLIST"
                 rejection_tag = "WAIT_FOR_PULLBACK"
-                guard_reason = f"WAIT_FOR_PULLBACK: Цена оторвана от базы (Качество входа {entry_qual}% < 70% при уверенности тренда {dir_conf}%). Сетап зарегистрирован в Pullback Watchlist для непрерывного мониторинга отката."
+                if q_loc < 60.0:
+                    guard_reason = f"WAIT_FOR_PULLBACK: Цена оторвана от базы (Location quality {q_loc:.1f}% < 60% при уверенности тренда {dir_conf}%). Сетап зарегистрирован в Pullback Watchlist для непрерывного мониторинга отката."
+                elif entry_qual < 60.0:
+                    guard_reason = f"WAIT_FOR_PULLBACK: Низкое качество входа ({entry_qual}% < 60% при уверенности тренда {dir_conf}%). Сетап зарегистрирован в Pullback Watchlist."
+                else:
+                    guard_reason = f"WAIT_FOR_PULLBACK: Режим ожидания отката (Location quality {q_loc:.1f}%, Entry quality {entry_qual}% при уверенности тренда {dir_conf}%). Сетап зарегистрирован в Pullback Watchlist."
         elif entry_qual < 60:
             # Rule: Не снижать порог с 60% просто ради увеличения числа сделок.
             # Если вход запоздал, правильное действие — дождаться нового сетапа или пропустить сделку, а не принудительно открыть позицию.
@@ -1299,26 +1308,6 @@ class DeterministicGuard:
                 rejection_tag = "WAIT_FOR_PULLBACK"
                 guard_reason = f"Location quality ({q_loc:.1f}% < 60%) extended from value. Routed to WAIT_FOR_PULLBACK at calculated P*."
 
-        # ── Step 3: Hard ban on immediate market entry for REDUCE_SIZE / weak conviction / poor quality ──
-        # Only signals with ENTER (conviction >= 75%, entry_quality >= 73%) are allowed for immediate market execution.
-        if is_actionable and decision in ["LONG", "SHORT"]:
-            is_anti_bot_override = bool(getattr(config, "ANTI_BOT_MODE", False) and strategy_mode == "MEAN_REVERSION")
-            is_disputed = bool(ceo_proposal.get("disputed_arbitration", False))
-            if not is_anti_bot_override and not is_disputed and not is_pullback_retest and not volume_explosion_triggered:
-                if trade_action == "REDUCE_SIZE" or (entry_qual < 73.0 and conviction < 75.0):
-                    is_actionable = False
-                    guard_status = "PULLBACK_WATCHLIST"
-                    trade_action = "WAIT_FOR_PULLBACK"
-                    rejection_tag = "WAIT_FOR_PULLBACK"
-                    guard_reason = (
-                        f"WAIT_FOR_PULLBACK: Сигнал {decision} требует подтверждения отката "
-                        f"(Conviction={conviction:.0f}% {'< 75%' if conviction < 75.0 else 'OK'}, "
-                        f"EntryQuality={entry_qual:.1f}% {'< 73%' if entry_qual < 73.0 else 'OK'}, "
-                        f"Action={trade_action}). Немедленный рыночный вход запрещен во избежание открытия на дне/вершине импульса. "
-                        f"Сетап зарегистрирован в Pullback Watchlist."
-                    )
-                    if logger:
-                        logger.info(f"[System_Core] ⏸️ {guard_reason}")
 
         # Synchronize back to ceo_proposal dict for backward compatibility
         if symbol:
