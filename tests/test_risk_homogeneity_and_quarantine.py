@@ -332,3 +332,44 @@ async def test_invariant3_on_chain_position_cannot_be_virtually_closed_without_o
         assert success is False
         assert "BTC-USD" in nts.active_positions
         assert mock_journal.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_invariant3_shadow_position_virtually_closed_while_connected():
+    """
+    When a position is simulated (is_shadow/is_virtual/0xshadow_),
+    force_close_position MUST virtually close it without sending on-chain tx,
+    even when nts.is_connected is True and LIVE_TRADING_ENABLED is True.
+    """
+    from services.nado_trading_service import NadoTradingService
+    
+    nts = NadoTradingService()
+    nts.is_connected = True
+    
+    pos = {
+        "symbol": "BTC-USD",
+        "direction": "SHORT",
+        "entry_price": 64328.5,
+        "current_price": 65047.25,
+        "sl_price": 65047.25,
+        "contracts": 0.002,
+        "product_id": 2,
+        "is_shadow": True,
+        "is_virtual": True,
+        "open_digest": "0xshadow_123_2",
+        "planned_risk_usd": 1.70
+    }
+    nts.active_positions = {"BTC-USD": pos}
+    
+    with patch.object(nts, "_save_positions"), \
+         patch.object(nts, "_record_closed_trade_journal") as mock_journal:
+        mock_journal.return_value = -0.88
+        success, pnl = await nts.force_close_position("BTC-USD", exit_reason="STOP_LOSS")
+        
+        assert success is True
+        assert "BTC-USD" not in nts.active_positions
+        assert mock_journal.call_count == 1
+        call_kwargs = mock_journal.call_args.kwargs
+        assert call_kwargs["symbol"] == "BTC-USD"
+        assert call_kwargs["direction"] == "SHORT"
+

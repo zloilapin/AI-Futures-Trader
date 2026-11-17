@@ -3306,6 +3306,48 @@ class NadoTradingService(BaseTradingService):
                     keys_to_remove.append(symbol)
                     continue
 
+                # Auto-resolve shadow or simulated pending trades that inadvertently entered reconciliation
+                is_pending_shadow = bool(
+                    pending.get("is_shadow")
+                    or pending.get("is_virtual")
+                    or any(str(d).startswith("0xshadow_") for d in pending.get("excluded_digests", []))
+                    or str(pending.get("open_digest", "")).startswith("0xshadow_")
+                )
+                if is_pending_shadow:
+                    logger.info(f"[NadoTradingService] 👻 Auto-reconciling shadow trade for {symbol} (simulated execution).")
+                    exit_px = float(pending.get("exit_price") or pending.get("sl_price") or pending.get("current_price") or entry_price)
+                    is_long = pending.get("direction", "LONG") == "LONG"
+                    pnl_raw = (exit_px - entry_price) * expected_contracts if is_long else (entry_price - exit_px) * expected_contracts
+                    fee_est = expected_contracts * exit_px * 0.0005
+                    net_pnl = pnl_raw - fee_est
+                    r_rec = self._record_closed_trade_journal(
+                        symbol=symbol,
+                        direction=pending.get("direction", "LONG"),
+                        entry_price=entry_price,
+                        exit_price=exit_px,
+                        net_pnl=net_pnl,
+                        pos_data=pending,
+                        fee=fee_est,
+                        triggered_by="STOP_LOSS"
+                    )
+                    resolved_reports.append({
+                        "symbol": symbol,
+                        "direction": pending.get("direction", "LONG"),
+                        "triggered_by": "STOP_LOSS",
+                        "close_reason": "STOP_LOSS",
+                        "entry_price": entry_price,
+                        "exit_price": exit_px,
+                        "gross_pnl_usd": pnl_raw,
+                        "net_pnl_usd": net_pnl,
+                        "pnl_usd": net_pnl,
+                        "total_fee_usd": fee_est,
+                        "realized_r": r_rec,
+                        "planned_risk_usd": float(pending.get("planned_risk_usd") or 1.0),
+                        "pnl_source": "SIMULATED"
+                    })
+                    keys_to_remove.append(symbol)
+                    continue
+
                 # Track attempts & age
                 attempts = pending.get("attempts", 0) + 1
                 pending["attempts"] = attempts
@@ -3726,21 +3768,29 @@ class NadoTradingService(BaseTradingService):
         # a virtual exit trigger (TIME_STOP_BE, SENTINEL_CLOSE) must NEVER remove the position
         # from active_positions or append a record to trade_journal.json unless the corresponding
         # on-chain market close order has actually succeeded on Nado CLOB.
-        is_explicitly_virtual = bool(pos.get("is_virtual") or pos.get("is_shadow"))
-        is_on_chain_position = bool(
-            pos.get("sender")
-            or pos.get("product_id")
-            or pos.get("native_triggers_placed")
-            or "restored" in str(pos.get("original_thesis", "")).lower()
+        is_explicitly_virtual = bool(
+            pos.get("is_virtual")
+            or pos.get("is_shadow")
+            or str(pos.get("open_digest", "")).startswith("0xshadow_")
         )
-        is_live_trading = bool(
+        has_real_on_chain_markers = bool(
+            pos.get("native_triggers_placed")
+            or (pos.get("sender") and not str(pos.get("open_digest", "")).startswith("0xshadow_") and not is_explicitly_virtual)
+            or ("restored" in str(pos.get("original_thesis", "")).lower() and not is_explicitly_virtual)
+        )
+        is_live_trading_configured = bool(
             getattr(config, "NADO_LIVE_TRADING_ENABLED", False)
             or getattr(config, "LIVE_TRADING_ENABLED", False)
-            or getattr(self, "is_connected", False)
         )
+        is_on_chain_position = has_real_on_chain_markers or (is_live_trading_configured and not is_explicitly_virtual and not getattr(config, "SHADOW_MODE", False))
 
-        # Virtual close is strictly permitted ONLY if explicitly virtual and NOT an on-chain position and NOT live trading
-        is_virtual_allowed = (is_explicitly_virtual or getattr(config, "SHADOW_MODE", False)) and not is_on_chain_position and not is_live_trading
+        # Virtual close is strictly permitted if explicitly virtual/shadow,
+        # or in global SHADOW_MODE without active on-chain triggers.
+        # Genuine on-chain positions during live trading must execute through Nado CLOB (Invariant 3).
+        if is_explicitly_virtual or (getattr(config, "SHADOW_MODE", False) and not pos.get("native_triggers_placed")):
+            is_virtual_allowed = True
+        else:
+            is_virtual_allowed = not is_on_chain_position and not is_live_trading_configured
 
         if is_virtual_allowed:
             if not pos:
